@@ -1,6 +1,5 @@
 use nix::sys::wait::waitpid;
 use nix::unistd::{ForkResult, execvp, fork};
-use std::env::{current_dir, set_current_dir};
 use std::ffi::CString;
 use std::io::{self, Write};
 use std::process;
@@ -77,11 +76,14 @@ enum BuiltinResult {
 fn run_builtin(command: &Command) -> Option<BuiltinResult> {
     match command.program.as_str() {
         "help" => {
-            println!("Simple shell builtins:");
+            println!("ecsh builtins:");
             println!("  help - show this help message");
             println!("  cd - change current working directory");
             println!("  pwd - print working directory");
             println!("  exit - exit the shell");
+            println!("  env - print environment variables");
+            println!("  export KEY=value - set environment variable");
+            println!("  unset KEY - remove environment variable");
             Some(BuiltinResult::Continue)
         }
         "exit" => Some(BuiltinResult::Exit),
@@ -90,13 +92,25 @@ fn run_builtin(command: &Command) -> Option<BuiltinResult> {
             Some(BuiltinResult::Continue)
         }
         "pwd" => {
-            match current_dir() {
+            match std::env::current_dir() {
                 Ok(path) => println!("{}", path.display()),
                 Err(err) => {
                     eprintln!("pwd: {}", err);
                     let _ = io::stderr().flush();
                 }
             };
+            Some(BuiltinResult::Continue)
+        }
+        "env" => {
+            run_env();
+            Some(BuiltinResult::Continue)
+        }
+        "export" => {
+            run_export(command);
+            Some(BuiltinResult::Continue)
+        }
+        "unset" => {
+            run_unset(command);
             Some(BuiltinResult::Continue)
         }
         _ => None,
@@ -126,10 +140,79 @@ fn run_cd(command: &Command) {
         command.args[0].clone()
     };
 
-    if let Err(err) = set_current_dir(&dir) {
+    if let Err(err) = std::env::set_current_dir(&dir) {
         eprintln!("cd: {}: {}", dir, err);
         let _ = io::stderr().flush();
     }
+}
+
+fn run_env() {
+    for (key, value) in std::env::vars() {
+        println!("{}={}", key, value);
+    }
+}
+
+// 先只支持这种格式: export KEY=value
+fn run_export(command: &Command) {
+    if command.args.len() != 1 {
+        eprintln!("export: usage: export KEY=value");
+        let _ = io::stderr().flush();
+        return;
+    }
+
+    // split_once只在第一个位置分开，和这里功能一样
+    let Some((key, value)) = command.args[0].split_once('=') else {
+        eprintln!("export: usage: export KEY=value");
+        let _ = io::stderr().flush();
+        return;
+    };
+
+    if key.is_empty() {
+        eprintln!("export: usage: export KEY=value");
+        let _ = io::stderr().flush();
+        return;
+    }
+
+    if !is_valid_env_key(key) {
+        eprintln!("export: invalid variable name: {}", key);
+        let _ = io::stderr().flush();
+        return;
+    }
+
+    unsafe { std::env::set_var(key, value) };
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+
+    // Empty keys do not match the shell-style environment variable name rule.
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn run_unset(command: &Command) {
+    if command.args.len() != 1 {
+        eprintln!("unset: usage: unset KEY");
+        let _ = io::stderr().flush();
+        return;
+    }
+
+    // 先校验变量名，避免 remove_var 在非法变量名上 panic。
+    let key = &command.args[0];
+    if !is_valid_env_key(key) {
+        eprintln!("unset: invalid variable name: {}", key);
+        let _ = io::stderr().flush();
+        return;
+    }
+
+    unsafe { std::env::remove_var(key) };
 }
 
 fn run_external(command: &Command) -> ShellResult<()> {

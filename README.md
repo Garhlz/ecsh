@@ -16,8 +16,12 @@ from the parent shell process.
   - `exit`: exit the shell
   - `cd`: change the shell process current working directory
   - `pwd`: print the shell process current working directory
+  - `env`: print current environment variables
+  - `export KEY=value`: set an environment variable in the shell process
+  - `unset KEY`: remove an environment variable from the shell process
 - External command execution through `fork`, `execvp`, and `waitpid`
 - Invalid external command reporting without terminating the shell
+- Environment variable updates inherited by external commands
 - Required command lifecycle messages:
   - `<command> starting...`
   - `<command> ending.`
@@ -38,6 +42,9 @@ pwd
 cd /tmp
 pwd
 echo hello
+export ECSH_NAME=elaine
+printenv ECSH_NAME
+unset ECSH_NAME
 ls
 exit
 ```
@@ -60,6 +67,11 @@ placing `program` at `argv[0]`.
 Empty input is treated as `None` instead of an error, so pressing Enter simply
 starts the next prompt.
 
+Environment variable built-ins run in the shell process because their effects
+must persist after the command returns. `export` and `unset` validate variable
+names with the `[A-Za-z_][A-Za-z0-9_]*` rule before calling Rust's environment
+mutation APIs.
+
 ## Development Plan
 
 ### Stage 1: Basic Command Execution
@@ -70,15 +82,15 @@ starts the next prompt.
 - [x] Execute external commands
 - [x] Report invalid commands
 - [x] Implement `cd` and `pwd`
+- [x] Add environment-related built-ins:
+  - `env`
+  - `export`
+  - `unset`
 
 ### Stage 2: Unix Connectors
 
 - [ ] Support a simple two-command pipe with `||`
 - [ ] Redirect standard input and output
-- [ ] Add environment-related built-ins:
-  - `env`
-  - `export`
-  - `unset`
 
 ### Stage 3: Interactive Shell Behavior
 
