@@ -25,6 +25,10 @@
 - `clear` 会跳过命令生命周期提示，避免清屏后立刻输出 `starting/ending`
 - 支持标准 Unix 管道 `|`，例如 `echo hello | grep h`
 - 管道会为每个外部命令创建子进程，并使用匿名 pipe 连接相邻命令
+- 管道中支持 `help`、`pwd`、`env` 这类纯输出型内置命令
+- 管道执行时会打印 `pipeline starting...` 和 `pipeline ending.`
+- 命令执行会转换为内部状态码，为后续 `$?`、`&&`、`||` 等功能预留基础
+- 错误输出统一通过 diagnostics 模块打印并刷新 `stderr`
 - 实验要求的命令生命周期提示：
   - `<command> starting...`
   - `<command> ending.`
@@ -52,12 +56,23 @@ clear
 ls
 echo hello | grep h
 printf "a\nb\n" | grep b
+pwd | cat
+env | grep PATH
 exit
 ```
 
 ## 实现说明
 
-当前 shell 使用下面的数据结构表示一条命令：
+当前代码按职责拆分为几个模块：
+
+- `main.rs`：交互式主循环
+- `types.rs`：命令、管道、解析结果和执行状态类型
+- `parser.rs`：普通命令和管道解析
+- `builtin.rs`：内置命令识别和执行
+- `executor.rs`：外部命令、管道、fork/exec/wait 逻辑
+- `diagnostics.rs`：统一错误输出
+
+shell 使用下面的数据结构表示一条命令：
 
 ```rust
 struct Command {
@@ -83,8 +98,14 @@ struct Command {
 `dup2_stdin` / `dup2_stdout` 绑定标准输入输出。父进程在创建完所有子进程后
 关闭自己的 pipe 文件描述符，并等待所有子进程结束。
 
-当前版本的管道仍然是简化实现：pipeline 中暂不支持内置命令，也暂不处理引号，
-所以 `echo "a|b"` 会被错误地按 `|` 切分。
+当前版本的管道仍然是简化实现：pipeline 中只支持 `help`、`pwd`、`env` 这类
+纯输出型内置命令；`cd`、`export`、`unset`、`exit`、`clear` 这类会改变 shell
+状态或强交互行为的内置命令暂不支持出现在管道中。解析器也暂不处理引号，所以
+`echo "a|b"` 会被错误地按 `|` 切分。
+
+执行层使用 `CommandStatus` 表示命令退出状态，用 `CommandFlow` 区分“继续运行”
+和 “exit 请求退出 shell”。当前状态码已经会从 `waitpid` 的 `WaitStatus` 转换出来，
+但还没有保存为 `$?` 变量。
 
 ## 开发计划
 
@@ -105,6 +126,9 @@ struct Command {
 ### 阶段 2：Unix 连接机制
 
 - [x] 支持标准管道 `|`
+- [x] 支持部分纯输出型内置命令进入管道
+- [x] 拆分 parser、builtin、executor、types 和 diagnostics 模块
+- [x] 引入基础命令状态模型
 - [ ] 支持标准输入和标准输出重定向
 
 ### 阶段 3：交互式 shell 行为

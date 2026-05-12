@@ -9,6 +9,7 @@ It is intended as handoff context for another AI assistant or future session.
 - Rust binary crate name: `ecsh`
 - Purpose: a simple Unix-like shell for an operating systems lab.
 - Main file: `src/main.rs`
+- Module layout: `types.rs`, `parser.rs`, `builtin.rs`, `executor.rs`, `diagnostics.rs`
 - User language preference: Chinese explanations are preferred.
 - The user is learning Rust and OS process APIs, and often asks for guidance instead of direct implementation.
 
@@ -75,6 +76,10 @@ Current shell supports:
 - `export A=b=c` is intended to work by splitting only once at `=`.
 - `unset NOT_EXIST` should not be an error, but invalid names like `unset 1=1` must not panic.
 - Standard pipeline execution with `|` for external commands.
+- Read-only built-ins `help`, `pwd`, and `env` are allowed in pipelines.
+- Pipeline execution prints `pipeline starting...` and `pipeline ending.`.
+- Command execution now has a lightweight status model using `CommandStatus` and `CommandFlow`.
+- Error printing is centralized through `diagnostics::print_error`, which prints to stderr and flushes it.
 - `.gitignore` ignores `/target`, `.vscode/`, and `hello*`.
 
 ## Design Decisions So Far
@@ -89,6 +94,15 @@ struct Command {
 ```
 
 `args` intentionally does not include the program name. `argv[0]` is reconstructed during exec.
+
+### Module Layout
+
+- `src/main.rs`: interactive loop and dispatch based on `ParsedLine`.
+- `src/types.rs`: shared structs and enums such as `Command`, `Pipeline`, `ParsedLine`, `CommandStatus`, and `CommandFlow`.
+- `src/parser.rs`: input parsing for simple commands and pipelines.
+- `src/builtin.rs`: builtin command detection and builtin execution.
+- `src/executor.rs`: command execution, pipeline execution, fork/exec/wait handling, and status conversion.
+- `src/diagnostics.rs`: centralized stderr printing through `print_error`.
 
 ### Parsing
 
@@ -131,21 +145,26 @@ Use `commands`, not `programs`, because each element is a complete command.
 
 ### Built-ins in Pipeline
 
-First version should not support built-ins in pipelines.
+Pipeline execution allows only pure output built-ins:
+
+- `help`
+- `pwd`
+- `env`
+
+State-changing or interactive built-ins are rejected in pipelines:
+
+- `cd`
+- `export`
+- `unset`
+- `exit`
+- `clear`
 
 Reason:
 
-- Pipeline elements normally execute in child processes.
-- Built-ins such as `cd`, `export`, `unset`, and `exit` affect shell state and would not affect the parent shell if run in a child.
-- Simpler first version: reject any pipeline containing a built-in.
-
-Recommended helper:
-
-```rust
-fn is_builtin(command: &Command) -> bool
-```
-
-Use it both for execution dispatch and pipeline validation.
+- Pipeline elements run in child processes.
+- `cd`, `export`, and `unset` would not affect the parent shell when run in a child.
+- `exit` should not exit the parent shell from inside a pipeline.
+- `clear` is an interactive terminal command and is not meaningful as a pipeline producer.
 
 ### External Execution Refactor
 
@@ -160,29 +179,45 @@ Better split:
 
 - `build_c_argv(command) -> ShellResult<Vec<CString>>`
 - `exec_external_or_exit(command) -> !`
-- `run_external(command) -> ShellResult<()>` for the single-command path only.
+- `run_external(command) -> ShellResult<CommandStatus>` for the single-command path only.
 
 Pipeline children should call `exec_external_or_exit(command)` after fd setup.
 
+### Execution Status
+
+`CommandStatus { code: i32 }` represents the shell-level exit status of a command.
+
+`CommandFlow` separates command status from shell control flow:
+
+- `CommandFlow::Continue(status)`: command finished, continue the shell loop.
+- `CommandFlow::Exit(status)`: `exit` builtin requested shell termination.
+
+`waitpid` results are converted from `WaitStatus`:
+
+- `Exited(_, code)` becomes `CommandStatus::new(code)`.
+- `Signaled(_, signal, _)` becomes `CommandStatus::new(128 + signal as i32)`.
+- Other wait states currently become `CommandStatus::failure()`.
+
 ## Current Pipeline Status
 
-The current `src/main.rs` implements standard `|` pipelines for external commands.
+The current `src/executor.rs` implements standard `|` pipelines for external commands and selected output-only built-ins.
 
 Already handled:
 
 - `main_loop` continues to the next prompt after a pipeline, so pipeline input is not executed again as a normal command.
-- Built-ins are rejected in pipelines before forking.
+- Unsupported built-ins are rejected in pipelines before forking.
 - Parent process drops pipe fds before waiting for children.
 - Child process exits on `dup2_stdin` / `dup2_stdout` errors instead of returning to shell logic.
 - Child process closes inherited pipe fds after `dup2_stdin` / `dup2_stdout` and before `execvp`.
-- `exit` inside a pipeline does not exit the parent shell because built-ins are rejected.
+- `help`, `pwd`, and `env` can run in pipeline child processes.
+- `exit` inside a pipeline does not exit the parent shell because it is rejected.
 
 Current limitations:
 
 - No quote-aware parsing, so `echo "a|b"` is split incorrectly.
-- Built-ins in pipelines are not supported.
+- Only `help`, `pwd`, and `env` are supported in pipelines.
 - Pipeline command lifecycle messages are not printed per command.
-- Pipeline exit status is not propagated as shell status.
+- Pipeline returns a `CommandStatus`, but the shell does not yet store it as `$?`.
 
 ## Pipeline Algorithm
 
