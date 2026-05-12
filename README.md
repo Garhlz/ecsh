@@ -19,9 +19,11 @@ from the parent shell process.
   - `env`: print current environment variables
   - `export KEY=value`: set an environment variable in the shell process
   - `unset KEY`: remove an environment variable from the shell process
+  - `clear`: clear the terminal screen
 - External command execution through `fork`, `execvp`, and `waitpid`
 - Invalid external command reporting without terminating the shell
 - Environment variable updates inherited by external commands
+- Quiet handling for `clear` so it does not print command lifecycle messages
 - Required command lifecycle messages:
   - `<command> starting...`
   - `<command> ending.`
@@ -45,6 +47,7 @@ echo hello
 export ECSH_NAME=elaine
 printenv ECSH_NAME
 unset ECSH_NAME
+clear
 ls
 exit
 ```
@@ -72,6 +75,10 @@ must persist after the command returns. `export` and `unset` validate variable
 names with the `[A-Za-z_][A-Za-z0-9_]*` rule before calling Rust's environment
 mutation APIs.
 
+`clear` writes ANSI escape sequences directly to the terminal and skips command
+lifecycle messages, so it behaves more like an interactive shell command.
+Scrollback clearing depends on terminal support.
+
 ## Development Plan
 
 ### Stage 1: Basic Command Execution
@@ -86,6 +93,7 @@ mutation APIs.
   - `env`
   - `export`
   - `unset`
+- [x] Implement `clear` as a quiet interactive built-in
 
 ### Stage 2: Unix Connectors
 

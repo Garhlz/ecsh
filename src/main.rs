@@ -34,7 +34,15 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
             None => continue,
         };
 
-        println!("{} starting...", &command.program);
+        fn should_print_lifecycle(command: &Command) -> bool {
+            command.program != "clear"
+        }
+
+        let print_lifecycle = should_print_lifecycle(&command);
+
+        if print_lifecycle {
+            println!("{} starting...", &command.program);
+        }
 
         // TODO 这里目前还十分简陋
         let should_exit = match run_builtin(&command) {
@@ -50,8 +58,9 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        println!("{} ending.", &command.program);
-
+        if print_lifecycle {
+            println!("{} ending.", &command.program);
+        }
         if should_exit {
             break;
         }
@@ -84,6 +93,7 @@ fn run_builtin(command: &Command) -> Option<BuiltinResult> {
             println!("  env - print environment variables");
             println!("  export KEY=value - set environment variable");
             println!("  unset KEY - remove environment variable");
+            println!("  clear - clear the terminal screen");
             Some(BuiltinResult::Continue)
         }
         "exit" => Some(BuiltinResult::Exit),
@@ -111,6 +121,10 @@ fn run_builtin(command: &Command) -> Option<BuiltinResult> {
         }
         "unset" => {
             run_unset(command);
+            Some(BuiltinResult::Continue)
+        }
+        "clear" => {
+            run_clear();
             Some(BuiltinResult::Continue)
         }
         _ => None,
@@ -213,6 +227,12 @@ fn run_unset(command: &Command) {
     }
 
     unsafe { std::env::remove_var(key) };
+}
+
+// clear 清除当前屏幕，scrollback 是否清除取决于终端
+fn run_clear() {
+    print!("\x1b[2J\x1b[3J\x1b[H");
+    let _ = io::stdout().flush();
 }
 
 fn run_external(command: &Command) -> ShellResult<()> {
