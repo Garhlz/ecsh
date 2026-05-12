@@ -1,5 +1,5 @@
 [package]
-name = "simple-shell-rust"
+name = "ecsh"
 version = "0.1.0"
 edition = "2024"
 
