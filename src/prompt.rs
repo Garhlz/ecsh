@@ -98,9 +98,5 @@ fn format_host() -> String {
 }
 
 fn color_prefix<'a>(use_color: bool, color: &'a str) -> &'a str {
-    if use_color {
-        color
-    } else {
-        ""
-    }
+    if use_color { color } else { "" }
 }
