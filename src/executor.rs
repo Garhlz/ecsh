@@ -1,10 +1,10 @@
-use crate::builtin::{BuiltinResult, builtin_kind, is_builtin_allowed_in_pipeline, run_builtin};
+use crate::builtin::{builtin_kind, is_builtin_allowed_in_pipeline, run_builtin};
 use crate::diagnostics::print_error;
 use crate::redirection::{
     apply_redirection_in_shell, flush_standard_streams, handle_redirection_or_exit,
     restore_redirection,
 };
-use crate::types::{Command, CommandFlow, CommandStatus, Pipeline, ShellResult};
+use crate::types::{Command, CommandFlow, CommandStatus, Pipeline, ShellResult, ShellState};
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, dup2_stdin, dup2_stdout, execvp, fork, pipe};
 use std::ffi::CString;
@@ -12,7 +12,7 @@ use std::process;
 
 // ===== 入口层 =====
 
-pub fn run_command(command: &Command) -> ShellResult<CommandFlow> {
+pub fn run_command(command: &Command, state: &mut ShellState) -> ShellResult<CommandFlow> {
     let print_lifecycle = command.program != "clear";
     // 实验要求每条命令打印 starting/ending。`clear` 是交互式清屏命令，
     // 如果清屏后立刻打印 ending，用户体验会比较奇怪，因此单独跳过。
@@ -22,9 +22,8 @@ pub fn run_command(command: &Command) -> ShellResult<CommandFlow> {
 
     let flow = if builtin_kind(command).is_some() {
         // 内置命令在 shell 进程中执行，需要使用专门的重定向恢复逻辑。
-        match run_builtin_with_redirection(command) {
-            Ok(BuiltinResult::Continue) => CommandFlow::Continue(CommandStatus::success()),
-            Ok(BuiltinResult::Exit) => CommandFlow::Exit(CommandStatus::success()),
+        match run_builtin_with_redirection(command, state) {
+            Ok(flow) => flow,
             Err(err) => {
                 print_error(format!("{}: {}", command.program, err));
                 CommandFlow::Continue(CommandStatus::failure())
@@ -49,7 +48,7 @@ pub fn run_command(command: &Command) -> ShellResult<CommandFlow> {
     Ok(flow)
 }
 
-pub fn run_pipeline(pipeline: &Pipeline) -> ShellResult<CommandStatus> {
+pub fn run_pipeline(pipeline: &Pipeline, state: &mut ShellState) -> ShellResult<CommandStatus> {
     println!("pipeline starting...");
 
     // 当前仅允许纯输出型内置命令进入管道。
@@ -125,8 +124,13 @@ pub fn run_pipeline(pipeline: &Pipeline) -> ShellResult<CommandStatus> {
                 // 允许出现在管道中的内置命令在子进程中直接执行并退出。
                 if let Some(kind) = builtin_kind(command) {
                     if is_builtin_allowed_in_pipeline(kind) {
-                        run_builtin(command);
-                        process::exit(0);
+                        let flow = run_builtin(command, state)
+                            .expect("pipeline built-in should have a builtin result");
+                        match flow {
+                            CommandFlow::Continue(status) | CommandFlow::Exit(status) => {
+                                process::exit(status.code)
+                            }
+                        }
                     }
 
                     print_error(format!(
@@ -157,10 +161,13 @@ pub fn run_pipeline(pipeline: &Pipeline) -> ShellResult<CommandStatus> {
 
 // ===== 执行层 =====
 
-fn run_builtin_with_redirection(command: &Command) -> ShellResult<BuiltinResult> {
+fn run_builtin_with_redirection(
+    command: &Command,
+    state: &mut ShellState,
+) -> ShellResult<CommandFlow> {
     let saved = apply_redirection_in_shell(command)?;
     // 这里已经确认是内置命令；若返回 None，说明调用路径存在内部错误。
-    let result = run_builtin(command).expect("builtin command should have a builtin result");
+    let result = run_builtin(command, state).expect("builtin command should have a builtin result");
 
     // builtin 在当前 shell 进程中执行，恢复 fd 前先刷新缓冲区。
     flush_standard_streams()?;

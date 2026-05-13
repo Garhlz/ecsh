@@ -1,5 +1,6 @@
 use crate::diagnostics::print_error;
 use crate::types::Command;
+use crate::types::{CommandFlow, CommandStatus, ShellState};
 use std::io::{self, Write};
 
 #[derive(Clone, Copy)]
@@ -12,11 +13,7 @@ pub enum BuiltinKind {
     Export,
     Unset,
     Clear,
-}
-
-pub enum BuiltinResult {
-    Continue,
-    Exit,
+    Status,
 }
 
 // 所有内置命令名称只在这里维护一份。
@@ -31,6 +28,7 @@ pub fn builtin_kind(command: &Command) -> Option<BuiltinKind> {
         "export" => Some(BuiltinKind::Export),
         "unset" => Some(BuiltinKind::Unset),
         "clear" => Some(BuiltinKind::Clear),
+        "status" => Some(BuiltinKind::Status),
         _ => None,
     }
 }
@@ -39,11 +37,11 @@ pub fn builtin_kind(command: &Command) -> Option<BuiltinKind> {
 pub fn is_builtin_allowed_in_pipeline(kind: BuiltinKind) -> bool {
     matches!(
         kind,
-        BuiltinKind::Help | BuiltinKind::Pwd | BuiltinKind::Env
+        BuiltinKind::Help | BuiltinKind::Pwd | BuiltinKind::Env | BuiltinKind::Status
     )
 }
 
-pub fn run_builtin(command: &Command) -> Option<BuiltinResult> {
+pub fn run_builtin(command: &Command, state: &mut ShellState) -> Option<CommandFlow> {
     let kind = builtin_kind(command)?;
 
     match kind {
@@ -57,40 +55,24 @@ pub fn run_builtin(command: &Command) -> Option<BuiltinResult> {
             println!("  export KEY=value - set environment variable");
             println!("  unset KEY - remove environment variable");
             println!("  clear - clear the terminal screen");
-            Some(BuiltinResult::Continue)
+            println!("  status - print last command status");
+            Some(CommandFlow::Continue(CommandStatus::success()))
         }
-        BuiltinKind::Exit => Some(BuiltinResult::Exit),
-        BuiltinKind::Cd => {
-            run_cd(command);
-            Some(BuiltinResult::Continue)
-        }
-        BuiltinKind::Pwd => {
-            run_pwd();
-            Some(BuiltinResult::Continue)
-        }
-        BuiltinKind::Env => {
-            run_env();
-            Some(BuiltinResult::Continue)
-        }
-        BuiltinKind::Export => {
-            run_export(command);
-            Some(BuiltinResult::Continue)
-        }
-        BuiltinKind::Unset => {
-            run_unset(command);
-            Some(BuiltinResult::Continue)
-        }
-        BuiltinKind::Clear => {
-            run_clear();
-            Some(BuiltinResult::Continue)
-        }
+        BuiltinKind::Exit => Some(CommandFlow::Exit(CommandStatus::success())),
+        BuiltinKind::Cd => Some(CommandFlow::Continue(run_cd(command))),
+        BuiltinKind::Pwd => Some(CommandFlow::Continue(run_pwd())),
+        BuiltinKind::Env => Some(CommandFlow::Continue(run_env())),
+        BuiltinKind::Export => Some(CommandFlow::Continue(run_export(command))),
+        BuiltinKind::Unset => Some(CommandFlow::Continue(run_unset(command))),
+        BuiltinKind::Clear => Some(CommandFlow::Continue(run_clear())),
+        BuiltinKind::Status => Some(CommandFlow::Continue(run_status(state))),
     }
 }
 
-fn run_cd(command: &Command) {
+fn run_cd(command: &Command) -> CommandStatus {
     if command.args.len() > 1 {
         print_error("cd: too many arguments");
-        return;
+        return CommandStatus::failure();
     }
 
     let dir = if command.args.is_empty() {
@@ -99,7 +81,7 @@ fn run_cd(command: &Command) {
             Ok(home) => home,
             Err(_) => {
                 print_error("cd: HOME not set");
-                return;
+                return CommandStatus::failure();
             }
         }
     } else {
@@ -108,47 +90,57 @@ fn run_cd(command: &Command) {
 
     if let Err(err) = std::env::set_current_dir(&dir) {
         print_error(format!("cd: {}: {}", dir, err));
+        return CommandStatus::failure();
+    }
+
+    CommandStatus::success()
+}
+
+fn run_pwd() -> CommandStatus {
+    match std::env::current_dir() {
+        Ok(path) => {
+            println!("{}", path.display());
+            CommandStatus::success()
+        }
+        Err(err) => {
+            print_error(format!("pwd: {}", err));
+            CommandStatus::failure()
+        }
     }
 }
 
-fn run_pwd() {
-    match std::env::current_dir() {
-        Ok(path) => println!("{}", path.display()),
-        Err(err) => {
-            print_error(format!("pwd: {}", err));
-        }
-    };
-}
-
-fn run_env() {
+fn run_env() -> CommandStatus {
     for (key, value) in std::env::vars() {
         println!("{}={}", key, value);
     }
+
+    CommandStatus::success()
 }
 
 // 当前只支持 `export KEY=value` 这一种格式。
-fn run_export(command: &Command) {
+fn run_export(command: &Command) -> CommandStatus {
     if command.args.len() != 1 {
         print_error("export: usage: export KEY=value");
-        return;
+        return CommandStatus::failure();
     }
 
     let Some((key, value)) = command.args[0].split_once('=') else {
         print_error("export: usage: export KEY=value");
-        return;
+        return CommandStatus::failure();
     };
 
     if key.is_empty() {
         print_error("export: usage: export KEY=value");
-        return;
+        return CommandStatus::failure();
     }
 
     if !is_valid_env_key(key) {
         print_error(format!("export: invalid variable name: {}", key));
-        return;
+        return CommandStatus::failure();
     }
 
     unsafe { std::env::set_var(key, value) };
+    CommandStatus::success()
 }
 
 fn is_valid_env_key(key: &str) -> bool {
@@ -166,24 +158,36 @@ fn is_valid_env_key(key: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn run_unset(command: &Command) {
+fn run_unset(command: &Command) -> CommandStatus {
     if command.args.len() != 1 {
         print_error("unset: usage: unset KEY");
-        return;
+        return CommandStatus::failure();
     }
 
     // 先校验变量名，避免 `remove_var` 在非法变量名上 panic。
     let key = &command.args[0];
     if !is_valid_env_key(key) {
         print_error(format!("unset: invalid variable name: {}", key));
-        return;
+        return CommandStatus::failure();
     }
 
     unsafe { std::env::remove_var(key) };
+    CommandStatus::success()
 }
 
 // `clear` 负责清空当前屏幕，scrollback 能否清除取决于终端实现。
-fn run_clear() {
+fn run_clear() -> CommandStatus {
     print!("\x1b[2J\x1b[3J\x1b[H");
-    let _ = io::stdout().flush();
+    match io::stdout().flush() {
+        Ok(()) => CommandStatus::success(),
+        Err(err) => {
+            print_error(format!("clear: {}", err));
+            CommandStatus::failure()
+        }
+    }
+}
+
+fn run_status(state: &mut ShellState) -> CommandStatus {
+    println!("{}", state.last_status.code);
+    CommandStatus::success()
 }

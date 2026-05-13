@@ -19,6 +19,7 @@
   - `export KEY=value`：在 shell 进程中设置环境变量
   - `unset KEY`：从 shell 进程中删除环境变量
   - `clear`：清空终端屏幕
+  - `status`：打印上一条命令的退出状态码
 - 通过 `fork`、`execvp` 和 `waitpid` 执行外部命令
 - 外部命令无效时报告错误，并保持 shell 继续运行
 - shell 修改后的环境变量会被后续外部命令继承
@@ -56,6 +57,7 @@ echo hello
 export ECSH_NAME=elaine
 printenv ECSH_NAME
 unset ECSH_NAME
+status
 clear
 ls
 echo hello | grep h
@@ -95,6 +97,10 @@ struct Command {
 和标准输出重定向设置。执行外部命令时，`ecsh` 会重新构造 Unix 风格的 `argv`，
 并把 `program` 放到 `argv[0]`。
 
+shell 还维护一个最小运行时状态 `ShellState`，当前其中保存上一条命令的退出状态
+`last_status`。内置命令 `status` 会直接打印这个状态码，后续 `$?`、`&&`、`||`
+ 等功能也会复用这一状态。
+
 空输入不会被视为错误。用户直接按下 Enter 时，shell 会直接进入下一轮提示符。
 
 环境变量相关内置命令必须在 shell 进程自身执行，因为它们的效果需要在命令返回后
@@ -123,7 +129,7 @@ struct Command {
 
 执行层使用 `CommandStatus` 表示命令退出状态，用 `CommandFlow` 区分“继续运行”
 和 “exit 请求退出 shell”。当前状态码已经会从 `waitpid` 的 `WaitStatus` 转换出来，
-但还没有保存为 `$?` 变量。
+并保存在 `ShellState.last_status` 中，但还没有扩展为 `$?` 变量展开。
 
 ## 开发计划
 
@@ -151,6 +157,7 @@ struct Command {
 - [x] 支持普通内置命令的临时重定向
 - [x] 支持管道边界重定向
 - [x] 将重定向资源管理拆分到独立模块
+- [x] 保存上一条命令的退出状态，并提供 `status` 内置命令
 
 ### 阶段 3：交互式 shell 行为
 

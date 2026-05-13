@@ -34,6 +34,10 @@ impl std::fmt::Display for Command {
     }
 }
 
+pub struct ShellState {
+    pub last_status: CommandStatus,
+}
+
 /*
 管道按标准 shell 语义使用 `|`。
 
