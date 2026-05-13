@@ -36,7 +36,7 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // 一行输入当前只会被解析成普通命令或管道命令。
-        match parse_line(line) {
+        match parse_line(line, &state) {
             Ok(None) => continue,
             Ok(Some(ParsedLine::Command(command))) => {
                 match run_command(&command, &mut state)? {

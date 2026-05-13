@@ -33,6 +33,11 @@
 - 管道中支持边界重定向：首条命令可使用 `<`，末条命令可使用 `>` 或 `>>`
 - 管道执行时会打印 `pipeline starting...` 和 `pipeline ending.`
 - 命令执行会转换为内部状态码，为后续 `$?`、`&&`、`||` 等功能预留基础
+- 支持最小变量展开：
+  - `$?`
+  - `$NAME`
+  - `${NAME}`
+  - 词内前后缀拼接，例如 `prefix-$HOME`、`$HOME/file`
 - 错误输出统一通过 diagnostics 模块打印并刷新 `stderr`
 - 实验要求的命令生命周期提示：
   - `<command> starting...`
@@ -59,6 +64,10 @@ printenv ECSH_NAME
 unset ECSH_NAME
 status
 clear
+echo $?
+echo prefix-$HOME
+echo $HOME/file
+echo ${HOME}
 ls
 echo hello | grep h
 printf "a\nb\n" | grep b
@@ -99,7 +108,7 @@ struct Command {
 
 shell 还维护一个最小运行时状态 `ShellState`，当前其中保存上一条命令的退出状态
 `last_status`。内置命令 `status` 会直接打印这个状态码，后续 `$?`、`&&`、`||`
- 等功能也会复用这一状态。
+等功能也会复用这一状态。当前 `$?` 已经会在解析阶段展开为这一状态码。
 
 空输入不会被视为错误。用户直接按下 Enter 时，shell 会直接进入下一轮提示符。
 
@@ -127,9 +136,13 @@ shell 还维护一个最小运行时状态 `ShellState`，当前其中保存上�
 状态或强交互行为的内置命令暂不支持出现在管道中。解析器也暂不处理引号，所以
 `echo "a|b"` 会被错误地按 `|` 切分。
 
+变量展开当前仍然是最小实现：先按空白切分 token，再对每个 token 做词内扫描。
+因此 `$?`、`$HOME`、`${HOME}`、`prefix-$HOME` 这类形式已经可用；但解析器仍
+未处理引号、`${...}` 的严格语法错误，以及更完整的 shell 词法规则。
+
 执行层使用 `CommandStatus` 表示命令退出状态，用 `CommandFlow` 区分“继续运行”
 和 “exit 请求退出 shell”。当前状态码已经会从 `waitpid` 的 `WaitStatus` 转换出来，
-并保存在 `ShellState.last_status` 中，但还没有扩展为 `$?` 变量展开。
+并保存在 `ShellState.last_status` 中，供 `status` 和 `$?` 展开复用。
 
 ## 开发计划
 
@@ -158,6 +171,7 @@ shell 还维护一个最小运行时状态 `ShellState`，当前其中保存上�
 - [x] 支持管道边界重定向
 - [x] 将重定向资源管理拆分到独立模块
 - [x] 保存上一条命令的退出状态，并提供 `status` 内置命令
+- [x] 支持最小变量展开：`$?`、`$NAME`、`${NAME}` 及词内前后缀拼接
 
 ### 阶段 3：交互式 shell 行为
 
@@ -169,7 +183,7 @@ shell 还维护一个最小运行时状态 `ShellState`，当前其中保存上�
 ### 阶段 4：脚本化特性
 
 - [ ] 变量
-- [ ] 基础展开
+- [ ] 更完整的展开与引用规则
 - [ ] 条件执行
 - [ ] 循环
 - [ ] 函数
