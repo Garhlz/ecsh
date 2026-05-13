@@ -32,8 +32,7 @@ pub fn apply_redirection_in_shell(command: &Command) -> ShellResult<SavedRedirec
             let original_stdin = dup(io::stdin())?;
             let fd = open_input_redirection(path)?;
 
-            // dup2_stdin 会让标准输入 fd 指向 `fd` 对应的文件。
-            // 之后读取 stdin 的代码就会从重定向文件中读取。
+            // dup2_stdin 会让标准输入 fd 指向 `fd` 对应的文件
             dup2_stdin(&fd)?;
 
             // dup2 完成后，标准输入已经指向目标文件；这里可以关闭临时 fd。

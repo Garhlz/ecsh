@@ -2,3 +2,4 @@
 .vscode/
 .direnv/
 hello*
+tmp.md

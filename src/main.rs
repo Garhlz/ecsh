@@ -2,12 +2,14 @@ mod builtin;
 mod diagnostics;
 mod executor;
 mod parser;
+mod prompt;
 mod redirection;
 mod types;
 
 use crate::diagnostics::print_error;
 use crate::executor::{run_command, run_pipeline};
 use crate::parser::parse_line;
+use crate::prompt::build_prompt;
 use crate::types::{CommandFlow, CommandStatus, ParsedLine, ShellState};
 use std::io::{self, Write};
 
@@ -23,7 +25,8 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     loop {
-        print!("shell> ");
+        let prompt = build_prompt(&state)?;
+        print!("{}", prompt);
         io::stdout().flush()?;
 
         let mut line = String::new();
@@ -32,6 +35,9 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
 
         // 空输入直接跳过，进入下一轮提示符。
         if line.is_empty() {
+            // 直接按回车不应继续沿用上一条失败命令的状态码，
+            // 否则 prompt 会一直显示旧错误状态。
+            state.last_status = CommandStatus::success();
             continue;
         }
 
