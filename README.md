@@ -26,6 +26,10 @@
 - 支持标准 Unix 管道 `|`，例如 `echo hello | grep h`
 - 管道会为每个外部命令创建子进程，并使用匿名 pipe 连接相邻命令
 - 管道中支持 `help`、`pwd`、`env` 这类纯输出型内置命令
+- 支持标准输入重定向 `<`
+- 支持标准输出重定向 `>` 和追加重定向 `>>`
+- 普通内置命令支持临时重定向，执行完成后会恢复 shell 的标准输入输出
+- 管道中支持边界重定向：首条命令可使用 `<`，末条命令可使用 `>` 或 `>>`
 - 管道执行时会打印 `pipeline starting...` 和 `pipeline ending.`
 - 命令执行会转换为内部状态码，为后续 `$?`、`&&`、`||` 等功能预留基础
 - 错误输出统一通过 diagnostics 模块打印并刷新 `stderr`
@@ -58,6 +62,10 @@ echo hello | grep h
 printf "a\nb\n" | grep b
 pwd | cat
 env | grep PATH
+pwd > pwd.txt
+cat < pwd.txt
+echo done >> pwd.txt
+cat < pwd.txt | grep done > result.txt
 exit
 ```
 
@@ -78,11 +86,13 @@ shell 使用下面的数据结构表示一条命令：
 struct Command {
     program: String,
     args: Vec<String>,
+    redirection: Redirection,
 }
 ```
 
-`program` 保存命令名称，`args` 保存命令的剩余参数。执行外部命令时，
-`ecsh` 会重新构造 Unix 风格的 `argv`，并把 `program` 放到 `argv[0]`。
+`program` 保存命令名称，`args` 保存命令的剩余参数，`redirection` 保存标准输入
+和标准输出重定向设置。执行外部命令时，`ecsh` 会重新构造 Unix 风格的 `argv`，
+并把 `program` 放到 `argv[0]`。
 
 空输入不会被视为错误。用户直接按下 Enter 时，shell 会直接进入下一轮提示符。
 
@@ -97,6 +107,12 @@ struct Command {
 再为 pipeline 中的每条外部命令 `fork` 一个子进程，并在子进程中使用
 `dup2_stdin` / `dup2_stdout` 绑定标准输入输出。父进程在创建完所有子进程后
 关闭自己的 pipe 文件描述符，并等待所有子进程结束。
+
+重定向解析目前要求操作符和路径之间使用空白分隔，例如 `echo hello > out.txt`。
+外部命令的重定向在子进程中完成；普通内置命令运行在 shell 进程自身，因此会先
+保存原始标准输入输出 fd，应用临时重定向，执行完成并刷新缓冲区后再恢复 fd。
+管道中的重定向当前只支持边界位置：第一条命令可以使用 `<`，最后一条命令可以使用
+`>` 或 `>>`。
 
 当前版本的管道仍然是简化实现：pipeline 中只支持 `help`、`pwd`、`env` 这类
 纯输出型内置命令；`cd`、`export`、`unset`、`exit`、`clear` 这类会改变 shell
@@ -129,7 +145,9 @@ struct Command {
 - [x] 支持部分纯输出型内置命令进入管道
 - [x] 拆分 parser、builtin、executor、types 和 diagnostics 模块
 - [x] 引入基础命令状态模型
-- [ ] 支持标准输入和标准输出重定向
+- [x] 支持标准输入和标准输出重定向
+- [x] 支持普通内置命令的临时重定向
+- [x] 支持管道边界重定向
 
 ### 阶段 3：交互式 shell 行为
 

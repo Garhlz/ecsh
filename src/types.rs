@@ -1,6 +1,35 @@
 pub struct Command {
     pub program: String,
     pub args: Vec<String>,
+    pub redirection: Redirection,
+}
+
+// 用于在诊断信息中还原命令的可读形式。
+impl std::fmt::Display for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.program)?;
+
+        for arg in &self.args {
+            write!(f, " {}", arg)?;
+        }
+
+        if let Some(stdin) = &self.redirection.stdin {
+            write!(f, " < {}", stdin)?;
+        }
+
+        if let Some(stdout) = &self.redirection.stdout {
+            match stdout {
+                OutputRedirection::Truncate(path) => {
+                    write!(f, " > {}", path)?;
+                }
+                OutputRedirection::Append(path) => {
+                    write!(f, " >> {}", path)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /*
@@ -51,8 +80,18 @@ impl CommandStatus {
 }
 
 // 命令状态和 shell 控制流分开表达，避免用 bool 同时表示多种含义。
-// 也就是说command使用CommandFlow，pipeline使用CommandStatus
 pub enum CommandFlow {
     Continue(CommandStatus),
     Exit(CommandStatus),
+}
+
+#[derive(Default)]
+pub struct Redirection {
+    pub stdin: Option<String>,
+    pub stdout: Option<OutputRedirection>,
+}
+
+pub enum OutputRedirection {
+    Truncate(String),
+    Append(String),
 }
