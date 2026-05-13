@@ -1,16 +1,8 @@
-mod builtin;
-mod diagnostics;
-mod executor;
-mod parser;
-mod prompt;
-mod redirection;
-mod types;
-
-use crate::diagnostics::print_error;
-use crate::executor::{run_command, run_pipeline};
-use crate::parser::parse_line;
-use crate::prompt::build_prompt;
-use crate::types::{CommandFlow, CommandStatus, ParsedLine, ShellState};
+use ecsh::diagnostics::print_error;
+use ecsh::executor::{run_command, run_pipeline};
+use ecsh::parser::parse_line;
+use ecsh::prompt::build_prompt;
+use ecsh::types::{CommandFlow, CommandStatus, ParsedLine, ShellState};
 use std::io::{self, Write};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
     // TODO 主循环当前统一返回 Box<dyn Error>，便于早期阶段快速迭代。
-    // 用统一的ShellState维护状态，便于后续扩展
+    // 用统一的 ShellState 维护状态，便于后续扩展。
     let mut state = ShellState {
         last_status: CommandStatus::success(),
     };
@@ -41,29 +33,56 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        // 一行输入当前只会被解析成普通命令或管道命令。
-        match parse_line(line, &state) {
-            Ok(None) => continue,
-            Ok(Some(ParsedLine::Command(command))) => {
-                match run_command(&command, &mut state)? {
-                    CommandFlow::Continue(current_status) => {
-                        state.last_status = current_status;
-                    }
-                    CommandFlow::Exit(_current_status) => break,
-                };
-            }
-            Ok(Some(ParsedLine::Pipeline(pipeline))) => {
-                let current_status = run_pipeline(&pipeline, &mut state)?;
-                state.last_status = current_status;
-            }
+        let parsed = match parse_line(line, &state) {
+            Ok(parsed) => parsed,
             Err(err) => {
                 print_error(format!("parse line: {}", err));
-                let current_status = CommandStatus { code: 1 };
-                state.last_status = current_status;
+                state.last_status = CommandStatus::failure();
                 continue;
+            }
+        };
+
+        match run_parsed_line(&parsed, &mut state)? {
+            CommandFlow::Continue(current_status) => {
+                state.last_status = current_status;
+            }
+            CommandFlow::Exit(_current_status) => {
+                break;
             }
         }
     }
 
     Ok(())
+}
+
+fn run_parsed_line(
+    parsed: &ParsedLine,
+    state: &mut ShellState,
+) -> Result<CommandFlow, Box<dyn std::error::Error>> {
+    match parsed {
+        ParsedLine::Command(command) => run_command(command, state),
+        ParsedLine::Pipeline(pipeline) => Ok(CommandFlow::Continue(run_pipeline(pipeline, state)?)),
+        // `&&`：左侧成功才执行右侧；如果左侧请求 exit，则直接向上传递退出请求。
+        ParsedLine::AndThen(left, right) => match run_parsed_line(left, state)? {
+            CommandFlow::Exit(status) => Ok(CommandFlow::Exit(status)),
+            CommandFlow::Continue(status) => {
+                if status.code == 0 {
+                    run_parsed_line(right, state)
+                } else {
+                    Ok(CommandFlow::Continue(status))
+                }
+            }
+        },
+        // `||`：左侧失败才执行右侧；如果左侧请求 exit，同样不再继续执行右侧。
+        ParsedLine::OrElse(left, right) => match run_parsed_line(left, state)? {
+            CommandFlow::Exit(status) => Ok(CommandFlow::Exit(status)),
+            CommandFlow::Continue(status) => {
+                if status.code != 0 {
+                    run_parsed_line(right, state)
+                } else {
+                    Ok(CommandFlow::Continue(status))
+                }
+            }
+        },
+    }
 }

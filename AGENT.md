@@ -39,6 +39,23 @@ site. This is especially true for short pipeline steps where the local order
 matters, such as binding pipe fd, applying redirection, closing inherited fd, and
 then running builtin or `execvp`.
 
+## Testing Style
+
+Prefer keeping behavior tests in the `tests/` directory when they can use the
+public crate API. This keeps lexer/parser tests close to how downstream code
+would call them, and it also explains why `src/lib.rs` exists alongside the
+interactive `src/main.rs` binary entry.
+
+Use focused tests for pure logic such as tokenization and parsing, and use small
+smoke tests for end-to-end shell behavior that must launch the compiled binary.
+Before preparing a commit, run:
+
+```text
+cargo fmt --check
+cargo check
+cargo test
+```
+
 ## Commit Message Format
 
 Use Conventional Commits with a short scope when it helps clarify the affected area.

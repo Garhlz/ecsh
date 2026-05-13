@@ -11,7 +11,10 @@
 - 交互式命令提示符
 - 两行 prompt，显示 `[ecsh] user@host:cwd`，非 0 状态码显示在第一行末尾
 - prompt 在 stdout 为 tty 时启用 ANSI 颜色；重定向或管道输出时自动退回纯文本
-- 基于空白字符的简单命令解析
+- 基于 lexer + parser 的命令解析
+- 支持单引号和双引号：
+  - 单引号内按字面量处理，不展开变量
+  - 双引号内保留空白和操作符字面量，但会展开变量
 - 内置命令：
   - `help`：显示支持的内置命令
   - `exit`：退出 shell
@@ -31,10 +34,11 @@
 - 管道中支持 `help`、`pwd`、`env` 这类纯输出型内置命令
 - 支持标准输入重定向 `<`
 - 支持标准输出重定向 `>` 和追加重定向 `>>`
+- 重定向操作符可以不依赖空白分隔，例如 `echo hi>out.txt`
 - 普通内置命令支持临时重定向，执行完成后会恢复 shell 的标准输入输出
 - 管道中支持边界重定向：首条命令可使用 `<`，末条命令可使用 `>` 或 `>>`
 - 管道执行时会打印 `pipeline starting...` 和 `pipeline ending.`
-- 命令执行会转换为内部状态码，为后续 `$?`、`&&`、`||` 等功能预留基础
+- 支持 `&&` 和 `||` 条件执行
 - 支持最小变量展开：
   - `$?`
   - `$NAME`
@@ -70,15 +74,21 @@ echo $?
 echo prefix-$HOME
 echo $HOME/file
 echo ${HOME}
+echo "hello world"
+echo '$HOME'
+echo "$HOME"
 ls
 echo hello | grep h
 printf "a\nb\n" | grep b
 pwd | cat
 env | grep PATH
 pwd > pwd.txt
+echo hi>out.txt
 cat < pwd.txt
 echo done >> pwd.txt
 cat < pwd.txt | grep done > result.txt
+true && echo ok
+false || echo fallback
 exit
 ```
 
@@ -86,9 +96,11 @@ exit
 
 当前代码按职责拆分为几个模块：
 
+- `lib.rs`：库 crate 入口，导出 shell 核心模块，便于集成测试复用
 - `main.rs`：交互式主循环
 - `types.rs`：命令、管道、解析结果和执行状态类型
-- `parser.rs`：普通命令和管道解析
+- `lexer.rs`：将输入行扫描为 token 流，并处理引号和最小变量展开
+- `parser.rs`：将 token 流转换为命令、管道和条件执行语法结构
 - `prompt.rs`：交互式 prompt 构造与着色
 - `builtin.rs`：内置命令识别和执行
 - `executor.rs`：外部命令、管道、fork/exec/wait 逻辑
@@ -130,13 +142,20 @@ prompt 当前由 `prompt.rs` 统一构造。第一行显示 shell 标识、用�
 为了避免把 ANSI 控制序列写进重定向目标，prompt 只有在 `stdout` 连接到 tty
 时才启用颜色。
 
+解析现在分为两层：`lexer.rs` 先把输入行扫描为 token 流，`parser.rs` 再把
+token 流转换为 `ParsedLine`。当前 lexer 支持普通词、单引号、双引号、`|`、
+`&&`、`||`、`<`、`>`、`>>`。引号只影响当前词内部的解释方式，不会自动结束
+当前词，因此 `a"b"c` 会被解析为一个词 `abc`。当前暂不支持反斜杠转义、
+命令替换、here-doc `<<`、单个 `&` 后台执行和完整 POSIX shell 词法规则。
+
 管道使用标准 shell 语义中的 `|`。`ecsh` 会先创建 `n - 1` 个匿名 pipe，
 再为 pipeline 中的每条外部命令 `fork` 一个子进程，并在子进程中使用
 `dup2_stdin` / `dup2_stdout` 绑定标准输入输出。父进程在创建完所有子进程后
 关闭自己的 pipe 文件描述符，并等待所有子进程结束。
 
-重定向解析目前要求操作符和路径之间使用空白分隔，例如 `echo hello > out.txt`。
-外部命令的重定向在子进程中完成；普通内置命令运行在 shell 进程自身，因此会先
+重定向解析基于 token 流完成，因此操作符和普通词之间可以没有空白，例如
+`echo hello>out.txt` 和 `cat<in.txt`。外部命令的重定向在子进程中完成；
+普通内置命令运行在 shell 进程自身，因此会先
 保存原始标准输入输出 fd，应用临时重定向，执行完成并刷新缓冲区后再恢复 fd。
 相关资源管理逻辑集中在 `redirection.rs` 中，避免 `executor.rs` 同时承担过多
 文件描述符细节。管道中的重定向当前只支持边界位置：第一条命令可以使用 `<`，
@@ -144,16 +163,34 @@ prompt 当前由 `prompt.rs` 统一构造。第一行显示 shell 标识、用�
 
 当前版本的管道仍然是简化实现：pipeline 中只支持 `help`、`pwd`、`env` 这类
 纯输出型内置命令；`cd`、`export`、`unset`、`exit`、`clear` 这类会改变 shell
-状态或强交互行为的内置命令暂不支持出现在管道中。解析器也暂不处理引号，所以
-`echo "a|b"` 会被错误地按 `|` 切分。
+状态或强交互行为的内置命令暂不支持出现在管道中。
 
-变量展开当前仍然是最小实现：先按空白切分 token，再对每个 token 做词内扫描。
-因此 `$?`、`$HOME`、`${HOME}`、`prefix-$HOME` 这类形式已经可用；但解析器仍
-未处理引号、`${...}` 的严格语法错误，以及更完整的 shell 词法规则。
+变量展开当前仍然是最小实现：支持 `$?`、`$NAME`、`${NAME}` 和词内前后缀拼接。
+单引号内不展开变量，双引号内会展开变量。`${...}` 内当前只支持环境变量名形式
+`[A-Za-z_][A-Za-z0-9_]*`，不支持位置参数、默认值语法或更完整的参数展开。
 
 执行层使用 `CommandStatus` 表示命令退出状态，用 `CommandFlow` 区分“继续运行”
 和 “exit 请求退出 shell”。当前状态码已经会从 `waitpid` 的 `WaitStatus` 转换出来，
-并保存在 `ShellState.last_status` 中，供 `status` 和 `$?` 展开复用。
+并保存在 `ShellState.last_status` 中，供 `status` 和 `$?` 展开复用。`&&` 和
+`||` 通过递归执行 `ParsedLine` 实现：`&&` 只在左侧成功时执行右侧，`||` 只在
+左侧失败时执行右侧。
+
+## 测试
+
+项目当前使用 `lib + bin` 结构：核心逻辑通过 `src/lib.rs` 暴露，`src/main.rs`
+负责交互式二进制入口。测试放在 `tests/` 目录中，从 crate 外部调用公共接口：
+
+- `tests/lexer.rs`：覆盖 token 扫描、引号、变量展开、操作符和词法错误
+- `tests/parser.rs`：覆盖命令、重定向、管道、条件执行 AST 和解析错误
+- `tests/smoke.rs`：启动真实 `ecsh` 二进制，做端到端烟测
+
+常用验证命令：
+
+```bash
+cargo fmt --check
+cargo check
+cargo test
+```
 
 ## 开发计划
 
@@ -175,7 +212,7 @@ prompt 当前由 `prompt.rs` 统一构造。第一行显示 shell 标识、用�
 
 - [x] 支持标准管道 `|`
 - [x] 支持部分纯输出型内置命令进入管道
-- [x] 拆分 parser、builtin、executor、types 和 diagnostics 模块
+- [x] 拆分 lexer、parser、builtin、executor、types 和 diagnostics 模块
 - [x] 引入基础命令状态模型
 - [x] 支持标准输入和标准输出重定向
 - [x] 支持普通内置命令的临时重定向
@@ -183,6 +220,8 @@ prompt 当前由 `prompt.rs` 统一构造。第一行显示 shell 标识、用�
 - [x] 将重定向资源管理拆分到独立模块
 - [x] 保存上一条命令的退出状态，并提供 `status` 内置命令
 - [x] 支持最小变量展开：`$?`、`$NAME`、`${NAME}` 及词内前后缀拼接
+- [x] 支持单引号、双引号和无空格重定向
+- [x] 支持 `&&` 和 `||` 条件执行
 
 ### 阶段 3：交互式 shell 行为
 
@@ -195,7 +234,6 @@ prompt 当前由 `prompt.rs` 统一构造。第一行显示 shell 标识、用�
 
 - [ ] 变量
 - [ ] 更完整的展开与引用规则
-- [ ] 条件执行
 - [ ] 循环
 - [ ] 函数
 
