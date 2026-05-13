@@ -1,55 +1,27 @@
 # ecsh
 
-`ecsh` 是一个使用 Rust 实现的简单类 Unix shell，主要用于操作系统实验练习。
+`ecsh` 是 **Elaine & Cornelia's shell**，一个使用 Rust 实现的教学型类 Unix
+shell，主要用于操作系统实验练习。
 
-这个项目关注 shell 的基本执行模型：读取命令行、解析命令、处理内置命令、
-`fork` 子进程、在子进程中通过 `execvp` 替换为目标程序，并在父进程中
-使用 `waitpid` 等待子进程结束。
+项目目标是用尽量直接的代码练习 shell 的核心执行模型：读取输入、解析命令、
+处理内置命令、`fork` 子进程、在子进程中 `execvp` 目标程序，并由父进程
+`waitpid` 等待结束。
 
-## 当前功能
+## 功能概览
 
-- 交互式命令提示符
-- 两行 prompt，显示 `[ecsh] user@host:cwd`，非 0 状态码显示在第一行末尾
-- prompt 在 stdout 为 tty 时启用 ANSI 颜色；重定向或管道输出时自动退回纯文本
-- 基于 lexer + parser 的命令解析
-- 支持单引号和双引号：
-  - 单引号内按字面量处理，不展开变量
-  - 双引号内保留空白和操作符字面量，但会展开变量
-- 内置命令：
-  - `help`：显示支持的内置命令
-  - `exit`：退出 shell
-  - `cd`：修改 shell 进程的当前工作目录
-  - `pwd`：打印 shell 进程的当前工作目录
-  - `env`：打印当前环境变量
-  - `export KEY=value`：在 shell 进程中设置环境变量
-  - `unset KEY`：从 shell 进程中删除环境变量
-  - `clear`：清空终端屏幕
-  - `status`：打印上一条命令的退出状态码
-- 通过 `fork`、`execvp` 和 `waitpid` 执行外部命令
-- 外部命令无效时报告错误，并保持 shell 继续运行
-- shell 修改后的环境变量会被后续外部命令继承
-- `clear` 会跳过命令生命周期提示，避免清屏后立刻输出 `starting/ending`
-- 支持标准 Unix 管道 `|`，例如 `echo hello | grep h`
-- 管道会为每个外部命令创建子进程，并使用匿名 pipe 连接相邻命令
+- 外部命令执行：`fork`、`execvp`、`waitpid`
+- 内置命令：`help`、`exit`、`cd`、`pwd`、`env`、`export`、`unset`、`clear`、`status`
+- 两行 prompt：显示 `[ecsh] user@host:cwd` 和上一条命令的非 0 状态码
+- lexer + parser：支持单引号、双引号、变量展开和操作符 token
+- 变量展开：`$?`、`$NAME`、`${NAME}`，以及 `prefix-$HOME`、`$HOME/file` 这类词内拼接
+- 管道：支持标准 Unix 管道 `|`
+- 重定向：支持 `<`、`>`、`>>`，操作符可以不依赖空白分隔
+- 条件执行：支持 `&&` 和 `||`
+- 普通内置命令支持临时重定向，执行结束后恢复 shell 的标准输入输出
 - 管道中支持 `help`、`pwd`、`env` 这类纯输出型内置命令
-- 支持标准输入重定向 `<`
-- 支持标准输出重定向 `>` 和追加重定向 `>>`
-- 重定向操作符可以不依赖空白分隔，例如 `echo hi>out.txt`
-- 普通内置命令支持临时重定向，执行完成后会恢复 shell 的标准输入输出
-- 管道中支持边界重定向：首条命令可使用 `<`，末条命令可使用 `>` 或 `>>`
-- 管道执行时会打印 `pipeline starting...` 和 `pipeline ending.`
-- 支持 `&&` 和 `||` 条件执行
-- 支持最小变量展开：
-  - `$?`
-  - `$NAME`
-  - `${NAME}`
-  - 词内前后缀拼接，例如 `prefix-$HOME`、`$HOME/file`
-- 错误输出统一通过 diagnostics 模块打印并刷新 `stderr`
-- 实验要求的命令生命周期提示：
-  - `<command> starting...`
-  - `<command> ending.`
+- 统一错误输出，并保留实验要求的命令生命周期提示
 
-## 使用方法
+## 快速开始
 
 构建并运行：
 
@@ -57,132 +29,65 @@
 cargo run
 ```
 
-示例命令：
+可以尝试：
 
 ```bash
 help
 pwd
 cd /tmp
-pwd
-echo hello
-export ECSH_NAME=elaine
-printenv ECSH_NAME
-unset ECSH_NAME
-status
-clear
-echo $?
-echo prefix-$HOME
-echo $HOME/file
-echo ${HOME}
-echo "hello world"
-echo '$HOME'
 echo "$HOME"
-ls
+echo prefix-$HOME
 echo hello | grep h
-printf "a\nb\n" | grep b
-pwd | cat
-env | grep PATH
 pwd > pwd.txt
-echo hi>out.txt
 cat < pwd.txt
 echo done >> pwd.txt
 cat < pwd.txt | grep done > result.txt
 true && echo ok
 false || echo fallback
+status
 exit
 ```
 
-## 实现说明
+## 当前边界
 
-当前代码按职责拆分为几个模块：
+`ecsh` 不是完整 POSIX shell。当前暂不支持：
 
-- `lib.rs`：库 crate 入口，导出 shell 核心模块，便于集成测试复用
-- `main.rs`：交互式主循环
-- `types.rs`：命令、管道、解析结果和执行状态类型
-- `lexer.rs`：将输入行扫描为 token 流，并处理引号和最小变量展开
-- `parser.rs`：将 token 流转换为命令、管道和条件执行语法结构
-- `prompt.rs`：交互式 prompt 构造与着色
-- `builtin.rs`：内置命令识别和执行
-- `executor.rs`：外部命令、管道、fork/exec/wait 逻辑
-- `redirection.rs`：重定向文件打开、fd 保存恢复和子进程重定向处理
-- `diagnostics.rs`：统一错误输出
+- 反斜杠转义
+- 命令替换
+- here-doc `<<`
+- 单个 `&` 后台执行
+- glob 展开
+- 完整的 `${...}` 参数展开语法
+- 完整作业控制和前台进程组切换
 
-shell 使用下面的数据结构表示一条命令：
+管道中的内置命令也仍是简化实现：目前只支持纯输出型内置命令进入管道；
+`cd`、`export`、`unset`、`exit`、`clear` 这类会改变 shell 状态或强交互行为的
+内置命令暂不支持出现在管道中。
 
-```rust
-struct Command {
-    program: String,
-    args: Vec<String>,
-    redirection: Redirection,
-}
+## 项目结构
+
+```text
+src/
+  lib.rs           # 库 crate 入口，供集成测试复用核心模块
+  main.rs          # 交互式主循环
+  types.rs         # 命令、管道、解析结果和执行状态类型
+  lexer.rs         # 输入行到 token 流
+  parser.rs        # token 流到 ParsedLine
+  prompt.rs        # prompt 构造与着色
+  builtin.rs       # 内置命令
+  executor.rs      # 外部命令、管道、fork/exec/wait
+  redirection.rs   # 重定向与 fd 保存恢复
+  diagnostics.rs   # 统一错误输出
+tests/
+  lexer.rs         # lexer 行为测试
+  parser.rs        # parser 行为测试
+  smoke.rs         # 启动真实二进制的端到端烟测
 ```
 
-`program` 保存命令名称，`args` 保存命令的剩余参数，`redirection` 保存标准输入
-和标准输出重定向设置。执行外部命令时，`ecsh` 会重新构造 Unix 风格的 `argv`，
-并把 `program` 放到 `argv[0]`。
-
-shell 还维护一个最小运行时状态 `ShellState`，当前其中保存上一条命令的退出状态
-`last_status`。内置命令 `status` 会直接打印这个状态码，后续 `$?`、`&&`、`||`
-等功能也会复用这一状态。当前 `$?` 已经会在解析阶段展开为这一状态码。两行
-prompt 也会读取这一状态；当用户直接按回车输入空行时，主循环会把状态恢复为
-成功，避免旧错误码一直挂在提示符上。
-
-空输入不会被视为错误。用户直接按下 Enter 时，shell 会直接进入下一轮提示符。
-
-环境变量相关内置命令必须在 shell 进程自身执行，因为它们的效果需要在命令返回后
-继续保留。`export` 和 `unset` 在调用 Rust 的环境变量修改 API 之前，会使用
-`[A-Za-z_][A-Za-z0-9_]*` 规则校验变量名。
-
-`clear` 会直接向终端写入 ANSI 转义序列，并跳过命令生命周期提示，使它更接近
-真实交互式 shell 中的清屏命令。scrollback 历史能否被清除取决于终端支持。
-
-prompt 当前由 `prompt.rs` 统一构造。第一行显示 shell 标识、用户名、主机名、
-当前目录和可选状态码；第二行显示真正的输入提示符 `$ `。主机名会优先读取
-`HOSTNAME` 环境变量，不存在时再通过 `nix::unistd::gethostname()` 获取。
-为了避免把 ANSI 控制序列写进重定向目标，prompt 只有在 `stdout` 连接到 tty
-时才启用颜色。
-
-解析现在分为两层：`lexer.rs` 先把输入行扫描为 token 流，`parser.rs` 再把
-token 流转换为 `ParsedLine`。当前 lexer 支持普通词、单引号、双引号、`|`、
-`&&`、`||`、`<`、`>`、`>>`。引号只影响当前词内部的解释方式，不会自动结束
-当前词，因此 `a"b"c` 会被解析为一个词 `abc`。当前暂不支持反斜杠转义、
-命令替换、here-doc `<<`、单个 `&` 后台执行和完整 POSIX shell 词法规则。
-
-管道使用标准 shell 语义中的 `|`。`ecsh` 会先创建 `n - 1` 个匿名 pipe，
-再为 pipeline 中的每条外部命令 `fork` 一个子进程，并在子进程中使用
-`dup2_stdin` / `dup2_stdout` 绑定标准输入输出。父进程在创建完所有子进程后
-关闭自己的 pipe 文件描述符，并等待所有子进程结束。
-
-重定向解析基于 token 流完成，因此操作符和普通词之间可以没有空白，例如
-`echo hello>out.txt` 和 `cat<in.txt`。外部命令的重定向在子进程中完成；
-普通内置命令运行在 shell 进程自身，因此会先
-保存原始标准输入输出 fd，应用临时重定向，执行完成并刷新缓冲区后再恢复 fd。
-相关资源管理逻辑集中在 `redirection.rs` 中，避免 `executor.rs` 同时承担过多
-文件描述符细节。管道中的重定向当前只支持边界位置：第一条命令可以使用 `<`，
-最后一条命令可以使用 `>` 或 `>>`。
-
-当前版本的管道仍然是简化实现：pipeline 中只支持 `help`、`pwd`、`env` 这类
-纯输出型内置命令；`cd`、`export`、`unset`、`exit`、`clear` 这类会改变 shell
-状态或强交互行为的内置命令暂不支持出现在管道中。
-
-变量展开当前仍然是最小实现：支持 `$?`、`$NAME`、`${NAME}` 和词内前后缀拼接。
-单引号内不展开变量，双引号内会展开变量。`${...}` 内当前只支持环境变量名形式
-`[A-Za-z_][A-Za-z0-9_]*`，不支持位置参数、默认值语法或更完整的参数展开。
-
-执行层使用 `CommandStatus` 表示命令退出状态，用 `CommandFlow` 区分“继续运行”
-和 “exit 请求退出 shell”。当前状态码已经会从 `waitpid` 的 `WaitStatus` 转换出来，
-并保存在 `ShellState.last_status` 中，供 `status` 和 `$?` 展开复用。`&&` 和
-`||` 通过递归执行 `ParsedLine` 实现：`&&` 只在左侧成功时执行右侧，`||` 只在
-左侧失败时执行右侧。
+更详细的实现说明见 [docs/design.md](docs/design.md)，后续计划见
+[docs/roadmap.md](docs/roadmap.md)。
 
 ## 测试
-
-项目当前使用 `lib + bin` 结构：核心逻辑通过 `src/lib.rs` 暴露，`src/main.rs`
-负责交互式二进制入口。测试放在 `tests/` 目录中，从 crate 外部调用公共接口：
-
-- `tests/lexer.rs`：覆盖 token 扫描、引号、变量展开、操作符和词法错误
-- `tests/parser.rs`：覆盖命令、重定向、管道、条件执行 AST 和解析错误
-- `tests/smoke.rs`：启动真实 `ecsh` 二进制，做端到端烟测
 
 常用验证命令：
 
@@ -191,51 +96,6 @@ cargo fmt --check
 cargo check
 cargo test
 ```
-
-## 开发计划
-
-### 阶段 1：基础命令执行
-
-- [x] 从标准输入读取命令
-- [x] 解析简单的空白分隔参数
-- [x] 实现 `help` 和 `exit`
-- [x] 执行外部命令
-- [x] 报告无效命令
-- [x] 实现 `cd` 和 `pwd`
-- [x] 添加环境变量相关内置命令：
-  - `env`
-  - `export`
-  - `unset`
-- [x] 将 `clear` 实现为安静的交互式内置命令
-
-### 阶段 2：Unix 连接机制
-
-- [x] 支持标准管道 `|`
-- [x] 支持部分纯输出型内置命令进入管道
-- [x] 拆分 lexer、parser、builtin、executor、types 和 diagnostics 模块
-- [x] 引入基础命令状态模型
-- [x] 支持标准输入和标准输出重定向
-- [x] 支持普通内置命令的临时重定向
-- [x] 支持管道边界重定向
-- [x] 将重定向资源管理拆分到独立模块
-- [x] 保存上一条命令的退出状态，并提供 `status` 内置命令
-- [x] 支持最小变量展开：`$?`、`$NAME`、`${NAME}` 及词内前后缀拼接
-- [x] 支持单引号、双引号和无空格重定向
-- [x] 支持 `&&` 和 `||` 条件执行
-
-### 阶段 3：交互式 shell 行为
-
-- [x] 改进提示符显示
-- [ ] 添加命令历史
-- [ ] 处理常见交互式信号
-- [ ] 探索前台进程组和作业控制
-
-### 阶段 4：脚本化特性
-
-- [ ] 变量
-- [ ] 更完整的展开与引用规则
-- [ ] 循环
-- [ ] 函数
 
 ## 实验要求
 

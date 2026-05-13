@@ -1,7 +1,15 @@
 use crate::diagnostics::print_error;
 use crate::types::Command;
 use crate::types::{CommandFlow, CommandStatus, ShellState};
+use nix::unistd::isatty;
 use std::io::{self, Write};
+
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_HOT_PINK: &str = "\x1b[1;38;5;201m";
+const ANSI_NEON_GREEN: &str = "\x1b[1;38;5;120m";
+const ANSI_SUN_YELLOW: &str = "\x1b[1;38;5;226m";
+const ANSI_ELECTRIC_CYAN: &str = "\x1b[1;38;5;51m";
+const ANSI_WARM_ORANGE: &str = "\x1b[1;38;5;214m";
 
 #[derive(Clone, Copy)]
 pub enum BuiltinKind {
@@ -46,6 +54,7 @@ pub fn run_builtin(command: &Command, state: &mut ShellState) -> Option<CommandF
 
     match kind {
         BuiltinKind::Help => {
+            print_help_title();
             println!("ecsh builtins:");
             println!("  help - show this help message");
             println!("  cd - change current working directory");
@@ -67,6 +76,30 @@ pub fn run_builtin(command: &Command, state: &mut ShellState) -> Option<CommandF
         BuiltinKind::Clear => Some(CommandFlow::Continue(run_clear())),
         BuiltinKind::Status => Some(CommandFlow::Continue(run_status(state))),
     }
+}
+
+fn print_help_title() {
+    let use_color = isatty(io::stdout()).unwrap_or(false);
+
+    // 和 prompt 一样，只有输出到真实终端时才写入 ANSI 颜色。
+    // 这里故意做成“每个词一个颜色”的小彩蛋；重定向到文件时仍然是纯文本。
+    println!(
+        "{}ecsh{} - {}Elaine{} {}&{} {}Cornelia's{} {}shell{}",
+        color_prefix(use_color, ANSI_HOT_PINK),
+        color_prefix(use_color, ANSI_RESET),
+        color_prefix(use_color, ANSI_NEON_GREEN),
+        color_prefix(use_color, ANSI_RESET),
+        color_prefix(use_color, ANSI_SUN_YELLOW),
+        color_prefix(use_color, ANSI_RESET),
+        color_prefix(use_color, ANSI_ELECTRIC_CYAN),
+        color_prefix(use_color, ANSI_RESET),
+        color_prefix(use_color, ANSI_WARM_ORANGE),
+        color_prefix(use_color, ANSI_RESET),
+    );
+}
+
+fn color_prefix<'a>(use_color: bool, color: &'a str) -> &'a str {
+    if use_color { color } else { "" }
 }
 
 fn run_cd(command: &Command) -> CommandStatus {
