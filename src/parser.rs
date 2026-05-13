@@ -95,6 +95,8 @@ fn parse_pipeline(line: &str) -> Result<Option<Pipeline>, String> {
             parse_args(part)
                 .and_then(|command| command.ok_or_else(|| "empty command in pipeline".to_string()))
         })
+        // collect 可以把 Iterator<Result<Command, String>> 收集成 Result<Vec<Command>, String>。
+        // 只要其中任何一段解析失败，整个 pipeline 解析就会提前返回 Err。
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Some(Pipeline { commands }))

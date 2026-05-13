@@ -20,6 +20,7 @@ pub enum BuiltinResult {
 }
 
 // 所有内置命令名称只在这里维护一份。
+// 将命令名称映射为对应的 BuiltinKind。
 pub fn builtin_kind(command: &Command) -> Option<BuiltinKind> {
     match command.program.as_str() {
         "help" => Some(BuiltinKind::Help),

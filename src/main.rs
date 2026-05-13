@@ -2,6 +2,7 @@ mod builtin;
 mod diagnostics;
 mod executor;
 mod parser;
+mod redirection;
 mod types;
 
 use crate::diagnostics::print_error;

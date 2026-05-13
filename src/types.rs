@@ -1,3 +1,5 @@
+pub type ShellResult<T> = Result<T, Box<dyn std::error::Error>>;
+
 pub struct Command {
     pub program: String,
     pub args: Vec<String>,
