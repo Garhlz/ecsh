@@ -7,3 +7,4 @@ description = "Elaine & Cornelia's shell: a learning-oriented Unix-like shell wr
 
 [dependencies]
 nix = { version = "0.31.3", features = ["process", "fs", "term", "hostname"] }
+rustyline = "18.0.0"
