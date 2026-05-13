@@ -12,6 +12,8 @@ shell，主要用于操作系统实验练习。
 - 外部命令执行：`fork`、`execvp`、`waitpid`
 - 内置命令：`help`、`exit`、`cd`、`pwd`、`env`、`export`、`unset`、`clear`、`status`
 - 两行 prompt：显示 `[ecsh] user@host:cwd` 和上一条命令的非 0 状态码
+- 启动欢迎页：交互式启动时打印欢迎词并展示内置命令帮助
+- 交互式输入：使用 `rustyline` 支持命令历史、方向键导航和基础行编辑
 - lexer + parser：支持单引号、双引号、变量展开和操作符 token
 - 变量展开：`$?`、`$NAME`、`${NAME}`，以及 `prefix-$HOME`、`$HOME/file` 这类词内拼接
 - 管道：支持标准 Unix 管道 `|`
@@ -63,6 +65,10 @@ exit
 管道中的内置命令也仍是简化实现：目前只支持纯输出型内置命令进入管道；
 `cd`、`export`、`unset`、`exit`、`clear` 这类会改变 shell 状态或强交互行为的
 内置命令暂不支持出现在管道中。
+
+交互式历史记录保存在 `~/.ecsh_history`。当 `ecsh` 被管道或测试程序驱动时，
+会退回普通按行读取模式，因此 `printf 'echo hi\nexit\n' | cargo run` 这类用法
+仍然可用。
 
 ## 项目结构
 

@@ -54,17 +54,7 @@ pub fn run_builtin(command: &Command, state: &mut ShellState) -> Option<CommandF
 
     match kind {
         BuiltinKind::Help => {
-            print_help_title();
-            println!("ecsh builtins:");
-            println!("  help - show this help message");
-            println!("  cd - change current working directory");
-            println!("  pwd - print working directory");
-            println!("  exit - exit the shell");
-            println!("  env - print environment variables");
-            println!("  export KEY=value - set environment variable");
-            println!("  unset KEY - remove environment variable");
-            println!("  clear - clear the terminal screen");
-            println!("  status - print last command status");
+            print_help();
             Some(CommandFlow::Continue(CommandStatus::success()))
         }
         BuiltinKind::Exit => Some(CommandFlow::Exit(CommandStatus::success())),
@@ -76,6 +66,20 @@ pub fn run_builtin(command: &Command, state: &mut ShellState) -> Option<CommandF
         BuiltinKind::Clear => Some(CommandFlow::Continue(run_clear())),
         BuiltinKind::Status => Some(CommandFlow::Continue(run_status(state))),
     }
+}
+
+pub fn print_help() {
+    print_help_title();
+    println!("ecsh builtins:");
+    println!("  help - show this help message");
+    println!("  cd - change current working directory");
+    println!("  pwd - print working directory");
+    println!("  exit - exit the shell");
+    println!("  env - print environment variables");
+    println!("  export KEY=value - set environment variable");
+    println!("  unset KEY - remove environment variable");
+    println!("  clear - clear the terminal screen");
+    println!("  status - print last command status");
 }
 
 fn print_help_title() {
