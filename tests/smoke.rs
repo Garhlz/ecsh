@@ -61,3 +61,18 @@ exit
 
     let _ = std::fs::remove_file("/tmp/ecsh_smoke_out");
 }
+
+#[test]
+fn smoke_executes_sequence_operator() {
+    let output = run_ecsh(
+        r#"echo a; echo b
+false; echo still
+exit; echo no
+"#,
+    );
+
+    assert!(output.contains("\na\n"));
+    assert!(output.contains("\nb\n"));
+    assert!(output.contains("still"));
+    assert!(!output.contains("\nno\n"));
+}

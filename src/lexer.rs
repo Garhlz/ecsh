@@ -69,6 +69,11 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
                 '\"' => {
                     lexer_status = LexerStatus::DoubleQuoted;
                 }
+                ';' => {
+                    // 只有Normal状态下才是操作符
+                    flush_word(&mut result, &mut acc_word);
+                    result.push(Token::Semicolon);
+                }
                 _ => {
                     acc_word.push(ch);
                 }

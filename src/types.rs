@@ -69,6 +69,7 @@ pub enum ParsedLine {
     Pipeline(Pipeline),
     AndThen(Box<ParsedLine>, Box<ParsedLine>), // &&的控制流
     OrElse(Box<ParsedLine>, Box<ParsedLine>),  // ||的控制流
+    Sequence(Box<ParsedLine>, Box<ParsedLine>), // ;的控制流
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,6 +119,7 @@ pub enum Token {
     RedirectionIn,
     RedirectionTruncate,
     RedirectionAppend,
+    Semicolon,
 }
 
 #[derive(Debug, PartialEq, Eq)]

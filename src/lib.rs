@@ -1,6 +1,7 @@
 pub mod builtin;
 pub mod diagnostics;
 pub mod executor;
+pub mod input;
 pub mod lexer;
 pub mod parser;
 pub mod prompt;

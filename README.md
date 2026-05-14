@@ -19,6 +19,7 @@ shell，主要用于操作系统实验练习。
 - 管道：支持标准 Unix 管道 `|`
 - 重定向：支持 `<`、`>`、`>>`，操作符可以不依赖空白分隔
 - 条件执行：支持 `&&` 和 `||`
+- 命令序列：支持 `;` 顺序执行多条命令
 - 普通内置命令支持临时重定向，执行结束后恢复 shell 的标准输入输出
 - 管道中支持 `help`、`pwd`、`env` 这类纯输出型内置命令
 - 统一错误输出，并保留实验要求的命令生命周期提示
@@ -50,6 +51,92 @@ status
 exit
 ```
 
+## 演示命令
+
+下面这组命令适合演示，基本覆盖当前版本的主要功能。
+
+### 基础命令和内置命令
+
+```bash
+help
+pwd
+cd /tmp
+pwd
+status
+```
+
+### 外部命令和错误处理
+
+```bash
+echo hello
+ls
+not-exist-command
+status
+echo $?
+```
+
+### 环境变量和变量展开
+
+```bash
+export ECSH_DEMO=hello
+echo $ECSH_DEMO
+echo prefix-$ECSH_DEMO
+echo ${ECSH_DEMO}/path
+env | grep ECSH_DEMO
+unset ECSH_DEMO
+echo $ECSH_DEMO
+```
+
+### 引号和操作符字面量
+
+```bash
+echo "hello world"
+echo '$HOME'
+echo "$HOME"
+echo "a|b && c > d"
+echo 'a;b'
+```
+
+### 管道
+
+```bash
+echo hello | grep h
+printf "a\nb\nc\n" | grep b | wc -l
+pwd | cat
+env | grep PATH
+```
+
+### 重定向
+
+```bash
+pwd > ecsh_demo.txt
+cat < ecsh_demo.txt
+echo done >> ecsh_demo.txt
+cat < ecsh_demo.txt | grep done > ecsh_result.txt
+cat ecsh_result.txt
+```
+
+### 条件执行和命令序列
+
+```bash
+true && echo ok
+false && echo should-not-print
+false || echo fallback
+true || echo should-not-print
+echo first; echo second; pwd
+false && echo no; echo yes
+```
+
+### 交互体验
+
+```text
+按 ↑ / ↓ 浏览历史命令
+按 ← / → 移动光标
+按 Ctrl-A / Ctrl-E 跳到行首/行尾
+按 Ctrl-C 取消当前输入行
+按 Ctrl-D 结束输入并退出 shell
+```
+
 ## 当前边界
 
 `ecsh` 不是完整 POSIX shell。当前暂不支持：
@@ -77,6 +164,7 @@ src/
   lib.rs           # 库 crate 入口，供集成测试复用核心模块
   main.rs          # 交互式主循环
   types.rs         # 命令、管道、解析结果和执行状态类型
+  input.rs         # rustyline 和普通 read_line 输入层
   lexer.rs         # 输入行到 token 流
   parser.rs        # token 流到 ParsedLine
   prompt.rs        # prompt 构造与着色
