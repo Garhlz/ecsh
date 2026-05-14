@@ -74,6 +74,20 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
                     flush_word(&mut result, &mut acc_word);
                     result.push(Token::Semicolon);
                 }
+                '\\' => {
+                    match chars.peek().copied() {
+                        None => {
+                            // 单独一个结尾反斜杠，在最小实现中直接报错
+                            // TODO 完整 shell 里可能会把 \newline 当作行续接
+                            return Err("trailing backslash".to_string());
+                        }
+                        Some(ch) => {
+                            // // 反斜杠会吞掉下一个字符，并把它作为普通字符加入当前 word。
+                            let _ = chars.next();
+                            acc_word.push(ch);
+                        }
+                    }
+                }
                 _ => {
                     acc_word.push(ch);
                 }
@@ -90,6 +104,21 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
             LexerStatus::DoubleQuoted => match ch {
                 '\"' => lexer_status = LexerStatus::Normal,
                 '$' => handle_dollar(&mut chars, &mut acc_word, state)?,
+                '\\' => match chars.peek().copied() {
+                    None => {
+                        return Err("trailing backslash in double quotes".to_string());
+                    }
+                    Some(ch) if matches!(ch, '\"' | '$' | '\\') => {
+                        // 这几个特殊符号失去特殊含义
+                        let _ = chars.next(); // 消费掉
+                        acc_word.push(ch);
+                    }
+                    Some(ch) => {
+                        let _ = chars.next();
+                        acc_word.push('\\');
+                        acc_word.push(ch);
+                    }
+                },
                 _ => acc_word.push(ch),
             },
         }

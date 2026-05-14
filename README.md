@@ -15,6 +15,7 @@ shell，主要用于操作系统实验练习。
 - 启动欢迎页：交互式启动时打印欢迎词并展示内置命令帮助
 - 交互式输入：使用 `rustyline` 支持命令历史、方向键导航和基础行编辑
 - lexer + parser：支持单引号、双引号、变量展开和操作符 token
+- 反斜杠转义：支持普通状态和双引号内的最小转义规则
 - 变量展开：`$?`、`$NAME`、`${NAME}`，以及 `prefix-$HOME`、`$HOME/file` 这类词内拼接
 - 管道：支持标准 Unix 管道 `|`
 - 重定向：支持 `<`、`>`、`>>`，操作符可以不依赖空白分隔
@@ -95,6 +96,9 @@ echo '$HOME'
 echo "$HOME"
 echo "a|b && c > d"
 echo 'a;b'
+echo hello\ world
+echo \|
+echo "price: \$10"
 ```
 
 ### 管道
@@ -141,7 +145,6 @@ false && echo no; echo yes
 
 `ecsh` 不是完整 POSIX shell。当前暂不支持：
 
-- 反斜杠转义
 - 命令替换
 - here-doc `<<`
 - 单个 `&` 后台执行

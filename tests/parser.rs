@@ -119,6 +119,24 @@ fn parses_sequence_as_lowest_precedence_left_associative_operator() {
 }
 
 #[test]
+fn parses_backslash_escaped_words() {
+    assert_eq!(
+        parse_line(r#"echo hello\ world"#, &state()).unwrap(),
+        ParsedLine::Command(command("echo", &["hello world"]))
+    );
+
+    assert_eq!(
+        parse_line(r#"echo \| cat"#, &state()).unwrap(),
+        ParsedLine::Command(command("echo", &["|", "cat"]))
+    );
+
+    assert_eq!(
+        parse_line(r#"echo "\$HOME""#, &state()).unwrap(),
+        ParsedLine::Command(command("echo", &["$HOME"]))
+    );
+}
+
+#[test]
 fn parses_quoted_pipeline_operator_as_word() {
     assert_eq!(
         parse_line(r#"echo "a|b""#, &state()).unwrap(),
