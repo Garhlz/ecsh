@@ -148,6 +148,40 @@ fn tokenizes_sequence_operator() {
 }
 
 #[test]
+fn tokenizes_backslash_escapes() {
+    assert_eq!(
+        tokenize(r#"echo hello\ world \| \$HOME \; \" \'"#, &state()).unwrap(),
+        vec![
+            Token::Word("echo".to_string()),
+            Token::Word("hello world".to_string()),
+            Token::Word("|".to_string()),
+            Token::Word("$HOME".to_string()),
+            Token::Word(";".to_string()),
+            Token::Word("\"".to_string()),
+            Token::Word("'".to_string()),
+        ]
+    );
+
+    assert_eq!(
+        tokenize(r#"echo 'a\ b'"#, &state()).unwrap(),
+        vec![
+            Token::Word("echo".to_string()),
+            Token::Word(r#"a\ b"#.to_string()),
+        ]
+    );
+
+    assert_eq!(
+        tokenize(r#"echo "price: \$10" "path: C:\\tmp" "a\q""#, &state()).unwrap(),
+        vec![
+            Token::Word("echo".to_string()),
+            Token::Word("price: $10".to_string()),
+            Token::Word(r#"path: C:\tmp"#.to_string()),
+            Token::Word(r#"a\q"#.to_string()),
+        ]
+    );
+}
+
+#[test]
 fn reports_lexer_errors() {
     assert_eq!(
         tokenize("echo \"unterminated", &state()).unwrap_err(),
@@ -168,5 +202,13 @@ fn reports_lexer_errors() {
     assert_eq!(
         tokenize("sleep 1 &", &state()).unwrap_err(),
         "single '&' is not supported yet"
+    );
+    assert_eq!(
+        tokenize(r#"echo hello\"#, &state()).unwrap_err(),
+        "trailing backslash"
+    );
+    assert_eq!(
+        tokenize(r#"echo "hello\"#, &state()).unwrap_err(),
+        "trailing backslash in double quotes"
     );
 }
