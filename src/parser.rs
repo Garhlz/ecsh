@@ -9,8 +9,38 @@ pub fn parse_line(line: &str, state: &ShellState) -> Result<ParsedLine, String> 
 }
 
 // 将 token 流转成当前 shell 的语法结构。
-// 现在支持普通命令、管道，以及 `&&` / `||` 组成的递归控制流 AST。
+// 现在支持普通命令、管道，以及 `;`、`&&`、`||` 组成的递归控制流 AST。
 fn parse_tokens(tokens: &[Token]) -> Result<ParsedLine, String> {
+    // 递归拆分Token流
+    // 越先处理的操作符，优先级越低
+    if let Some(pos) = tokens
+        .iter()
+        .rposition(|tok| matches!(tok, Token::Semicolon))
+    {
+        // 分号优先级最低，也按左结合处理。这里从右侧找到最后一个分号作为拆分点，
+        // 使 `a; b; c` 解析成 `(a; b); c`。
+        let (left, rest) = tokens.split_at(pos);
+        let (_op, right) = rest
+            .split_first()
+            .ok_or_else(|| "missing command around ;".to_string())?;
+
+        if left.is_empty() {
+            return Err("missing command before ;".to_string());
+        }
+        if right.is_empty() {
+            return Err("missing command after ;".to_string());
+        }
+
+        let left_parsed = parse_tokens(left)?;
+        let right_parsed = parse_tokens(right)?;
+        return Ok(ParsedLine::Sequence(
+            Box::new(left_parsed),
+            Box::new(right_parsed),
+        ));
+    }
+
+    // 如果存在 && 或者 ||
+    // 因为是左结合，所以从最右开始递归
     if let Some(pos) = tokens
         .iter()
         .rposition(|tok| matches!(tok, Token::AndIf | Token::OrIf))

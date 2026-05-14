@@ -94,6 +94,31 @@ fn parses_left_associative_logical_chain() {
 }
 
 #[test]
+fn parses_sequence_as_lowest_precedence_left_associative_operator() {
+    assert_eq!(
+        parse_line("echo a; echo b; echo c", &state()).unwrap(),
+        ParsedLine::Sequence(
+            Box::new(ParsedLine::Sequence(
+                Box::new(ParsedLine::Command(command("echo", &["a"]))),
+                Box::new(ParsedLine::Command(command("echo", &["b"]))),
+            )),
+            Box::new(ParsedLine::Command(command("echo", &["c"]))),
+        )
+    );
+
+    assert_eq!(
+        parse_line("false && echo no; echo yes", &state()).unwrap(),
+        ParsedLine::Sequence(
+            Box::new(ParsedLine::AndThen(
+                Box::new(ParsedLine::Command(command("false", &[]))),
+                Box::new(ParsedLine::Command(command("echo", &["no"]))),
+            )),
+            Box::new(ParsedLine::Command(command("echo", &["yes"]))),
+        )
+    );
+}
+
+#[test]
 fn parses_quoted_pipeline_operator_as_word() {
     assert_eq!(
         parse_line(r#"echo "a|b""#, &state()).unwrap(),
@@ -118,5 +143,13 @@ fn reports_parser_errors() {
     assert_eq!(
         parse_line("echo hi > a > b", &state()).unwrap_err(),
         "duplicate stdout redirection"
+    );
+    assert_eq!(
+        parse_line("; echo hi", &state()).unwrap_err(),
+        "missing command before ;"
+    );
+    assert_eq!(
+        parse_line("echo hi;", &state()).unwrap_err(),
+        "missing command after ;"
     );
 }

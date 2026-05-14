@@ -125,6 +125,29 @@ fn tokenizes_logical_operators() {
 }
 
 #[test]
+fn tokenizes_sequence_operator() {
+    assert_eq!(
+        tokenize("echo a;echo b", &state()).unwrap(),
+        vec![
+            Token::Word("echo".to_string()),
+            Token::Word("a".to_string()),
+            Token::Semicolon,
+            Token::Word("echo".to_string()),
+            Token::Word("b".to_string()),
+        ]
+    );
+
+    assert_eq!(
+        tokenize(r#"echo "a;b" 'c;d'"#, &state()).unwrap(),
+        vec![
+            Token::Word("echo".to_string()),
+            Token::Word("a;b".to_string()),
+            Token::Word("c;d".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn reports_lexer_errors() {
     assert_eq!(
         tokenize("echo \"unterminated", &state()).unwrap_err(),
