@@ -1,11 +1,18 @@
 use ecsh::parser::parse_line;
 use ecsh::types::{
-    Command, CommandStatus, OutputRedirection, ParsedLine, Pipeline, Redirection, ShellState,
+    Command, CommandStatus, OutputRedirection, ParsedJob, ParsedLine, Pipeline, Redirection,
+    ShellState,
 };
 
 fn state() -> ShellState {
     ShellState {
         last_status: CommandStatus::new(3),
+        interactive: false,
+        shell_pgid: None,
+        shell_terminal_fd: None,
+        jobs: Vec::new(),
+        next_job_id: 1,
+        current_fg_pgid: None,
     }
 }
 
@@ -17,11 +24,30 @@ fn command(program: &str, args: &[&str]) -> Command {
     }
 }
 
+fn parsed_job(line: ParsedLine, command_line: &str) -> ParsedJob {
+    ParsedJob {
+        line,
+        background: false,
+        command_line: command_line.to_string(),
+    }
+}
+
+fn background_job(line: ParsedLine, command_line: &str) -> ParsedJob {
+    ParsedJob {
+        line,
+        background: true,
+        command_line: command_line.to_string(),
+    }
+}
+
 #[test]
 fn parses_simple_command_with_quotes() {
     assert_eq!(
         parse_line(r#"echo "hello world""#, &state()).unwrap(),
-        ParsedLine::Command(command("echo", &["hello world"]))
+        parsed_job(
+            ParsedLine::Command(command("echo", &["hello world"])),
+            r#"echo "hello world""#,
+        )
     );
 }
 
@@ -29,14 +55,17 @@ fn parses_simple_command_with_quotes() {
 fn parses_command_with_redirection_without_spaces() {
     assert_eq!(
         parse_line("echo hi>out.txt", &state()).unwrap(),
-        ParsedLine::Command(Command {
-            program: "echo".to_string(),
-            args: vec!["hi".to_string()],
-            redirection: Redirection {
-                stdin: None,
-                stdout: Some(OutputRedirection::Truncate("out.txt".to_string())),
-            },
-        })
+        parsed_job(
+            ParsedLine::Command(Command {
+                program: "echo".to_string(),
+                args: vec!["hi".to_string()],
+                redirection: Redirection {
+                    stdin: None,
+                    stdout: Some(OutputRedirection::Truncate("out.txt".to_string())),
+                },
+            }),
+            "echo hi>out.txt"
+        )
     );
 }
 
@@ -44,19 +73,22 @@ fn parses_command_with_redirection_without_spaces() {
 fn parses_pipeline() {
     assert_eq!(
         parse_line("cat<in.txt | grep hi", &state()).unwrap(),
-        ParsedLine::Pipeline(Pipeline {
-            commands: vec![
-                Command {
-                    program: "cat".to_string(),
-                    args: vec![],
-                    redirection: Redirection {
-                        stdin: Some("in.txt".to_string()),
-                        stdout: None,
+        parsed_job(
+            ParsedLine::Pipeline(Pipeline {
+                commands: vec![
+                    Command {
+                        program: "cat".to_string(),
+                        args: vec![],
+                        redirection: Redirection {
+                            stdin: Some("in.txt".to_string()),
+                            stdout: None,
+                        },
                     },
-                },
-                command("grep", &["hi"]),
-            ],
-        })
+                    command("grep", &["hi"]),
+                ],
+            }),
+            "cat<in.txt | grep hi"
+        )
     );
 }
 
@@ -64,17 +96,23 @@ fn parses_pipeline() {
 fn parses_logical_operators() {
     assert_eq!(
         parse_line("true && echo ok", &state()).unwrap(),
-        ParsedLine::AndThen(
-            Box::new(ParsedLine::Command(command("true", &[]))),
-            Box::new(ParsedLine::Command(command("echo", &["ok"]))),
+        parsed_job(
+            ParsedLine::AndThen(
+                Box::new(ParsedLine::Command(command("true", &[]))),
+                Box::new(ParsedLine::Command(command("echo", &["ok"]))),
+            ),
+            "true && echo ok"
         )
     );
 
     assert_eq!(
         parse_line("false || echo fallback", &state()).unwrap(),
-        ParsedLine::OrElse(
-            Box::new(ParsedLine::Command(command("false", &[]))),
-            Box::new(ParsedLine::Command(command("echo", &["fallback"]))),
+        parsed_job(
+            ParsedLine::OrElse(
+                Box::new(ParsedLine::Command(command("false", &[]))),
+                Box::new(ParsedLine::Command(command("echo", &["fallback"]))),
+            ),
+            "false || echo fallback"
         )
     );
 }
@@ -83,12 +121,15 @@ fn parses_logical_operators() {
 fn parses_left_associative_logical_chain() {
     assert_eq!(
         parse_line("false || true && echo done", &state()).unwrap(),
-        ParsedLine::AndThen(
-            Box::new(ParsedLine::OrElse(
-                Box::new(ParsedLine::Command(command("false", &[]))),
-                Box::new(ParsedLine::Command(command("true", &[]))),
-            )),
-            Box::new(ParsedLine::Command(command("echo", &["done"]))),
+        parsed_job(
+            ParsedLine::AndThen(
+                Box::new(ParsedLine::OrElse(
+                    Box::new(ParsedLine::Command(command("false", &[]))),
+                    Box::new(ParsedLine::Command(command("true", &[]))),
+                )),
+                Box::new(ParsedLine::Command(command("echo", &["done"]))),
+            ),
+            "false || true && echo done"
         )
     );
 }
@@ -97,23 +138,29 @@ fn parses_left_associative_logical_chain() {
 fn parses_sequence_as_lowest_precedence_left_associative_operator() {
     assert_eq!(
         parse_line("echo a; echo b; echo c", &state()).unwrap(),
-        ParsedLine::Sequence(
-            Box::new(ParsedLine::Sequence(
-                Box::new(ParsedLine::Command(command("echo", &["a"]))),
-                Box::new(ParsedLine::Command(command("echo", &["b"]))),
-            )),
-            Box::new(ParsedLine::Command(command("echo", &["c"]))),
+        parsed_job(
+            ParsedLine::Sequence(
+                Box::new(ParsedLine::Sequence(
+                    Box::new(ParsedLine::Command(command("echo", &["a"]))),
+                    Box::new(ParsedLine::Command(command("echo", &["b"]))),
+                )),
+                Box::new(ParsedLine::Command(command("echo", &["c"]))),
+            ),
+            "echo a; echo b; echo c"
         )
     );
 
     assert_eq!(
         parse_line("false && echo no; echo yes", &state()).unwrap(),
-        ParsedLine::Sequence(
-            Box::new(ParsedLine::AndThen(
-                Box::new(ParsedLine::Command(command("false", &[]))),
-                Box::new(ParsedLine::Command(command("echo", &["no"]))),
-            )),
-            Box::new(ParsedLine::Command(command("echo", &["yes"]))),
+        parsed_job(
+            ParsedLine::Sequence(
+                Box::new(ParsedLine::AndThen(
+                    Box::new(ParsedLine::Command(command("false", &[]))),
+                    Box::new(ParsedLine::Command(command("echo", &["no"]))),
+                )),
+                Box::new(ParsedLine::Command(command("echo", &["yes"]))),
+            ),
+            "false && echo no; echo yes"
         )
     );
 }
@@ -122,17 +169,26 @@ fn parses_sequence_as_lowest_precedence_left_associative_operator() {
 fn parses_backslash_escaped_words() {
     assert_eq!(
         parse_line(r#"echo hello\ world"#, &state()).unwrap(),
-        ParsedLine::Command(command("echo", &["hello world"]))
+        parsed_job(
+            ParsedLine::Command(command("echo", &["hello world"])),
+            r#"echo hello\ world"#,
+        )
     );
 
     assert_eq!(
         parse_line(r#"echo \| cat"#, &state()).unwrap(),
-        ParsedLine::Command(command("echo", &["|", "cat"]))
+        parsed_job(
+            ParsedLine::Command(command("echo", &["|", "cat"])),
+            r#"echo \| cat"#
+        )
     );
 
     assert_eq!(
         parse_line(r#"echo "\$HOME""#, &state()).unwrap(),
-        ParsedLine::Command(command("echo", &["$HOME"]))
+        parsed_job(
+            ParsedLine::Command(command("echo", &["$HOME"])),
+            r#"echo "\$HOME""#
+        )
     );
 }
 
@@ -140,7 +196,28 @@ fn parses_backslash_escaped_words() {
 fn parses_quoted_pipeline_operator_as_word() {
     assert_eq!(
         parse_line(r#"echo "a|b""#, &state()).unwrap(),
-        ParsedLine::Command(command("echo", &["a|b"]))
+        parsed_job(
+            ParsedLine::Command(command("echo", &["a|b"])),
+            r#"echo "a|b""#
+        )
+    );
+}
+
+#[test]
+fn parses_background_command_and_pipeline() {
+    assert_eq!(
+        parse_line("sleep 1 &", &state()).unwrap(),
+        background_job(ParsedLine::Command(command("sleep", &["1"])), "sleep 1 &")
+    );
+
+    assert_eq!(
+        parse_line("echo hi | cat &", &state()).unwrap(),
+        background_job(
+            ParsedLine::Pipeline(Pipeline {
+                commands: vec![command("echo", &["hi"]), command("cat", &[])],
+            }),
+            "echo hi | cat &",
+        )
     );
 }
 
@@ -169,5 +246,17 @@ fn reports_parser_errors() {
     assert_eq!(
         parse_line("echo hi;", &state()).unwrap_err(),
         "missing command after ;"
+    );
+    assert_eq!(
+        parse_line("sleep 1 & echo later", &state()).unwrap_err(),
+        "background '&' is only supported at the end of a command"
+    );
+    assert_eq!(
+        parse_line("true && echo ok &", &state()).unwrap_err(),
+        "background execution is only supported for a single command or pipeline"
+    );
+    assert_eq!(
+        parse_line("&", &state()).unwrap_err(),
+        "missing command before &"
     );
 }

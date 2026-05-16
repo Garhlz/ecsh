@@ -1,3 +1,15 @@
+//! 重定向处理：`<` 输入重定向、`>` / `>>` 输出重定向。
+//!
+//! 分两条路径：
+//!   1. shell 进程内（builtin 用）→ apply → run → flush → restore 五步走
+//!   2. 子进程（外部命令用）→ 直接 dup2，不恢复（进程 exec 或 exit 后 fd 自动消失）
+//!
+//! 涉及的 POSIX 调用：
+//!   - open(path, flags, mode) → 打开文件，返回 fd
+//!   - dup(fd)       → 复制 fd，返回指向同一文件的新 fd（用于保存原始 stdin/stdout）
+//!   - dup2_stdin(fd) → 让 stdin(0) 指向 fd
+//!   - dup2_stdout(fd)→ 让 stdout(1) 指向 fd
+
 use crate::diagnostics::print_error;
 use crate::types::{Command, OutputRedirection, ShellResult};
 use nix::fcntl::{OFlag, open};
@@ -7,36 +19,39 @@ use std::io::{self, Write};
 use std::os::fd::OwnedFd;
 use std::process;
 
+/// 保存被重定向覆盖前的原始 stdin/stdout fd。
+///
+/// 每个字段是原 fd 的副本（通过 dup 创建），之后通过 dup2 恢复。
 pub struct SavedRedirection {
     stdin: Option<OwnedFd>,
     stdout: Option<OwnedFd>,
 }
 
-// 对内置命令应用临时重定向，并保存原始标准输入输出用于恢复。
-//
-// 外部命令会在 fork 出来的子进程中处理重定向，子进程退出后 fd 修改自然消失。
-// 但 builtin 必须在 shell 进程自身执行，例如 `cd`、`export` 才能影响后续命令。
-// 因此 builtin 重定向不能直接改完 fd 就结束，必须先保存原 fd，再在执行后恢复。
+/// 在 shell 进程内应用命令的重定向，返回保存的原始 fd。
+///
+/// 步骤：
+///   1. 如果命令有 `<`：dup 保存原始 stdin → open 打开目标文件 → dup2_stdin 替换
+///   2. 如果命令有 `>` / `>>`：同样步䠤处理 stdout
+///   3. 如果任何步骤失败：恢复已修改的 fd（回滚），再返回错误
+///
+/// 用闭包包"可能失败的步骤"，是为了失败时统一回滚，
+/// 而不是在中间 `?` 返回后遗留已修改的 fd。
 pub fn apply_redirection_in_shell(command: &Command) -> ShellResult<SavedRedirection> {
     let mut saved = SavedRedirection {
         stdin: None,
         stdout: None,
     };
 
-    // 用闭包把“可能失败的重定向步骤”包起来，这样失败后可以统一恢复 fd。
-    // 如果在中间直接使用 `?` 从函数返回，已经完成的 dup2 就没有机会回滚。
     let result = (|| -> ShellResult<()> {
         if let Some(path) = &command.redirection.stdin {
-            // 保存标准输入 fd 的副本，避免重定向永久影响 shell 进程。
-            // `dup` 返回一个新的 OwnedFd，它和原 stdin 指向同一个底层打开文件描述。
+            // dup(io::stdin()) 复制当前 stdin fd，返回与它指向同一文件的新 fd。
+            // 之后通过这个保存的副本来恢复。
             let original_stdin = dup(io::stdin())?;
             let fd = open_input_redirection(path)?;
 
-            // dup2_stdin 会让标准输入 fd 指向 `fd` 对应的文件
+            // dup2_stdin(&fd)：让 fd 0（stdin）指向 fd 所描述的文件。
+            // 从此 println!/read_line 都作用于重定向文件。
             dup2_stdin(&fd)?;
-
-            // dup2 完成后，标准输入已经指向目标文件；这里可以关闭临时 fd。
-            // OwnedFd 在 drop 时会自动 close，避免手动 close 后的所有权混乱。
             drop(fd);
             saved.stdin = Some(original_stdin);
         }
@@ -45,7 +60,6 @@ pub fn apply_redirection_in_shell(command: &Command) -> ShellResult<SavedRedirec
             let original_stdout = dup(io::stdout())?;
             let fd = open_output_redirection(output_redirection)?;
 
-            // stdout 被替换后，println! 等写标准输出的代码会写入重定向文件。
             dup2_stdout(&fd)?;
             drop(fd);
             saved.stdout = Some(original_stdout);
@@ -53,8 +67,7 @@ pub fn apply_redirection_in_shell(command: &Command) -> ShellResult<SavedRedirec
 
         Ok(())
     })();
-    // 这里不能直接用 `?` 返回，因为出错时仍需恢复已经修改过的 fd。
-    // 闭包让重定向步骤先产出一个 Result，随后再统一处理回滚逻辑。
+
     if let Err(err) = result {
         let _ = restore_redirection(saved);
         return Err(err);
@@ -63,33 +76,37 @@ pub fn apply_redirection_in_shell(command: &Command) -> ShellResult<SavedRedirec
     Ok(saved)
 }
 
+/// 恢复之前被重定向修改的 stdin/stdout。
+///
+/// 把保存的原始 fd 通过 dup2 重新指回 stdin(0) 和 stdout(1)。
+/// OwnedFd 在离开作用域时自动 close，不会影响已恢复的标准 fd。
 pub fn restore_redirection(saved: SavedRedirection) -> ShellResult<()> {
     if let Some(stdin) = saved.stdin {
-        // 把标准输入重新指回保存下来的 fd。恢复后，SavedRedirection 持有的
-        // OwnedFd 会在离开作用域时关闭，不会影响已经恢复好的标准 fd。
         dup2_stdin(&stdin)?;
     }
 
     if let Some(stdout) = saved.stdout {
-        // 恢复 stdout 很关键，否则下一轮 shell 提示符也可能被写进重定向文件。
         dup2_stdout(&stdout)?;
     }
 
     Ok(())
 }
 
+/// 刷新 stdout 和 stderr 的缓冲区。
+///
+/// 在恢复重定向之前必须调用，确保缓冲区内容写入到重定向目标文件，
+/// 而不是在恢复后才被刷到终端。
 pub fn flush_standard_streams() -> ShellResult<()> {
-    // stdout 可能已经被重定向到文件。恢复 fd 前先 flush，确保缓冲区内容写入
-    // 当前目标，而不是在恢复后被刷到终端。
     io::stdout().flush()?;
     io::stderr().flush()?;
     Ok(())
 }
 
-// 子进程不返回错误，执行失败也直接退出，执行成功也不会返回。
-//
-// 这个函数只用于 fork 后的子进程路径。子进程不能把错误继续返回给 shell 主循环，
-// 否则父子进程会继续执行同一套 Rust 控制流；所以失败时打印错误并 exit(127)。
+/// 在子进程中应用命令的重定向。此函数不返回——成功则 exec 替换进程镜像，失败则 exit(127)。
+///
+/// 为什么子进程不需要 save/restore？
+///   - 成功路径：execvp 后用新程序的镜像替换了当前进程，不需要恢复
+///   - 失败路径：子进程直接 exit(127)，fd 随进程终止被内核回收
 pub fn handle_redirection_or_exit(command: &Command) {
     if let Some(path) = &command.redirection.stdin {
         let fd = match open_input_redirection(path) {
@@ -100,8 +117,6 @@ pub fn handle_redirection_or_exit(command: &Command) {
             }
         };
 
-        // 在子进程中不需要保存原 stdin，因为 execvp 成功后会替换进程镜像；
-        // execvp 失败时子进程也会立即退出。
         if let Err(err) = dup2_stdin(&fd) {
             print_error(format!("{}: dup2 stdin failed: {}", path, err));
             process::exit(127);
@@ -118,7 +133,6 @@ pub fn handle_redirection_or_exit(command: &Command) {
             }
         };
 
-        // 同理，子进程 stdout 重定向不需要恢复。
         if let Err(err) = dup2_stdout(&fd) {
             print_error(format!("dup2 stdout failed: {}", err));
             process::exit(127);
@@ -127,23 +141,27 @@ pub fn handle_redirection_or_exit(command: &Command) {
     }
 }
 
-// 打开输入重定向文件，并补充 shell 风格的错误上下文。
+/// 打开输入重定向文件（`<`）。
+///
+/// open(path, O_RDONLY)：只读模式打开。文件必须已存在。
 fn open_input_redirection(path: &str) -> ShellResult<OwnedFd> {
-    // 输入重定向要求目标文件已经存在，因此只使用 O_RDONLY。
     open(path, OFlag::O_RDONLY, Mode::empty())
         .map_err(|err| format!("{}: cannot open for input: {}", path, err).into())
 }
 
+/// 打开输出重定向文件（`>` 或 `>>`）。
+///
+///   - `>` : O_CREAT | O_WRONLY | O_TRUNC → 不存在则创建，存在则清空
+///   - `>>`: O_CREAT | O_WRONLY | O_APPEND → 不存在则创建，存在则追加
+///   - mode: 0o644 → rw-r--r--（所有者可读写，组和其他可读）
 fn open_output_redirection(output_redirection: &OutputRedirection) -> ShellResult<OwnedFd> {
     match output_redirection {
-        // `>`：不存在则创建，存在则清空。
         OutputRedirection::Truncate(path) => open(
             path.as_str(),
             OFlag::O_CREAT | OFlag::O_WRONLY | OFlag::O_TRUNC,
             Mode::from_bits_truncate(0o644),
         )
         .map_err(|err| format!("{}: cannot open for output: {}", path, err).into()),
-        // `>>`：不存在则创建，存在则从文件末尾追加。
         OutputRedirection::Append(path) => open(
             path.as_str(),
             OFlag::O_CREAT | OFlag::O_WRONLY | OFlag::O_APPEND,
