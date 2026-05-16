@@ -1,13 +1,28 @@
+//! 类型定义：shell 的所有核心数据结构。
+//!
+//! 按语义分层：
+//!   - 输入层：Token, LexerStatus
+//!   - 解析层：ParsedLine, ParsedJob, Command, Pipeline
+//!   - 执行层：ShellState, CommandStatus, CommandFlow, Redirection
+//!   - 作业层：Job, JobProcess, JobStatus, ProcessState
+
+use nix::unistd::Pid;
+use std::os::fd::RawFd;
+
+/// shell 内部统一的 Result 类型。
 pub type ShellResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-#[derive(Debug, PartialEq, Eq)]
+// ── 命令结构 ────────────────────────────────────────────────────────
+
+/// 一条完整的命令：程序名 + 参数列表 + 重定向。
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command {
     pub program: String,
     pub args: Vec<String>,
     pub redirection: Redirection,
 }
 
-// 用于在诊断信息中还原命令的可读形式。
+/// Display 实现：将 Command 还原为可读的命令行形式，用于诊断和 `jobs` 输出。
 impl std::fmt::Display for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.program)?;
@@ -35,43 +50,78 @@ impl std::fmt::Display for Command {
     }
 }
 
-pub struct ShellState {
-    pub last_status: CommandStatus,
-}
-
-/*
-管道按标准 shell 语义使用 `|`。
-
-cmd0 | cmd1 | cmd2
-
-cmd0:
-  stdin  <- shell stdin
-  stdout -> pipe0 write end
-
-cmd1:
-  stdin  <- pipe0 read end
-  stdout -> pipe1 write end
-
-cmd n-1:
-  stdin  <- pipe n-2 read end
-  stdout -> shell stdout
-*/
-#[derive(Debug, PartialEq, Eq)]
+/// 管道：一组用 `|` 连接的命令。
+///
+/// 数据流（以 3 条命令为例）：
+///   cmd0: stdin ← shell stdin,   stdout → pipe0 write
+///   cmd1: stdin ← pipe0 read,   stdout → pipe1 write
+///   cmd2: stdin ← pipe1 read,   stdout → shell stdout
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pipeline {
     pub commands: Vec<Command>,
 }
 
-// 一行输入解析后的语法结构。Command/Pipeline 是执行单元；
-// AndThen/OrElse 用于表达 `&&` / `||` 的控制流。
-#[derive(Debug, PartialEq, Eq)]
+/// 解析后的语法结构 AST。
+///
+/// 三种控制流操作符：
+///   - AndThen：`&&`，左侧成功（code=0）才执行右侧
+///   - OrElse：`||`，左侧失败（code≠0）才执行右侧
+///   - Sequence：`;`，左侧执行完无论成败都执行右侧（除非左侧请求 exit）
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParsedLine {
     Command(Command),
     Pipeline(Pipeline),
-    AndThen(Box<ParsedLine>, Box<ParsedLine>), // &&的控制流
-    OrElse(Box<ParsedLine>, Box<ParsedLine>),  // ||的控制流
-    Sequence(Box<ParsedLine>, Box<ParsedLine>), // ;的控制流
+    AndThen(Box<ParsedLine>, Box<ParsedLine>),
+    OrElse(Box<ParsedLine>, Box<ParsedLine>),
+    Sequence(Box<ParsedLine>, Box<ParsedLine>),
 }
 
+/// 解析后的完整作业：语法结构 + 前后台标志 + 命令原文。
+///
+/// line 只表达语法控制流；`background` 是执行层语义（`&`），分开存放。
+/// `command_line` 保存用户输入原文，供 `jobs` 命令展示。
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParsedJob {
+    pub line: ParsedLine,
+    pub background: bool,
+    pub command_line: String,
+}
+
+// ── 运行时状态 ──────────────────────────────────────────────────────
+
+/// Shell 全局运行时状态。
+///
+/// 交互模式下维护了完整的 job control 上下文：
+/// shell_pgid / shell_terminal_fd / current_fg_pgid 用于前台终端切换；
+/// jobs / next_job_id 用于后台/暂停作业管理。
+pub struct ShellState {
+    /// 上一条命令的退出码（`$?` 的值）。
+    pub last_status: CommandStatus,
+
+    /// 只有真实 tty 交互模式才启用 job control。
+    /// 非交互模式下，shell 回到"同步执行一条、返回一条"的简单模式。
+    pub interactive: bool,
+
+    /// shell 自己的进程组 PGID。闲置时终端前台必须指向它。
+    pub shell_pgid: Option<Pid>,
+
+    /// 控制终端 fd（借用 fd=0 stdin 作为句柄）。
+    /// 保存下来用于前台 job 和 shell 之间反复 tcsetpgrp 切换。
+    pub shell_terminal_fd: Option<RawFd>,
+
+    /// 后台和已停止的 job 表。
+    /// 前台 job 正常结束 → 不放入此表（没必要继续管理）；
+    /// 后台 job / Ctrl-Z 暂停的 job → 放入此表。
+    pub jobs: Vec<Job>,
+
+    /// 下一个分配的 job id（自增计数器）。
+    pub next_job_id: usize,
+
+    /// 当前正在占用终端前台的进程组（记录用，主要是表达运行时状态）。
+    pub current_fg_pgid: Option<Pid>,
+}
+
+/// 命令退出码（即 `$?` 的值）。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandStatus {
     pub code: i32,
@@ -91,40 +141,127 @@ impl CommandStatus {
     }
 }
 
-// 命令状态和 shell 控制流分开表达，避免用 bool 同时表示多种含义。
+/// 控制流：命令执行结果 + 是否要求 shell 退出。
+///
+/// 把"退出码"和"exit 命令"分开表达，
+/// 避免用特殊状态码（如 -1）同时表达两种含义。
 #[derive(Debug, PartialEq, Eq)]
 pub enum CommandFlow {
     Continue(CommandStatus),
     Exit(CommandStatus),
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+// ── 重定向 ──────────────────────────────────────────────────────────
+
+/// 单条命令的重定向描述。
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct Redirection {
+    /// `< file`：stdin 从文件读取。
     pub stdin: Option<String>,
+    /// `> file` 或 `>> file`：stdout 写入文件。
     pub stdout: Option<OutputRedirection>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+/// 输出重定向的两种模式。
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutputRedirection {
+    /// `>`：覆盖写入。
     Truncate(String),
+    /// `>>`：追加写入。
     Append(String),
 }
 
+// ── 作业控制 ────────────────────────────────────────────────────────
+
+/// 一个作业（Job）：shell 管理的最小调度单元。
+///
+/// 作业以进程组 pgid 为核心标识——
+/// 前台/后台切换、发 SIGCONT、接收 Ctrl-C，操作对象都是进程组。
+/// 单条命令的 Job 只有一个成员进程；管道的 Job 有多个成员进程。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Job {
+    /// Shell 分配的 job 编号（`jobs` 命令里的 [N]）。
+    pub id: usize,
+
+    /// 作业的进程组 ID。同一管道的所有进程共享同一个 pgid。
+    pub pgid: Pid,
+
+    /// 用户输入的命令行原文（供 `jobs` 输出展示）。
+    pub command_line: String,
+
+    /// 作业的聚合状态。
+    pub status: JobStatus,
+
+    /// 管道最后一条命令的 PID。shell 退出码取这个进程的结果。
+    pub last_pid: Pid,
+
+    /// 作业中所有进程的列表。
+    pub processes: Vec<JobProcess>,
+}
+
+/// 作业中的单个进程成员。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JobProcess {
+    pub pid: Pid,
+
+    /// shell 观察到的进程状态（与内核真实状态不完全一致，但足够支撑 jobs/fg/bg）。
+    pub state: ProcessState,
+
+    /// 该进程最后的退出/终止状态。
+    pub last_status: Option<CommandStatus>,
+}
+
+/// 单个进程的运行状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessState {
+    /// 正在运行中。
+    Running,
+    /// 被信号暂停（通常是 Ctrl-Z → SIGTSTP）。
+    Stopped,
+    /// 已退出或被信号终止。
+    Completed,
+}
+
+/// 整个作业的聚合状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobStatus {
+    Running,
+    Stopped,
+    Done(CommandStatus),
+}
+
+// ── 词法分析 ────────────────────────────────────────────────────────
+
+/// 词法分析的输出 Token。
 #[derive(Debug, PartialEq, Eq)]
 pub enum Token {
+    /// 普通词（程序名、参数、文件名等）。
     Word(String),
+    /// `|`
     Pipe,
+    /// `&&`
     AndIf,
+    /// `||`
     OrIf,
+    /// `&`
+    Ampersand,
+    /// `<`
     RedirectionIn,
+    /// `>`
     RedirectionTruncate,
+    /// `>>`
     RedirectionAppend,
+    /// `;`
     Semicolon,
 }
 
+/// 词法分析器的状态机状态。
 #[derive(Debug, PartialEq, Eq)]
 pub enum LexerStatus {
+    /// 正常模式：空格和操作符有特殊含义。
     Normal,
+    /// 单引号内：所有字符按字面量处理，不展开变量。
     SingleQuoted,
+    /// 双引号内：保留字面量但展开 $ 变量。
     DoubleQuoted,
 }

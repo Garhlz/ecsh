@@ -6,4 +6,5 @@ pub mod lexer;
 pub mod parser;
 pub mod prompt;
 pub mod redirection;
+pub mod signals;
 pub mod types;

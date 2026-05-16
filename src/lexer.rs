@@ -1,5 +1,20 @@
+//! 词法分析：将一行输入字符串拆成 Token 序列。
+//!
+//! 状态机有三种模式：Normal（正常）、SingleQuoted（单引号）、DoubleQuoted（双引号）。
+//! 空格和操作符在 Normal 模式下作为 token 边界；引号内所有内容保留为字面量。
+
 use crate::types::{LexerStatus, ShellState, Token};
 
+/// 将一行输入拆分为 Token 向量。
+///
+/// 处理流程：
+///   - 按字符遍历，根据当前 LexerStatus 选择不同的处理规则
+///   - 遇到空格或操作符时，将当前累积的词 flush 为 Token::Word
+///   - `$` 触发变量展开：支持 `$?`、`$NAME`、`${NAME}`
+///   - 引号切换 lexer 状态：`'` 进入 SingleQuoted，`"` 进入 DoubleQuoted
+///   - `\` 转义下一个字符
+///
+/// 返回 Err 的情况：未闭合引号、单独的结尾反斜杠、非法的变量展开语法。
 pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
     let mut chars = line.chars().peekable();
     let mut lexer_status = LexerStatus::Normal;
@@ -8,6 +23,7 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
 
     while let Some(ch) = chars.next() {
         match lexer_status {
+            // ── Normal 模式：操作符和空白有特殊意义 ──
             LexerStatus::Normal => match ch {
                 ch if ch.is_whitespace() => {
                     flush_word(&mut result, &mut acc_word);
@@ -18,7 +34,6 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
                         result.push(Token::Pipe);
                     }
                     Some('|') => {
-                        // `peek()` 只查看第二个 `|`，这里再消费它，形成 `||` token。
                         let _ = chars.next();
                         flush_word(&mut result, &mut acc_word);
                         result.push(Token::OrIf);
@@ -35,13 +50,11 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
                         result.push(Token::AndIf);
                     }
                     _ => {
-                        // 单个 `&` 通常表示后台执行。当前还未实现这一语义，
-                        // 因此这里直接返回错误，避免把它误当成普通字符。
-                        return Err("single '&' is not supported yet".to_string());
+                        flush_word(&mut result, &mut acc_word);
+                        result.push(Token::Ampersand);
                     }
                 },
                 '<' => {
-                    // 当前只支持 `<`。`<<` here-doc 需要额外的读取规则，暂不处理。
                     flush_word(&mut result, &mut acc_word);
                     result.push(Token::RedirectionIn);
                 }
@@ -62,27 +75,21 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
                 },
                 '$' => handle_dollar(&mut chars, &mut acc_word, state)?,
                 '\'' => {
-                    // 引号只改变当前词内部的解释规则，不会自动结束当前词。
-                    // 因此 `a"b"c` 应被解析成一个 Word("abc")。
                     lexer_status = LexerStatus::SingleQuoted;
                 }
                 '\"' => {
                     lexer_status = LexerStatus::DoubleQuoted;
                 }
                 ';' => {
-                    // 只有Normal状态下才是操作符
                     flush_word(&mut result, &mut acc_word);
                     result.push(Token::Semicolon);
                 }
                 '\\' => {
                     match chars.peek().copied() {
                         None => {
-                            // 单独一个结尾反斜杠，在最小实现中直接报错
-                            // TODO 完整 shell 里可能会把 \newline 当作行续接
                             return Err("trailing backslash".to_string());
                         }
                         Some(ch) => {
-                            // // 反斜杠会吞掉下一个字符，并把它作为普通字符加入当前 word。
                             let _ = chars.next();
                             acc_word.push(ch);
                         }
@@ -92,7 +99,8 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
                     acc_word.push(ch);
                 }
             },
-            // 单引号内所有字符都按字面量处理，不进行变量展开，也不识别操作符。
+
+            // ── 单引号模式：所有字符按字面量处理，不被识别为操作符 ──
             LexerStatus::SingleQuoted => match ch {
                 '\'' => {
                     lexer_status = LexerStatus::Normal;
@@ -100,7 +108,7 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
                 _ => acc_word.push(ch),
             },
 
-            // 双引号内保留空白和操作符字面量，但仍支持当前最小变量展开。
+            // ── 双引号模式：保留空白和操作符字面量，但 $ 和 \" 仍会被处理 ──
             LexerStatus::DoubleQuoted => match ch {
                 '\"' => lexer_status = LexerStatus::Normal,
                 '$' => handle_dollar(&mut chars, &mut acc_word, state)?,
@@ -109,8 +117,7 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
                         return Err("trailing backslash in double quotes".to_string());
                     }
                     Some(ch) if matches!(ch, '\"' | '$' | '\\') => {
-                        // 这几个特殊符号失去特殊含义
-                        let _ = chars.next(); // 消费掉
+                        let _ = chars.next();
                         acc_word.push(ch);
                     }
                     Some(ch) => {
@@ -124,7 +131,7 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
         }
     }
 
-    // EOF 时仍处于引号状态，说明用户输入缺少对应的右引号。
+    // 输入结束但引号未闭合 → 报错。
     if let LexerStatus::DoubleQuoted = lexer_status {
         return Err("unterminated double quote".to_string());
     }
@@ -136,33 +143,46 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
     Ok(result)
 }
 
-// 将当前累计的词提交为 Token::Word，并把 acc_word 重置为空串。
-// `std::mem::take` 会把原 String 的所有权移交给 Token，避免 clone。
+/// 将当前累积的词提交为 Token::Word，并重置 acc_word。
+///
+/// 使用 `std::mem::take` 把 String 所有权移交给 Token，避免 clone。
 fn flush_word(result: &mut Vec<Token>, acc_word: &mut String) {
     if !acc_word.is_empty() {
         result.push(Token::Word(std::mem::take(acc_word)));
     }
 }
 
+/// 展开变量：`$?` 取上一条命令退出码；`$NAME` 取环境变量值。
+///
+/// 未定义的环境变量展开为空字符串（与 bash/zsh 行为一致）。
 fn expand_variable(name: &str, state: &ShellState) -> String {
     if name == "?" {
         state.last_status.code.to_string()
     } else {
-        // 对当前最小实现来说，未定义环境变量直接展开为空串，行为更接近常见 shell。
         std::env::var(name).unwrap_or_default()
     }
 }
 
+/// 检查字符是否可作为变量名的首字符：[A-Za-z_]。
 fn is_variable_name_start(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphabetic()
 }
 
+/// 检查字符是否可作为变量名的非首字符：[A-Za-z0-9_]。
 fn is_variable_name_continue(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
 
-// 进入该函数时，外层已经消费了 `$`。
-// 当前支持 `$?`、`$NAME`、`${NAME}`；未定义环境变量展开为空串。
+/// 处理 `$` 后面的变量展开语法。
+///
+/// 进入此函数时，外层已经消费了 `$`。
+/// 支持的语法：
+///   - `$?`      → 展开为上一条命令的退出码
+///   - `$NAME`   → 最长匹配变量名，展开为环境变量值
+///   - `${NAME}` → 花括号明确变量名边界，只展开 `${NAME}`，花括号不进入结果
+///   - 其他       → `$` 保留为字面量
+///
+/// 未定义变量展开为空字符串。
 fn handle_dollar(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     acc_word: &mut String,
@@ -170,10 +190,8 @@ fn handle_dollar(
 ) -> Result<(), String> {
     match chars.peek().copied() {
         None => {
-            // 把这个 $ 加到前面的词中
+            // 行尾的孤 $，保留字面量。
             acc_word.push('$');
-            // 让外层在真正遇到空白/操作符/输入结束时再统一 flush
-            // flush_word(&mut result, &mut acc_word);
             Ok(())
         }
         Some('?') => {
@@ -183,13 +201,12 @@ fn handle_dollar(
             Ok(())
         }
         Some('{') => {
-            // `${NAME}` 中花括号只是变量名边界，不会出现在展开结果中。
-            let _ = chars.next(); // 消费掉左花括号
+            // `${NAME}` 中花括号只是变量名边界，不出现在展开结果中。
+            let _ = chars.next();
 
             match chars.peek().copied() {
                 Some('}') => Err("empty variable name in braces".to_string()),
                 Some(start) if is_variable_name_start(start) => {
-                    // 当前只支持环境变量名形式：[A-Za-z_][A-Za-z0-9_]*。
                     let mut origin_word = String::new();
                     origin_word.push(start);
                     let _ = chars.next();
@@ -228,14 +245,13 @@ fn handle_dollar(
                         let _ = chars.next();
                         origin_word.push(successor);
                     } else {
-                        // 不提前消费 不满足规则的字符
                         break;
                     }
                 }
                 let expanded_word = expand_variable(&origin_word, state);
                 acc_word.push_str(expanded_word.as_str());
             } else {
-                // `$` 后不是当前支持的展开形式时，保留字面量 `$`。
+                // `$` 后不是当前支持的展开形式，保留字面量 `$`。
                 acc_word.push('$');
             }
             Ok(())

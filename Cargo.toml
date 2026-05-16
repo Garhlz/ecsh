@@ -6,5 +6,5 @@ authors = ["Elaine", "Cornelia"]
 description = "Elaine & Cornelia's shell: a learning-oriented Unix-like shell written in Rust"
 
 [dependencies]
-nix = { version = "0.31.3", features = ["process", "fs", "term", "hostname"] }
+nix = { version = "0.31.3", features = ["process", "fs", "term", "hostname", "signal"] }
 rustyline = "18.0.0"

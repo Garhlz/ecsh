@@ -76,3 +76,29 @@ exit; echo no
     assert!(output.contains("still"));
     assert!(!output.contains("\nno\n"));
 }
+
+#[test]
+fn smoke_launches_background_jobs_and_lists_them() {
+    let output = run_ecsh(
+        r#"sleep 1 &
+jobs
+exit
+"#,
+    );
+
+    assert!(output.contains("[1]"));
+    assert!(output.contains("Running"));
+    assert!(output.contains("sleep 1 &"));
+}
+
+#[test]
+fn smoke_rejects_background_builtin_commands() {
+    let output = run_ecsh(
+        r#"jobs &
+status
+exit
+"#,
+    );
+
+    assert!(output.contains("\n1\n"));
+}

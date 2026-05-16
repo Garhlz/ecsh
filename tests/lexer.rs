@@ -4,6 +4,12 @@ use ecsh::types::{CommandStatus, ShellState, Token};
 fn state() -> ShellState {
     ShellState {
         last_status: CommandStatus::new(7),
+        interactive: false,
+        shell_pgid: None,
+        shell_terminal_fd: None,
+        jobs: Vec::new(),
+        next_job_id: 1,
+        current_fg_pgid: None,
     }
 }
 
@@ -125,6 +131,18 @@ fn tokenizes_logical_operators() {
 }
 
 #[test]
+fn tokenizes_background_operator() {
+    assert_eq!(
+        tokenize("sleep 1 &", &state()).unwrap(),
+        vec![
+            Token::Word("sleep".to_string()),
+            Token::Word("1".to_string()),
+            Token::Ampersand,
+        ]
+    );
+}
+
+#[test]
 fn tokenizes_sequence_operator() {
     assert_eq!(
         tokenize("echo a;echo b", &state()).unwrap(),
@@ -198,10 +216,6 @@ fn reports_lexer_errors() {
     assert_eq!(
         tokenize("echo ${HOME", &state()).unwrap_err(),
         "unterminated ${...} expansion"
-    );
-    assert_eq!(
-        tokenize("sleep 1 &", &state()).unwrap_err(),
-        "single '&' is not supported yet"
     );
     assert_eq!(
         tokenize(r#"echo hello\"#, &state()).unwrap_err(),
