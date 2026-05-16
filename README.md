@@ -5,12 +5,13 @@ shell，主要用于操作系统实验练习。
 
 项目目标是用尽量直接的代码练习 shell 的核心执行模型：读取输入、解析命令、
 处理内置命令、`fork` 子进程、在子进程中 `execvp` 目标程序，并由父进程
-`waitpid` 等待结束。
+`waitpid` 等待结束；在交互模式下，也进一步练习前台进程组、终端控制权切换
+和最小作业控制。
 
 ## 功能概览
 
 - 外部命令执行：`fork`、`execvp`、`waitpid`
-- 内置命令：`help`、`exit`、`cd`、`pwd`、`env`、`export`、`unset`、`clear`、`status`
+- 内置命令：`help`、`exit`、`cd`、`pwd`、`env`、`export`、`unset`、`clear`、`status`、`jobs`、`fg`、`bg`
 - 两行 prompt：显示 `[ecsh] user@host:cwd` 和上一条命令的非 0 状态码
 - 启动欢迎页：交互式启动时打印欢迎词并展示内置命令帮助
 - 交互式输入：使用 `rustyline` 支持命令历史、方向键导航和基础行编辑
@@ -21,8 +22,12 @@ shell，主要用于操作系统实验练习。
 - 重定向：支持 `<`、`>`、`>>`，操作符可以不依赖空白分隔
 - 条件执行：支持 `&&` 和 `||`
 - 命令序列：支持 `;` 顺序执行多条命令
+- 后台执行：支持行尾 `&` 启动后台命令或后台管道
+- 最小作业控制：支持 `jobs`、`fg %N`、`bg %N`
+- 常见交互式信号：shell 忽略 `Ctrl-C` / `Ctrl-Z`，前台作业恢复默认行为
+- 前台进程组切换：前台命令和管道在独立进程组运行，shell 通过 `tcsetpgrp` 收放终端控制权
 - 普通内置命令支持临时重定向，执行结束后恢复 shell 的标准输入输出
-- 管道中支持 `help`、`pwd`、`env` 这类纯输出型内置命令
+- 管道中支持 `help`、`pwd`、`env`、`status` 这类纯输出型内置命令
 - 统一错误输出，并保留实验要求的命令生命周期提示
 
 ## 快速开始
@@ -48,6 +53,8 @@ echo done >> pwd.txt
 cat < pwd.txt | grep done > result.txt
 true && echo ok
 false || echo fallback
+sleep 5 &
+jobs
 status
 exit
 ```
@@ -131,6 +138,18 @@ echo first; echo second; pwd
 false && echo no; echo yes
 ```
 
+### 后台执行和作业控制
+
+```bash
+sleep 30 &
+jobs
+fg %1
+sleep 30
+# 按 Ctrl-Z
+jobs
+bg %1
+```
+
 ### 交互体验
 
 ```text
@@ -138,6 +157,7 @@ false && echo no; echo yes
 按 ← / → 移动光标
 按 Ctrl-A / Ctrl-E 跳到行首/行尾
 按 Ctrl-C 取消当前输入行
+按 Ctrl-Z 暂停当前前台作业
 按 Ctrl-D 结束输入并退出 shell
 ```
 
@@ -147,14 +167,15 @@ false && echo no; echo yes
 
 - 命令替换
 - here-doc `<<`
-- 单个 `&` 后台执行
 - glob 展开
 - 完整的 `${...}` 参数展开语法
-- 完整作业控制和前台进程组切换
+- 更完整的作业控制语义（如 `%+`、`%-`、默认当前 job、异步完成通知）
+- termios 模式保存恢复与更接近真实 shell 的终端行为细节
 
 管道中的内置命令也仍是简化实现：目前只支持纯输出型内置命令进入管道；
 `cd`、`export`、`unset`、`exit`、`clear` 这类会改变 shell 状态或强交互行为的
-内置命令暂不支持出现在管道中。
+内置命令暂不支持出现在管道中。后台执行也只支持“行尾 `&` 作用于单个命令或整条
+管道”，不支持 `&&`、`||`、`;` 与 `&` 的更复杂组合。
 
 交互式历史记录保存在 `~/.ecsh_history`。当 `ecsh` 被管道或测试程序驱动时，
 会退回普通按行读取模式，因此 `printf 'echo hi\nexit\n' | cargo run` 这类用法
@@ -169,12 +190,15 @@ src/
   types.rs         # 命令、管道、解析结果和执行状态类型
   input.rs         # rustyline 和普通 read_line 输入层
   lexer.rs         # 输入行到 token 流
-  parser.rs        # token 流到 ParsedLine
+  parser.rs        # token 流到 ParsedJob / ParsedLine
   prompt.rs        # prompt 构造与着色
   builtin.rs       # 内置命令
-  executor.rs      # 外部命令、管道、fork/exec/wait
+  signals.rs       # 交互式信号初始化与 child 默认信号恢复
+  executor/        # 执行入口、job control、fork/exec/pipe 启动逻辑
   redirection.rs   # 重定向与 fd 保存恢复
   diagnostics.rs   # 统一错误输出
+cshell/
+  ecsh             # 课程要求对应的 C 版本可执行程序/相关文件
 tests/
   lexer.rs         # lexer 行为测试
   parser.rs        # parser 行为测试
