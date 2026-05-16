@@ -3,3 +3,7 @@
 .direnv/
 hello*
 tmp.md
+ecsh-*.tar.gz
+ecsh-*.zip
+cshell/ecsh
+cshell/out.txt
