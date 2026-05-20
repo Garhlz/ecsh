@@ -14,20 +14,16 @@ const INTERACTIVE_SIGNALS: [Signal; 5] = [
     // Ctrl-C → 内核向终端前台进程组广播 SIGINT，默认行为：终止进程。
     // shell 忽略后，Ctrl-C 只会杀死前台 job，不会杀死 shell 自己。
     Signal::SIGINT,
-
     // Ctrl-\ → 内核向终端前台进程组广播 SIGQUIT，默认行为：终止进程 + 产生 core dump。
     // shell 忽略后，Ctrl-\ 只会影响前台 job。
     Signal::SIGQUIT,
-
     // Ctrl-Z → 内核向终端前台进程组广播 SIGTSTP（Terminal STop），默认行为：暂停进程。
     // shell 忽略后，Ctrl-Z 只会暂停前台 job，不会把 shell 自己挂起。
     Signal::SIGTSTP,
-
     // 当后台进程组试图从终端读取输入时，内核自动发送 SIGTTIN，默认行为：暂停进程。
     // shell 在 tcsetpgrp 切换终端控制权期间可能短暂处于"后台"，此时如果读了终端，
     // 内核会给 shell 发 SIGTTIN。忽略它，防止 shell 自己被意外挂起。
     Signal::SIGTTIN,
-
     // 当后台进程组试图写终端或执行 tcsetpgrp 时，内核可能发送 SIGTTOU，默认行为：暂停进程。
     // 交互式 shell 需要反复调用 tcsetpgrp 来切换前台，忽略此信号保证切换不会被内核阻止。
     Signal::SIGTTOU,

@@ -1,4 +1,4 @@
-# ecsh 脚本语言设计与开发路线
+# ecsh / ecscript 设计与开发路线
 
 ## 一、语言设计总览
 
@@ -15,9 +15,17 @@
 
 > 多写几个字符不是问题。阅读时不需要猜语义才是。
 
+### 命名约定
+
+- **项目名**：`ecsh`
+- **语言名**：`ecscript`
+- **文件扩展名**：`.ecs`
+- **文档与报错措辞**：优先使用 `ecscript parser`、`ecscript runtime`、`ecscript parse error`、`ecscript runtime error`
+- **实现模块路径**：MVP 阶段可以继续用 `src/script/`，避免一次性改太多；若后续模块稳定，再统一重命名为 `src/ecscript/`
+
 ### 语法策略：关键字前缀切换解析模式
 
-每行输入先 peek 第一个 token，命中关键字则进入脚本语言解析路径，否则回退到现有 shell 命令解析器。这保证了交互式使用和脚本编程共享同一套运行时，但 parser 各走各路、互不污染。
+每行输入先 peek 第一个 token，命中关键字则进入 **ecscript** 解析路径，否则回退到现有 shell 命令解析器。这保证了交互式使用和脚本编程共享同一套运行时，但 parser 各走各路、互不污染。
 
 ### 关键字清单（9 个）
 
@@ -36,13 +44,14 @@
 
 ```
 x = 1           → 标识符 + =         → 产出 Assign AST
-x += 1          → 标识符 + +=        → 产出 Assign AST（复合赋值）
 x()             → 标识符 + (         → 产出 Call AST
 x.y()           → 标识符 + . + ident + ( → 产出 Call AST（callee = FieldAccess(x, "y")，不引入隐式 self/this）
 obj.name = val  → 标识符 + . + ident + = → 产出 FieldAssign AST
 arr[0] = val    → 标识符 + [ expr ] + =  → 产出 IndexAssign AST
 ls -la          → 关键字未命中 → shell 命令
 ```
+
+**MVP 只支持普通赋值 `=`，不支持 `+=` 这类复合赋值。** `x += 1` 并不增加表达能力，只是 `x = x + 1` 的语法糖；等基础语义稳定后，如果确实需要，再成套加入 `+= -= *= /= %=`。
 
 **Parser 不做符号表查询。** 顶层和函数体内部的 `x = 1` / `greet()` 都只做语法判断，产出 `Assign` / `Call` / `ExprStmt` 等 AST 节点。"变量是否已声明"、"标识符是不是函数"这些检查延后到 evaluator 运行阶段。好处：前向引用（`fn a() { b() }` 定义在 `fn b()` 之前）不产生 parse-time 错误，仅运行时报"b is not callable"。
 
@@ -150,7 +159,7 @@ echo Hello $HOME $[x + 1]
   │     │        ├─ return/break/continue
   │     │        └─ 内部遇表达式时 → Pratt Parser
   │     │
-  │     ├─ 标识符 + (= 或 +=)     → 产出 Assign AST
+  │     ├─ 标识符 + =             → 产出 Assign AST
   │     ├─ 标识符 + (             → 产出 Call AST
   │     ├─ 标识符 + . + 标识符 + ( → 产出 Call AST，callee = FieldAccess(...)
   │     ├─ 标识符 + . + 标识符 + = → 产出 FieldAssign AST (obj.name = val)
@@ -213,7 +222,7 @@ insert(arr, i, val)  # 指定位置插入
 remove(arr, i)       # 指定位置删除
 ```
 
-`push(arr, 42)` 比 `arr += 42` 清晰——一眼看出这是对数组做操作，不是普通赋值。
+`push(arr, 42)` 很清晰——一眼看出这是对数组做容器操作，而不是变量赋值。
 
 ### Object 方法：函数作为字段值存入
 
@@ -293,7 +302,79 @@ if true {
 
 ### 错误处理
 
-引入 `EvalResult<T>`——脚本内部错误（未定义变量、类型不匹配）只通过此类型传播，绝不 panic ecsh 主进程。
+#### 错误分层
+
+脚本相关错误至少分三层，不混在一起：
+
+| 层 | 类型 | 例子 | MVP 处理策略 |
+|----|------|------|--------------|
+| 词法/语法错误 | `ParseError` | 未闭合引号、非法 token、坏语法 | 直接报错，拒绝执行 |
+| 语言运行时错误 | `RuntimeError` | 未定义变量、类型不匹配、不可调用、索引越界 | 立即停止当前脚本/函数执行 |
+| shell 命令失败 | `run()` 返回的状态值 | `grep` 找不到、程序退出码非 0、被信号终止 | **不是语言错误**，作为普通返回值交给脚本判断 |
+
+#### 错误传播接口
+
+引入统一的结果类型，脚本内部错误只通过它们传播，绝不 panic ecsh 主进程：
+
+```rust
+type ParseResult<T> = Result<T, ParseError>;
+type EvalResult<T> = Result<T, RuntimeError>;
+```
+
+建议把控制流和错误分开表示：
+
+```rust
+enum ExecFlow {
+    Normal,
+    Break,
+    Continue,
+    Return(Value),
+}
+```
+
+- 表达式求值：`EvalResult<Value>`
+- 语句执行：`EvalResult<ExecFlow>`
+- `break` / `continue` / `return` **不是错误**，单独走 `ExecFlow`
+- 真正的语言错误（未定义变量、类型不匹配等）才走 `RuntimeError`
+
+#### RuntimeError 建议结构
+
+不要只用裸字符串，至少保留错误种类和可选位置信息：
+
+```rust
+struct RuntimeError {
+    kind: RuntimeErrorKind,
+    message: String,
+    span: Option<Span>,
+}
+```
+
+`RuntimeErrorKind` MVP 可先覆盖这些：
+
+- `UndefinedVariable`
+- `TypeMismatch`
+- `NotCallable`
+- `ArityMismatch`
+- `ExpectedBool`
+- `MissingField`
+- `NotIndexable`
+- `IndexOutOfBounds`
+
+#### 语言级错误策略（MVP）
+
+- **MVP 不做 `try/catch` / `throw` / 异常系统。**
+- 语言运行时错误一旦发生，立即停止当前脚本或当前函数执行，向上冒泡到顶层。
+- shell 命令失败不算语言错误：
+
+```sh
+let x = y          # y 未定义 → RuntimeError
+if 123 { ... }     # 条件不是 Bool → RuntimeError
+
+let r = run("grep", "x", "no_such_file")
+# 这不是 RuntimeError；由脚本自己检查 r.code / r.signal
+```
+
+这个边界必须明确：**语言错误负责“解释器语义错了”，`run()` 失败负责“外部命令没成功”。**
 
 ### Truthiness 与类型强制
 
@@ -305,7 +386,7 @@ if true {
 
 ---
 
-## 五、跨界互操作（Shell ↔ Script）
+## 五、跨界互操作（Shell ↔ ecscript）
 
 ### Script → Shell
 
@@ -313,17 +394,20 @@ if true {
 |------|------|------|
 | 脚本变量读取 | `$VAR` | 脚本作用域优先，不存在则 fallback `std::env::var` |
 | 环境变量读取 | `${VAR}` | **仅** `std::env::var`，不查脚本作用域 |
-| 表达式嵌入 | `$[expr]` | 脚本表达式求值，结果转为字符串嵌入命令参数 |
+| 表达式嵌入 | `$[expr]` | 脚本表达式求值；仅标量值可隐式转字符串，`Array/Object` 运行时报错 |
 | 命令替换 | `$(cmd)` | 执行 shell 命令，输出替换到原位置 |
-| 参数展开（隐式） | `$[arr]` | 将表达式结果转为字符串嵌入单个参数 |
+| 显式 JSON 转换 | `$[json(expr)]` | 将 `Array/Object` 显式序列化为 JSON 字符串后嵌入单个参数 |
 | 参数展开（显式） | `$[...arr]` | 将数组显式拆散为多个独立的 argv 参数（降维） |
 
-`$[arr]` 和 `$[...arr]` 的区别：
+`$[arr]`、`$[json(arr)]` 和 `$[...arr]` 的区别：
 ```sh
 let a = [1, 2, 3]
-echo $[a]       # → echo "1 2 3"（一个参数）
+echo $[a]       # → RuntimeError（Array 不能隐式字符串化）
+echo $[json(a)] # → echo "[1,2,3]"（一个 JSON 字符串参数）
 echo $[...a]    # → echo 1 2 3（三个独立参数）
 ```
+
+这条规则体现“显式优于隐式”：`$[expr]` 适合标量值（`String/Int/Float/Bool/Nil`）嵌入；复合值必须显式说明你想要的是 **JSON 字符串**（`json(obj)`）还是 **argv 展开**（`$[...arr]`）。若后续需要其他文本化策略，再单独加内置函数（如 `join(arr, ",")`），而不是让 `Array/Object` 自动变字符串。
 
 ### Shell → Script（状态捕获）
 
@@ -338,6 +422,8 @@ if result.code != 0 || result.signal != 0 {
 }
 ```
 
+**注意**：`run()` 的非零退出码 / 信号终止不是脚本语言错误，不走 `EvalResult::Err`；它只是返回了一个“命令失败”的普通值，是否中止流程由脚本自行决定。
+
 **MVP 边界：`run()` 只支持单条命令 + 参数列表，不支持 shell 操作符（`|`、`&&`、`;` 等）。** 需要管道时拆成多次 `run()` 调用，或回到 shell 命令行使用。
 
 **与 `$[...arr]` 共享展开规则：** `run("gcc", ...args)` 和 `echo $[...args]` 的 `...` 是同一套展开语义——将数组拆散为独立参数。两个入口，同一套逻辑。这里的 `...args` 是脚本函数调用参数 grammar 的一部分，等价于“把数组元素逐个追加到参数列表”。
@@ -350,7 +436,7 @@ echo $[json(data)] > /tmp/data.json
 echo $[json(data)] | jq .name
 ```
 
-`json(table)` 内置函数将 Object/Array 序列化为 JSON 字符串。若要把脚本表达式结果送入 shell 的重定向或管道，先用 `$[...]` 把它嵌入为 shell 参数；`|` 管道仅在 shell 命令行模式下可用，脚本表达式内不要混用。
+`json(table)` 内置函数将 Object/Array 序列化为 JSON 字符串。若要把脚本表达式结果送入 shell 的重定向或管道，先用 `$[...]` 把它嵌入为 shell 参数；`Array/Object` 本身不能直接通过 `$[expr]` 隐式字符串化，必须显式写成 `json(...)`（或未来其他专用转换函数）。`|` 管道仅在 shell 命令行模式下可用，脚本表达式内不要混用。
 
 ---
 
@@ -358,19 +444,19 @@ echo $[json(data)] | jq .name
 
 ### 总体实施策略
 
-- **先做独立脚本内核，再接 shell。** 不要一开始就改 `main.rs` 和现有 shell parser；先把 `src/script/` 跑通，最后一阶段再接线。
+- **先做独立 ecscript 内核，再接 shell。** 不要一开始就改 `main.rs` 和现有 shell parser；先把 `src/script/` 跑通，最后一阶段再接线。
 - **每阶段都要有最小可运行产物。** 优先得到“可在单元测试或小 REPL 中运行”的子系统，而不是一次性把所有模块写完。
 - **优先让 AST 干净，再让语法糖降级。** 例如 `x.y()` 直接在 parser 中降成 `Call(FieldAccess(x, "y"), ...)`，不要在 evaluator 里额外分支。
 - **shell 命令模式与 script 表达式模式严格分离。** shell 里只认 `$[...]` 作为脚本表达式入口，不做隐式字段读取。
 
-### 阶段 1：脚本表达式内核（最小可运行单元）
+### 阶段 1：ecscript 表达式内核（最小可运行单元）
 
 **目标**：先得到一个与 shell 完全解耦的 `expr -> Value` 子系统。
 
 **建议新增文件**
 - [ ] `src/script/mod.rs`
 - [ ] `src/script/ast.rs`：`Expr`、一元/二元运算、字面量、变量引用
-- [ ] `src/script/error.rs`：`ParseError` / `EvalError`
+- [ ] `src/script/error.rs`：`ParseError` / `RuntimeError`
 - [ ] `src/script/value.rs`：`Value` 枚举 + `Display`
 - [ ] `src/script/lexer.rs`：数字、字符串、标识符、运算符 token
 - [ ] `src/script/pratt.rs`：Pratt parser
@@ -387,6 +473,11 @@ echo $[json(data)] | jq .name
 - [ ] `parse_expr(src: &str) -> Result<Expr, ParseError>`
 - [ ] `eval_expr(expr: &Expr, env: &Environment) -> EvalResult<Value>`
 - [ ] 或一步到位：`eval_expr_src(src: &str, env: &Environment) -> EvalResult<Value>`
+
+**本阶段错误模型**
+- [ ] 明确定义 `ParseError` / `RuntimeError` / `EvalResult<T>`
+- [ ] 先用结构化错误类型，不要只返回字符串
+- [ ] 表达式 evaluator 内部绝不 panic；所有用户可见失败都转为 `EvalResult::Err`
 
 **开发辅助**
 - [ ] 一个独立 REPL（可以是临时 dev harness），输入表达式后打印值
@@ -414,15 +505,18 @@ echo $[json(data)] | jq .name
 **本阶段语法**
 - [ ] `let x = expr`
 - [ ] `x = expr`
-- [ ] `x += expr`
 - [ ] 块 `{ ... }`
 - [ ] 表达式语句 `foo + bar`
+
+**本阶段明确不做**
+- [ ] 复合赋值（如 `+=` / `-=`）：暂不支持，避免过早引入语法糖分支
 
 **语义要求**
 - [ ] parser 不查符号表，只产出 AST
 - [ ] 赋值时由 evaluator 检查变量是否存在
 - [ ] 进入 `{}` 压新作用域，退出时弹出
 - [ ] 错误通过 `EvalResult<T>` 传播
+- [ ] 语句执行返回 `EvalResult<ExecFlow>`，为后续 `break/continue/return` 留出统一接口
 
 **输入模型**
 - [ ] 增加“整块解析”能力：`parse_script(src) -> Vec<Stmt>`
@@ -433,6 +527,7 @@ echo $[json(data)] | jq .name
 - [ ] 父作用域读取
 - [ ] 块退出后的可见性
 - [ ] 未声明赋值报错
+- [ ] 运行时错误能正确中止后续语句执行
 
 **完成标准**
 - [ ] 可以执行一个由多条 `let/assign/block` 组成的小脚本
@@ -493,6 +588,7 @@ echo $[json(data)] | jq .name
 - [ ] `for k in obj` 遍历键名
 - [ ] `for v in values(obj)` 遍历对象值
 - [ ] `break/continue` 只允许在循环内部
+- [ ] `break/continue/return` 走控制流枚举，不走错误通道
 
 **测试重点**
 - [ ] 条件判断的 Bool 限制
@@ -552,7 +648,8 @@ echo $[json(data)] | jq .name
 - [ ] `WordFragment::{Lit, Var, EnvVar, Cmd, Expr}`
 - [ ] `$VAR`：执行时查脚本作用域，失败再 fallback env
 - [ ] `${VAR}`：执行时只查 env
-- [ ] `$[expr]`：执行时调用脚本 evaluator
+- [ ] `$[expr]`：执行时调用脚本 evaluator；仅标量值允许隐式字符串化
+- [ ] `$[expr]` 遇到 `Array/Object` 时抛 `RuntimeError`，提示使用 `json(expr)` 或 `$[...arr]`
 - [ ] `$[...arr]`：执行时展开成多个 argv
 - [ ] `$(cmd)`：执行时 fork 子 shell，捕获 stdout
 
@@ -582,7 +679,7 @@ echo $[json(data)] | jq .name
 
 ### 阶段 7：顶层集成与文件执行
 
-**目标**：把独立脚本内核真正接到 ecsh 上。
+**目标**：把独立 ecscript 内核真正接到 ecsh 上。
 
 **建议改动的现有模块**
 - [ ] `src/main.rs`：统一入口分派
@@ -591,10 +688,10 @@ echo $[json(data)] | jq .name
 - [ ] `src/lib.rs`：导出 script 模块
 
 **本阶段要做的事**
-- [ ] 顶层 parser 集成：关键字开头走 script parser，其他走现有 shell parser
+- [ ] 顶层 parser 集成：关键字开头走 ecscript parser，其他走现有 shell parser
 - [ ] 函数体内部沿用同一规则：关键字语句 vs shell 命令
-- [ ] `ecsh script.ecs`：走文件级 parser + evaluator
-- [ ] `~/.ecshrc`：走与 `script.ecs` 相同的文件级入口
+- [ ] `ecsh foo.ecs`：走文件级 parser + evaluator
+- [ ] `~/.ecshrc`：走与 `.ecs` 文件相同的文件级入口
 - [ ] `source` / `.`：也走同一套文件级 parser + evaluator
 - [ ] continuation prompt：`{}` / 引号未闭合时继续读
 
@@ -605,7 +702,7 @@ echo $[json(data)] | jq .name
 
 **完成标准**
 - [ ] 交互模式、脚本文件模式、`source` 模式三者行为一致
-- [ ] 现有 shell 功能（管道、重定向、job control）不被 script 集成破坏
+- [ ] 现有 shell 功能（管道、重定向、job control）不被 ecscript 集成破坏
 
 ---
 
@@ -614,7 +711,7 @@ echo $[json(data)] | jq .name
 ### 高优先
 - [ ] **Tab 补全** — 新增 `src/completion.rs`，实现 rustyline `Completer` trait
 - [ ] **alias / unalias 命令** — alias 展开在 parser 阶段（tokenize 后查表替换）
-- [ ] **配置文件 ~/.ecshrc** — 启动时走文件级 parser + 脚本 evaluator 执行（与 `ecsh script.ecs` 共用同一入口，非逐行 shell 模式）
+- [ ] **配置文件 ~/.ecshrc** — 启动时走文件级 parser + ecscript evaluator 执行（与 `ecsh foo.ecs` 共用同一入口，非逐行 shell 模式）
 
 ### 中优先
 - [ ] **here-doc (`<<`)** — lexer 新增 here-doc 状态，执行时用 pipe 或临时文件
@@ -623,7 +720,7 @@ echo $[json(data)] | jq .name
 
 ### 低优先
 - [ ] **管道增强** — `|&` 同时重定向 stderr、`!` 取反退出码
-- [ ] **更多内置命令** — `type`、`which`、`read`、`shift`、`source`/`.`（走与 `ecsh script.ecs` 相同的文件级 parser + evaluator，非逐行 shell 模式）、`history`
+- [ ] **更多内置命令** — `type`、`which`、`read`、`shift`、`source`/`.`（走与 `ecsh foo.ecs` 相同的文件级 parser + evaluator，非逐行 shell 模式）、`history`
 - [ ] **subshell `()`** — fork 子 shell 执行括号内命令
 
 ---
@@ -650,7 +747,7 @@ echo $[json(data)] | jq .name
 | `return` | 脚本语句（返回） | `return x + y` |
 | `break` | 脚本语句 | `break` |
 | `continue` | 脚本语句 | `continue` |
-| `标识符 + = / +=` | 产出 Assign AST（evaluator 阶段才检查是否已声明） | `x = 5` / `x += 1` |
+| `标识符 + =` | 产出 Assign AST（evaluator 阶段才检查是否已声明） | `x = 5` |
 | `标识符 + (` | 产出 Call AST（evaluator 阶段才检查是否可调用） | `greet("hi")` |
 | `标识符 . 标识符 + (` | 产出 Call AST（callee = FieldAccess(...)） | `obj.inc()` |
 | `标识符 . 标识符 + =` | 产出 FieldAssign AST | `obj.name = val` |
@@ -664,7 +761,8 @@ echo $[json(data)] | jq .name
 | `$VAR` | 脚本作用域优先 → fallback `std::env::var` | 字符串，单参数 | `echo $HOME` |
 | `${VAR}` | **仅** `std::env::var`（不查脚本作用域） | 字符串，单参数 | `echo ${HOME}/work` |
 | `$(cmd)` | 执行 shell 命令 | 捕捉 stdout，单参数 | `echo $(date)` |
-| `$[expr]` | 脚本表达式求值 | 结果转字符串，单参数 | `echo $[x + 1]` |
+| `$[expr]` | 脚本表达式求值 | 标量值转字符串；`Array/Object` 报错 | `echo $[x + 1]` |
+| `$[json(expr)]` | 脚本表达式求值并序列化为 JSON | JSON 字符串，单参数 | `echo $[json(obj)]` |
 | `$[...arr]` | 脚本表达式求值 + 展开 | 数组拆散为多个参数 | `echo $[...a]` |
 
 **优先级**: `$VAR` 先查脚本作用域，不存在才 fallback 到环境变量。`${VAR}` 只查环境变量——花括号是显式的"我要环境变量"的信号。若脚本声明了 `let HOME = "/x"`，`$HOME` 取脚本值 `/x`，`${HOME}` 仍取环境变量值。

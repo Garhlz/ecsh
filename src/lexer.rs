@@ -84,17 +84,15 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
                     flush_word(&mut result, &mut acc_word);
                     result.push(Token::Semicolon);
                 }
-                '\\' => {
-                    match chars.peek().copied() {
-                        None => {
-                            return Err("trailing backslash".to_string());
-                        }
-                        Some(ch) => {
-                            let _ = chars.next();
-                            acc_word.push(ch);
-                        }
+                '\\' => match chars.peek().copied() {
+                    None => {
+                        return Err("trailing backslash".to_string());
                     }
-                }
+                    Some(ch) => {
+                        let _ = chars.next();
+                        acc_word.push(ch);
+                    }
+                },
                 _ => {
                     acc_word.push(ch);
                 }
