@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod diagnostics;
+pub mod ecscript;
 pub mod executor;
 pub mod input;
 pub mod lexer;

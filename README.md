@@ -29,6 +29,7 @@ shell，主要用于操作系统实验练习。
 - 普通内置命令支持临时重定向，执行结束后恢复 shell 的标准输入输出
 - 管道中支持 `help`、`pwd`、`env`、`status` 这类纯输出型内置命令
 - 统一错误输出，并保留实验要求的命令生命周期提示
+- ecscript 表达式内核（阶段 1）：lexer、Pratt parser、求值器，支持字面量/变量/算术/比较/逻辑运算，带字节偏移错误定位
 
 ## 快速开始
 
@@ -197,16 +198,30 @@ src/
   executor/        # 执行入口、job control、fork/exec/pipe 启动逻辑
   redirection.rs   # 重定向与 fd 保存恢复
   diagnostics.rs   # 统一错误输出
+  ecscript/        # ecscript 表达式/脚本语言内核
+    ast.rs         #   AST 节点与运算符定义
+    lexer.rs       #   脚本词法分析
+    pratt.rs       #   Pratt 表达式解析器
+    eval.rs        #   表达式求值器
+    value.rs       #   运行时值类型
+    env.rs         #   变量环境
+    error.rs       #   错误类型
+    mod.rs         #   模块声明
 cshell/
   ecsh             # 课程要求对应的 C 版本可执行程序/相关文件
 tests/
   lexer.rs         # lexer 行为测试
   parser.rs        # parser 行为测试
   smoke.rs         # 启动真实二进制的端到端烟测
+docs/
+  design.md        # 实现说明
+  roadmap.md       # 后续计划
+  TODO.md          # ecscript 语言设计文档
+  ecscript-manual.md  # ecscript 阶段 1 参考手册
 ```
 
 更详细的实现说明见 [docs/design.md](docs/design.md)，后续计划见
-[docs/roadmap.md](docs/roadmap.md)。
+[docs/roadmap.md](docs/roadmap.md)，ecscript 语言设计见 [docs/TODO.md](docs/TODO.md)。
 
 ## 测试
 

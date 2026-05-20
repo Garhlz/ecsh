@@ -377,8 +377,14 @@ fn update_job_process(job: &mut Job, pid: Pid, status: WaitStatus) {
 ///   2. 没人 Running（但没全部 Completed）   → Stopped
 ///   3. 至少有一个 Running                  → Running
 fn recompute_job_status(job: &mut Job) {
-    let all_completed = job.processes.iter().all(|p| p.state == ProcessState::Completed);
-    let any_running = job.processes.iter().any(|p| p.state == ProcessState::Running);
+    let all_completed = job
+        .processes
+        .iter()
+        .all(|p| p.state == ProcessState::Completed);
+    let any_running = job
+        .processes
+        .iter()
+        .any(|p| p.state == ProcessState::Running);
 
     if all_completed {
         // 退出码取 last_pid（管道最后一条命令）的结果
@@ -444,8 +450,16 @@ mod tests {
             status: JobStatus::Running,
             last_pid: pid2,
             processes: vec![
-                JobProcess { pid: pid1, state: ProcessState::Running, last_status: None },
-                JobProcess { pid: pid2, state: ProcessState::Running, last_status: None },
+                JobProcess {
+                    pid: pid1,
+                    state: ProcessState::Running,
+                    last_status: None,
+                },
+                JobProcess {
+                    pid: pid2,
+                    state: ProcessState::Running,
+                    last_status: None,
+                },
             ],
         }
     }
@@ -526,7 +540,10 @@ mod tests {
     fn status_stopped_is_128_plus_sigtstp() {
         let mut job = single_process_job(100);
         job.status = JobStatus::Stopped;
-        assert_eq!(status_from_job(&job), CommandStatus::new(128 + Signal::SIGTSTP as i32));
+        assert_eq!(
+            status_from_job(&job),
+            CommandStatus::new(128 + Signal::SIGTSTP as i32)
+        );
     }
 
     #[test]
@@ -542,7 +559,10 @@ mod tests {
     fn job_status_text_labels() {
         assert_eq!(job_status_text(JobStatus::Running), "Running");
         assert_eq!(job_status_text(JobStatus::Stopped), "Stopped");
-        assert_eq!(job_status_text(JobStatus::Done(CommandStatus::success())), "Done");
+        assert_eq!(
+            job_status_text(JobStatus::Done(CommandStatus::success())),
+            "Done"
+        );
     }
 
     // ── next_job_id ──────────────────────────────────────────────
@@ -569,8 +589,14 @@ mod tests {
     fn wait_status_extracts_pid() {
         let pid = Pid::from_raw(42);
         assert_eq!(wait_status_pid(&WaitStatus::Exited(pid, 0)), Some(pid));
-        assert_eq!(wait_status_pid(&WaitStatus::Signaled(pid, Signal::SIGTERM, false)), Some(pid));
-        assert_eq!(wait_status_pid(&WaitStatus::Stopped(pid, Signal::SIGTSTP)), Some(pid));
+        assert_eq!(
+            wait_status_pid(&WaitStatus::Signaled(pid, Signal::SIGTERM, false)),
+            Some(pid)
+        );
+        assert_eq!(
+            wait_status_pid(&WaitStatus::Stopped(pid, Signal::SIGTSTP)),
+            Some(pid)
+        );
         assert_eq!(wait_status_pid(&WaitStatus::Continued(pid)), Some(pid));
     }
 
@@ -584,7 +610,11 @@ mod tests {
     #[test]
     fn update_exited_sets_completed() {
         let mut job = single_process_job(100);
-        update_job_process(&mut job, Pid::from_raw(100), WaitStatus::Exited(Pid::from_raw(100), 7));
+        update_job_process(
+            &mut job,
+            Pid::from_raw(100),
+            WaitStatus::Exited(Pid::from_raw(100), 7),
+        );
         assert_eq!(job.processes[0].state, ProcessState::Completed);
         assert_eq!(job.processes[0].last_status, Some(CommandStatus::new(7)));
         assert_eq!(job.status, JobStatus::Done(CommandStatus::new(7)));
@@ -593,17 +623,26 @@ mod tests {
     #[test]
     fn update_signaled_sets_completed_128_plus_sig() {
         let mut job = single_process_job(100);
-        update_job_process(&mut job, Pid::from_raw(100),
-            WaitStatus::Signaled(Pid::from_raw(100), Signal::SIGTERM, false));
+        update_job_process(
+            &mut job,
+            Pid::from_raw(100),
+            WaitStatus::Signaled(Pid::from_raw(100), Signal::SIGTERM, false),
+        );
         assert_eq!(job.processes[0].state, ProcessState::Completed);
-        assert_eq!(job.processes[0].last_status, Some(CommandStatus::new(128 + Signal::SIGTERM as i32)));
+        assert_eq!(
+            job.processes[0].last_status,
+            Some(CommandStatus::new(128 + Signal::SIGTERM as i32))
+        );
     }
 
     #[test]
     fn update_stopped_sets_stopped() {
         let mut job = single_process_job(100);
-        update_job_process(&mut job, Pid::from_raw(100),
-            WaitStatus::Stopped(Pid::from_raw(100), Signal::SIGTSTP));
+        update_job_process(
+            &mut job,
+            Pid::from_raw(100),
+            WaitStatus::Stopped(Pid::from_raw(100), Signal::SIGTSTP),
+        );
         assert_eq!(job.processes[0].state, ProcessState::Stopped);
         assert_eq!(job.status, JobStatus::Stopped);
     }
@@ -613,7 +652,11 @@ mod tests {
         let mut job = single_process_job(100);
         job.processes[0].state = ProcessState::Stopped;
         job.status = JobStatus::Stopped;
-        update_job_process(&mut job, Pid::from_raw(100), WaitStatus::Continued(Pid::from_raw(100)));
+        update_job_process(
+            &mut job,
+            Pid::from_raw(100),
+            WaitStatus::Continued(Pid::from_raw(100)),
+        );
         assert_eq!(job.processes[0].state, ProcessState::Running);
         assert_eq!(job.status, JobStatus::Running);
     }
@@ -621,16 +664,28 @@ mod tests {
     #[test]
     fn pipeline_gradually_goes_done() {
         let mut job = pipeline_job(100, 200);
-        update_job_process(&mut job, Pid::from_raw(100), WaitStatus::Exited(Pid::from_raw(100), 0));
+        update_job_process(
+            &mut job,
+            Pid::from_raw(100),
+            WaitStatus::Exited(Pid::from_raw(100), 0),
+        );
         assert_eq!(job.status, JobStatus::Running);
-        update_job_process(&mut job, Pid::from_raw(200), WaitStatus::Exited(Pid::from_raw(200), 1));
+        update_job_process(
+            &mut job,
+            Pid::from_raw(200),
+            WaitStatus::Exited(Pid::from_raw(200), 1),
+        );
         assert_eq!(job.status, JobStatus::Done(CommandStatus::new(1)));
     }
 
     #[test]
     fn update_unknown_pid_is_noop() {
         let mut job = single_process_job(100);
-        update_job_process(&mut job, Pid::from_raw(999), WaitStatus::Exited(Pid::from_raw(999), 0));
+        update_job_process(
+            &mut job,
+            Pid::from_raw(999),
+            WaitStatus::Exited(Pid::from_raw(999), 0),
+        );
         assert_eq!(job.processes[0].state, ProcessState::Running);
     }
 }
