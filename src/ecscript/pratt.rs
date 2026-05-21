@@ -9,23 +9,31 @@ pub struct TokenStream<'a> {
 }
 
 impl<'a> TokenStream<'a> {
-    fn new(tokens: &'a [Token]) -> Self {
+    pub fn new(tokens: &'a [Token]) -> Self {
         TokenStream { tokens, pos: 0 }
     }
 
-    fn peek(&self) -> &Token {
+    pub fn peek(&self) -> &Token {
         &self.tokens[self.pos]
     }
 
-    fn consume(&mut self) {
+    pub fn consume(&mut self) {
         self.pos += 1;
     }
 
-    fn check(&self, kind: &TokenKind) -> bool {
+    pub fn peek_n(&self, n: usize) -> Option<&Token> {
+        self.tokens.get(self.pos + n)
+    }
+
+    pub fn check(&self, kind: &TokenKind) -> bool {
         self.peek().kind == *kind
     }
 
-    fn current_offset(&self) -> usize {
+    pub fn check_next(&self, kind: &TokenKind) -> bool {
+        self.peek_n(1).is_some_and(|token| token.kind == *kind)
+    }
+
+    pub fn current_offset(&self) -> usize {
         self.peek().end
     }
 }
@@ -39,9 +47,17 @@ pub fn parse_expr(tokens: &[Token]) -> Result<Expr, ParseError> {
     } else {
         Err(ParseError::new(
             state.current_offset(),
-            "unexpected token after expression".to_string(),
+            format!(
+                "unexpected token after expression, found {}",
+                state.peek().kind.describe()
+            ),
         ))
     }
+}
+
+pub fn parse_expr_in(state: &mut TokenStream<'_>) -> Result<Expr, ParseError> {
+    // 只解析表达式本身，不检查分号——分号由调用方（语句解析器）负责
+    pratt_parser(state, 0)
 }
 
 fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseError> {
@@ -112,7 +128,10 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
             } else {
                 return Err(ParseError::new(
                     state.current_offset(),
-                    "unexpected operator at start of expression".to_string(),
+                    format!(
+                        "unexpected operator '{}' at start of expression",
+                        oper.lexeme()
+                    ),
                 ));
             }
         }
@@ -125,14 +144,17 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
             } else {
                 return Err(ParseError::new(
                     state.current_offset(),
-                    "expected ')'".to_string(),
+                    format!("expected ')', found {}", state.peek().kind.describe()),
                 ));
             }
         }
         _ => {
             return Err(ParseError::new(
                 state.current_offset(),
-                "expected expression".to_string(),
+                format!(
+                    "expected expression, found {}",
+                    state.peek().kind.describe()
+                ),
             ));
         }
     }
@@ -268,7 +290,7 @@ mod tests {
         assert_parse("true", lit_bool(true));
         assert_parse("false", lit_bool(false));
         assert_parse("42", lit_int(42));
-        assert_parse("3.14", lit_float(3.14));
+        assert_parse("2.5", lit_float(2.5));
     }
 
     #[test]
@@ -445,21 +467,25 @@ mod tests {
 
     #[test]
     fn reports_missing_right_paren() {
-        assert_parse_error("(1 + 2", 6, "expected ')'");
+        assert_parse_error("(1 + 2", 6, "expected ')', found end of input");
     }
 
     #[test]
     fn reports_trailing_garbage() {
-        assert_parse_error("1 + 2 3", 7, "unexpected token after expression");
+        assert_parse_error(
+            "1 + 2 3",
+            7,
+            "unexpected token after expression, found integer literal",
+        );
     }
 
     #[test]
     fn reports_empty_input() {
-        assert_parse_error("", 0, "expected expression");
+        assert_parse_error("", 0, "expected expression, found end of input");
     }
 
     #[test]
     fn reports_bare_operator_at_start() {
-        assert_parse_error("* 5", 1, "unexpected operator at start of expression");
+        assert_parse_error("* 5", 1, "unexpected operator '*' at start of expression");
     }
 }

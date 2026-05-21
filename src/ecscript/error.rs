@@ -39,6 +39,8 @@ pub enum RuntimeErrorKind {
     TypeMismatch,
     /// 除零
     DivisionByZero,
+    // 类型在当前作用域已经定义
+    DuplicateVariable,
 }
 
 /// 运行时错误。
