@@ -1,3 +1,63 @@
+/// 语句节点。PartialEq 忽略 span（span 是元数据，不影响语义相等）。
+#[derive(Debug, Clone)]
+pub enum Stmt {
+    Let {
+        name: String,
+        expr: Expr,
+        span: usize,
+    },
+    Assign {
+        name: String,
+        expr: Expr,
+        span: usize,
+    },
+    ExprStmt {
+        expr: Expr,
+        span: usize,
+    }, // 单个表达式构成的语句
+    Block {
+        stmts: Vec<Stmt>,
+        span: usize,
+    }, // 代码块，新的作用域推入栈
+}
+
+impl PartialEq for Stmt {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Stmt::Let {
+                    name: a, expr: ae, ..
+                },
+                Stmt::Let {
+                    name: b, expr: be, ..
+                },
+            ) => a == b && ae == be,
+            (
+                Stmt::Assign {
+                    name: a, expr: ae, ..
+                },
+                Stmt::Assign {
+                    name: b, expr: be, ..
+                },
+            ) => a == b && ae == be,
+            (Stmt::ExprStmt { expr: a, .. }, Stmt::ExprStmt { expr: b, .. }) => a == b,
+            (Stmt::Block { stmts: a, .. }, Stmt::Block { stmts: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Stmt {
+    pub fn span(&self) -> usize {
+        match self {
+            Stmt::Let { span, .. } => *span,
+            Stmt::Assign { span, .. } => *span,
+            Stmt::ExprStmt { span, .. } => *span,
+            Stmt::Block { span, .. } => *span,
+        }
+    }
+}
+
 /// 带位置信息的表达式节点。
 ///
 /// span 是源码字节偏移，用于 eval 阶段的错误定位。

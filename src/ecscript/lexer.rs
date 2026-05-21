@@ -20,6 +20,9 @@ pub enum TokenKind {
     Operator(Operator),
     Delimiter(Delimiter),
     EOF,
+
+    // 保留字
+    Let,
 }
 
 #[derive(Debug, Clone, PartialEq, Copy)]
@@ -47,6 +50,25 @@ pub enum Operator {
 }
 
 impl Operator {
+    pub fn lexeme(self) -> &'static str {
+        match self {
+            Operator::Plus => "+",
+            Operator::Minus => "-",
+            Operator::Star => "*",
+            Operator::Slash => "/",
+            Operator::Percent => "%",
+            Operator::EqEq => "==",
+            Operator::NotEq => "!=",
+            Operator::Lt => "<",
+            Operator::Gt => ">",
+            Operator::LtEq => "<=",
+            Operator::GtEq => ">=",
+            Operator::AndAnd => "&&",
+            Operator::OrOr => "||",
+            Operator::Bang => "!",
+        }
+    }
+
     pub fn prefix_info(self) -> Option<(u8, PrefixOper)> {
         match self {
             Operator::Bang => Some((130, PrefixOper::Not)),
@@ -93,6 +115,43 @@ pub enum Delimiter {
     DotDot,    // ..
     DotDotEq,  // ..=
     Eq,        // =
+}
+
+impl Delimiter {
+    pub fn lexeme(self) -> &'static str {
+        match self {
+            Delimiter::LParen => "(",
+            Delimiter::RParen => ")",
+            Delimiter::LBrace => "{",
+            Delimiter::RBrace => "}",
+            Delimiter::LBracket => "[",
+            Delimiter::RBracket => "]",
+            Delimiter::Comma => ",",
+            Delimiter::Dot => ".",
+            Delimiter::Semicolon => ";",
+            Delimiter::DotDot => "..",
+            Delimiter::DotDotEq => "..=",
+            Delimiter::Eq => "=",
+        }
+    }
+}
+
+impl TokenKind {
+    pub fn describe(&self) -> String {
+        match self {
+            TokenKind::Int(_) => "integer literal".to_string(),
+            TokenKind::Float(_) => "float literal".to_string(),
+            TokenKind::String(_) => "string literal".to_string(),
+            TokenKind::True => "keyword 'true'".to_string(),
+            TokenKind::False => "keyword 'false'".to_string(),
+            TokenKind::Nil => "keyword 'nil'".to_string(),
+            TokenKind::Identifier(name) => format!("identifier '{}'", name),
+            TokenKind::Operator(operator) => format!("operator '{}'", operator.lexeme()),
+            TokenKind::Delimiter(delimiter) => format!("'{}'", delimiter.lexeme()),
+            TokenKind::EOF => "end of input".to_string(),
+            TokenKind::Let => "keyword 'let'".to_string(),
+        }
+    }
 }
 
 pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
@@ -182,6 +241,13 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                         kind: TokenKind::False,
                         end: offset,
                     }),
+
+                    // 其他保留字
+                    "let" => tokens.push(Token {
+                        kind: TokenKind::Let,
+                        end: offset,
+                    }),
+
                     _ => tokens.push(Token {
                         kind: TokenKind::Identifier(ident),
                         end: offset,
@@ -440,7 +506,12 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 };
                 tokens.push(Token { kind, end: offset });
             }
-            other => return Err(ParseError::new(offset, format!("unexpected character '{}'", other))),
+            other => {
+                return Err(ParseError::new(
+                    offset,
+                    format!("unexpected character '{}'", other),
+                ));
+            }
         }
     }
     tokens.push(Token {

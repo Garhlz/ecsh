@@ -1,9 +1,47 @@
 use crate::ecscript::{
-    ast::{Expr, ExprKind, InfixOper, Literal, PrefixOper},
+    ast::{Expr, ExprKind, InfixOper, Literal, PrefixOper, Stmt},
     env::Environment,
     error::{EvalResult, RuntimeError, RuntimeErrorKind},
     value::Value,
 };
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecFlow {
+    Normal,
+}
+
+pub fn eval_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<ExecFlow> {
+    for stmt in stmts {
+        eval_stmt(stmt, env)?;
+    }
+    Ok(ExecFlow::Normal)
+}
+
+/// 求值单条语句。
+///
+/// TODO(stage 4/5): 当 `eval_expr` 返回 `ExecFlow::Return/Break/Continue`
+/// 时，需要在此处检查并传播，不应吞掉控制流。
+pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> EvalResult<()> {
+    match stmt {
+        Stmt::Let { name, expr, span } => {
+            let value = eval_expr(expr, env)?;
+            env.insert(name.clone(), value, *span)?;
+        }
+        Stmt::Assign { name, expr, span } => {
+            let value = eval_expr(expr, env)?;
+            env.set(name, value, *span)?
+        }
+        Stmt::ExprStmt { expr, .. } => {
+            eval_expr(expr, env)?;
+        }
+        Stmt::Block { stmts, .. } => {
+            let new_env = Environment::new_child(env);
+            for stmt in stmts {
+                eval_stmt(stmt, &new_env)?;
+            }
+        }
+    }
+    Ok(())
+}
 
 pub fn eval_expr(expr: &Expr, env: &Environment) -> EvalResult<Value> {
     let span = expr.span;
@@ -46,21 +84,27 @@ pub fn eval_expr(expr: &Expr, env: &Environment) -> EvalResult<Value> {
         },
         ExprKind::Infix(left, oper, right) => {
             let left_val = eval_expr(left, env)?;
-            let right_val = eval_expr(right, env)?;
             match oper {
-                InfixOper::Add => eval_add(left_val, right_val, span),
-                InfixOper::Sub => eval_sub(left_val, right_val, span),
-                InfixOper::Mul => eval_mul(left_val, right_val, span),
-                InfixOper::Div => eval_div(left_val, right_val, span),
-                InfixOper::Mod => eval_mod(left_val, right_val, span),
-                InfixOper::Eq => eval_eq(left_val, right_val, span),
-                InfixOper::Ne => eval_ne(left_val, right_val, span),
-                InfixOper::Lt => eval_lt(left_val, right_val, span),
-                InfixOper::Gt => eval_gt(left_val, right_val, span),
-                InfixOper::Le => eval_le(left_val, right_val, span),
-                InfixOper::Ge => eval_ge(left_val, right_val, span),
-                InfixOper::And => eval_and(left_val, right_val, span),
-                InfixOper::Or => eval_or(left_val, right_val, span),
+                // 这里加入了逻辑运算的短路设定
+                InfixOper::And => eval_and_short_circuit(left_val, right, env, span),
+                InfixOper::Or => eval_or_short_circuit(left_val, right, env, span),
+                _ => {
+                    let right_val = eval_expr(right, env)?;
+                    match oper {
+                        InfixOper::Add => eval_add(left_val, right_val, span),
+                        InfixOper::Sub => eval_sub(left_val, right_val, span),
+                        InfixOper::Mul => eval_mul(left_val, right_val, span),
+                        InfixOper::Div => eval_div(left_val, right_val, span),
+                        InfixOper::Mod => eval_mod(left_val, right_val, span),
+                        InfixOper::Eq => eval_eq(left_val, right_val, span),
+                        InfixOper::Ne => eval_ne(left_val, right_val, span),
+                        InfixOper::Lt => eval_lt(left_val, right_val, span),
+                        InfixOper::Gt => eval_gt(left_val, right_val, span),
+                        InfixOper::Le => eval_le(left_val, right_val, span),
+                        InfixOper::Ge => eval_ge(left_val, right_val, span),
+                        InfixOper::And | InfixOper::Or => unreachable!(),
+                    }
+                }
             }
         }
     }
@@ -90,7 +134,11 @@ fn eval_sub(left: Value, right: Value, span: usize) -> EvalResult<Value> {
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("cannot subtract {} and {}", left.type_name(), right.type_name()),
+            format!(
+                "cannot subtract {} and {}",
+                left.type_name(),
+                right.type_name()
+            ),
         )),
     }
 }
@@ -104,7 +152,11 @@ fn eval_mul(left: Value, right: Value, span: usize) -> EvalResult<Value> {
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("cannot multiply {} and {}", left.type_name(), right.type_name()),
+            format!(
+                "cannot multiply {} and {}",
+                left.type_name(),
+                right.type_name()
+            ),
         )),
     }
 }
@@ -123,7 +175,11 @@ fn eval_div(left: Value, right: Value, span: usize) -> EvalResult<Value> {
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("cannot divide {} and {}", left.type_name(), right.type_name()),
+            format!(
+                "cannot divide {} and {}",
+                left.type_name(),
+                right.type_name()
+            ),
         )),
     }
 }
@@ -139,7 +195,11 @@ fn eval_mod(left: Value, right: Value, span: usize) -> EvalResult<Value> {
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("cannot compute modulo of {} and {}", left.type_name(), right.type_name()),
+            format!(
+                "cannot compute modulo of {} and {}",
+                left.type_name(),
+                right.type_name()
+            ),
         )),
     }
 }
@@ -156,7 +216,11 @@ fn eval_eq(left: Value, right: Value, span: usize) -> EvalResult<Value> {
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("cannot compare {} and {}", left.type_name(), right.type_name()),
+            format!(
+                "cannot compare {} and {}",
+                left.type_name(),
+                right.type_name()
+            ),
         )),
     }
 }
@@ -173,7 +237,11 @@ fn eval_ne(left: Value, right: Value, span: usize) -> EvalResult<Value> {
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("cannot compare {} and {}", left.type_name(), right.type_name()),
+            format!(
+                "cannot compare {} and {}",
+                left.type_name(),
+                right.type_name()
+            ),
         )),
     }
 }
@@ -187,7 +255,11 @@ fn eval_lt(left: Value, right: Value, span: usize) -> EvalResult<Value> {
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("cannot compare {} and {}", left.type_name(), right.type_name()),
+            format!(
+                "cannot compare {} and {}",
+                left.type_name(),
+                right.type_name()
+            ),
         )),
     }
 }
@@ -201,7 +273,11 @@ fn eval_gt(left: Value, right: Value, span: usize) -> EvalResult<Value> {
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("cannot compare {} and {}", left.type_name(), right.type_name()),
+            format!(
+                "cannot compare {} and {}",
+                left.type_name(),
+                right.type_name()
+            ),
         )),
     }
 }
@@ -215,7 +291,11 @@ fn eval_le(left: Value, right: Value, span: usize) -> EvalResult<Value> {
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("cannot compare {} and {}", left.type_name(), right.type_name()),
+            format!(
+                "cannot compare {} and {}",
+                left.type_name(),
+                right.type_name()
+            ),
         )),
     }
 }
@@ -229,29 +309,71 @@ fn eval_ge(left: Value, right: Value, span: usize) -> EvalResult<Value> {
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("cannot compare {} and {}", left.type_name(), right.type_name()),
+            format!(
+                "cannot compare {} and {}",
+                left.type_name(),
+                right.type_name()
+            ),
         )),
     }
 }
 
-fn eval_and(left: Value, right: Value, span: usize) -> EvalResult<Value> {
-    match (&left, &right) {
-        (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a && *b)),
+fn eval_and_short_circuit(
+    left: Value,
+    right: &Expr,
+    env: &Environment<'_>,
+    span: usize,
+) -> EvalResult<Value> {
+    match left {
+        Value::Bool(false) => Ok(Value::Bool(false)),
+        Value::Bool(true) => {
+            let right = eval_expr(right, env)?;
+            match right {
+                Value::Bool(value) => Ok(Value::Bool(value)),
+                _ => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "'&&' requires Bool operands, got Bool and {}",
+                        right.type_name()
+                    ),
+                )),
+            }
+        }
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("'&&' requires Bool operands, got {} and {}", left.type_name(), right.type_name()),
+            format!("'&&' requires Bool left operand, got {}", left.type_name()),
         )),
     }
 }
 
-fn eval_or(left: Value, right: Value, span: usize) -> EvalResult<Value> {
-    match (&left, &right) {
-        (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a || *b)),
+fn eval_or_short_circuit(
+    left: Value,
+    right: &Expr,
+    env: &Environment<'_>,
+    span: usize,
+) -> EvalResult<Value> {
+    match left {
+        Value::Bool(true) => Ok(Value::Bool(true)),
+        Value::Bool(false) => {
+            let right = eval_expr(right, env)?;
+            match right {
+                Value::Bool(value) => Ok(Value::Bool(value)),
+                _ => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "'||' requires Bool operands, got Bool and {}",
+                        right.type_name()
+                    ),
+                )),
+            }
+        }
         _ => Err(RuntimeError::new(
             span,
             RuntimeErrorKind::TypeMismatch,
-            format!("'||' requires Bool operands, got {} and {}", left.type_name(), right.type_name()),
+            format!("'||' requires Bool left operand, got {}", left.type_name()),
         )),
     }
 }
@@ -276,9 +398,9 @@ mod tests {
         eval_expr(&expr, env)
     }
 
-    fn env_with(name: &str, val: Value) -> Environment {
-        let mut env = Environment::new();
-        env.insert(name.to_string(), val);
+    fn env_with(name: &str, val: Value) -> Environment<'_> {
+        let env = Environment::new();
+        env.insert(name.to_string(), val, 0).unwrap();
         env
     }
 
@@ -306,13 +428,16 @@ mod tests {
     #[test]
     fn eval_literal_float() {
         let env = Environment::new();
-        assert_eq!(eval_src("3.14", &env), Ok(Value::Float(3.14)));
+        assert_eq!(eval_src("2.5", &env), Ok(Value::Float(2.5)));
     }
 
     #[test]
     fn eval_literal_string() {
         let env = Environment::new();
-        assert_eq!(eval_src("\"hello\"", &env), Ok(Value::String("hello".to_string())));
+        assert_eq!(
+            eval_src("\"hello\"", &env),
+            Ok(Value::String("hello".to_string()))
+        );
     }
 
     // ── 变量读取 ──────────────────────────────────────────
@@ -556,7 +681,33 @@ mod tests {
     fn eval_logical_type_error() {
         let env = Environment::new();
         assert!(eval_src("1 && true", &env).is_err());
-        assert!(eval_src("true || 0", &env).is_err());
+        assert!(eval_src("false || 0", &env).is_err());
+    }
+
+    #[test]
+    fn eval_and_short_circuits_on_false_left() {
+        let env = Environment::new();
+        assert_eq!(eval_src("false && missing", &env), Ok(Value::Bool(false)));
+    }
+
+    #[test]
+    fn eval_or_short_circuits_on_true_left() {
+        let env = Environment::new();
+        assert_eq!(eval_src("true || missing", &env), Ok(Value::Bool(true)));
+    }
+
+    #[test]
+    fn eval_and_evaluates_right_when_left_is_true() {
+        let env = Environment::new();
+        let err = eval_src("true && missing", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::UndefinedVariable);
+    }
+
+    #[test]
+    fn eval_or_evaluates_right_when_left_is_false() {
+        let env = Environment::new();
+        let err = eval_src("false || missing", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::UndefinedVariable);
     }
 
     // ── 优先级 ────────────────────────────────────────────
@@ -603,8 +754,8 @@ mod tests {
 
     #[test]
     fn eval_with_variables() {
-        let mut env = env_with("a", Value::Int(3));
-        env.insert("b".to_string(), Value::Int(4));
+        let env = env_with("a", Value::Int(3));
+        env.insert("b".to_string(), Value::Int(4), 0).unwrap();
         assert_eq!(eval_src("a + b", &env), Ok(Value::Int(7)));
         assert_eq!(eval_src("a * b", &env), Ok(Value::Int(12)));
     }
@@ -624,9 +775,172 @@ mod tests {
     #[test]
     fn eval_type_error_has_correct_span() {
         let env = Environment::new();
-        // "1" 在 offset 1，"+" 在 offset 3（但 infix span 是 op 的 offset=3）
         let err = eval_src("1 + \"x\"", &env).unwrap_err();
         assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
-        assert_eq!(err.offset, 3); // '+' 的 end offset
+        assert_eq!(err.offset, 3);
+    }
+}
+
+// ── 语句测试 ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod stmt_tests {
+    use super::{ExecFlow, eval_expr, eval_script};
+    use crate::ecscript::{
+        ast::{Expr, ExprKind, Literal, Stmt},
+        env::Environment,
+        error::{RuntimeError, RuntimeErrorKind},
+        lexer::tokenize,
+        parser::parse_script,
+        pratt::parse_expr,
+        value::Value,
+    };
+
+    fn eval_script_src(src: &str, env: &Environment<'_>) -> Result<ExecFlow, RuntimeError> {
+        let tokens = tokenize(src).unwrap();
+        let stmts = parse_script(&tokens).unwrap();
+        eval_script(&stmts, env)
+    }
+
+    fn lit_int(n: i64) -> Expr {
+        Expr {
+            kind: ExprKind::Literal(Literal::Int(n)),
+            span: 0,
+        }
+    }
+
+    // ── let 语句 ──────────────────────────────────────────
+
+    #[test]
+    fn eval_let_inserts_variable() {
+        let env = Environment::new();
+        eval_script_src("let x = 42;", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(42)));
+    }
+
+    #[test]
+    fn eval_let_duplicate_in_same_scope() {
+        let env = Environment::new();
+        let err = eval_script_src("let x = 1; let x = 2;", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::DuplicateVariable);
+        assert!(err.message.contains("x"));
+    }
+
+    #[test]
+    fn eval_block_duplicate_in_same_scope() {
+        let env = Environment::new();
+        let err = eval_script_src("{ let y = 1; let y = 2; }", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::DuplicateVariable);
+        assert!(err.message.contains("y"));
+    }
+
+    // ── assign 语句 ───────────────────────────────────────
+
+    #[test]
+    fn eval_assign_updates_variable() {
+        let env = Environment::new();
+        eval_script_src("let x = 10; x = 20;", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(20)));
+    }
+
+    #[test]
+    fn eval_assign_undeclared_variable() {
+        let env = Environment::new();
+        let err = eval_script_src("x = 5;", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::UndefinedVariable);
+    }
+
+    #[test]
+    fn eval_block_assign_undeclared_variable() {
+        let env = Environment::new();
+        let err = eval_script_src("{ y = 5; }", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::UndefinedVariable);
+        assert!(err.message.contains("y"));
+    }
+
+    #[test]
+    fn eval_assign_requires_existing_variable() {
+        let env = Environment::new();
+        let stmts = vec![Stmt::Assign {
+            name: "x".into(),
+            expr: lit_int(5),
+            span: 0,
+        }];
+        let err = eval_script(&stmts, &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::UndefinedVariable);
+    }
+
+    // ── 表达式语句 ────────────────────────────────────────
+
+    #[test]
+    fn eval_expr_stmt_discards_value() {
+        let env = Environment::new();
+        let result = eval_script_src("42;", &env);
+        assert!(result.is_ok());
+    }
+
+    // ── block 作用域 ──────────────────────────────────────
+
+    #[test]
+    fn eval_block_new_scope_let_does_not_leak() {
+        let env = Environment::new();
+        eval_script_src("let x = 1; { let y = 2; }", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(1)));
+        assert_eq!(
+            env.get("y", 0).unwrap_err().kind,
+            RuntimeErrorKind::UndefinedVariable
+        );
+    }
+
+    #[test]
+    fn eval_block_reads_outer_variables() {
+        let env = Environment::new();
+        eval_script_src("let x = 10;", &env).unwrap();
+        // x is visible from inside the block (via parent chain)
+        let env_child = Environment::new_child(&env);
+        let tokens = tokenize("x").unwrap();
+        let expr = parse_expr(&tokens).unwrap();
+        assert_eq!(eval_expr(&expr, &env_child), Ok(Value::Int(10)));
+    }
+
+    #[test]
+    fn eval_block_assigns_outer_variable() {
+        let env = Environment::new();
+        eval_script_src("let x = 1; { x = 10; }", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(10)));
+    }
+
+    #[test]
+    fn eval_block_let_shadows_outer() {
+        let env = Environment::new();
+        eval_script_src("let x = 1; { let x = 2; }", &env).unwrap();
+        // outer x unchanged after block
+        assert_eq!(env.get("x", 0), Ok(Value::Int(1)));
+    }
+
+    // ── eval_script 多语句 ────────────────────────────────
+
+    #[test]
+    fn eval_script_multiple_statements() {
+        let env = Environment::new();
+        eval_script_src("let x = 3; let y = x + 1;", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(3)));
+        assert_eq!(env.get("y", 0), Ok(Value::Int(4)));
+    }
+
+    #[test]
+    fn eval_script_returns_normal() {
+        let env = Environment::new();
+        let flow = eval_script_src("let x = 1;", &env).unwrap();
+        assert_eq!(flow, ExecFlow::Normal);
+    }
+
+    #[test]
+    fn eval_script_error_stops_execution() {
+        let env = Environment::new();
+        let err = eval_script_src("let x = 1; y; x = 2;", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::UndefinedVariable);
+        // let x = 1 executed, but "x = 2" did not (stopped at unknown variable y)
+        assert_eq!(env.get("x", 0), Ok(Value::Int(1)));
     }
 }
