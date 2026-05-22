@@ -1,7 +1,7 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use crate::ecscript::{
-    ast::{Expr, ExprKind, InfixOper, Literal, PrefixOper, Stmt},
+    ast::{Expr, ExprKind, InfixOper, Literal, PrefixOper, RangeExpr, Stmt},
     builtin::run_builtin,
     env::Environment,
     error::{EvalResult, RuntimeError, RuntimeErrorKind},
@@ -10,20 +10,41 @@ use crate::ecscript::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecFlow {
     Normal,
+    Break(usize),
+    Continue(usize),
+    // Return(Value),
 }
 
 pub fn eval_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<ExecFlow> {
     for stmt in stmts {
-        eval_stmt(stmt, env)?;
+        match eval_stmt(stmt, env)? {
+            ExecFlow::Normal => continue,
+            ExecFlow::Break(span) => {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::BreakOutsideLoop,
+                    "break outside loop",
+                ));
+            }
+            ExecFlow::Continue(span) => {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::ContinueOutsideLoop,
+                    "continue outside loop",
+                ));
+            }
+        }
     }
     Ok(ExecFlow::Normal)
 }
 
 /// 求值单条语句。
 ///
-/// TODO(stage 4/5): 当 `eval_expr` 返回 `ExecFlow::Return/Break/Continue`
-/// 时，需要在此处检查并传播，不应吞掉控制流。
-pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> EvalResult<()> {
+///
+/// 有能力改变控制流的语句自己返回，否则用全局的Normal
+/// 循环语句消费break/continue，其他都只是透传
+/// 写完之后重构多次
+pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, RuntimeError> {
     match stmt {
         Stmt::Let { name, expr, span } => {
             let value = eval_expr(expr, env)?;
@@ -36,14 +57,150 @@ pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> EvalResult<()> {
         Stmt::ExprStmt { expr, .. } => {
             eval_expr(expr, env)?;
         }
-        Stmt::Block { stmts, .. } => {
-            let new_env = Environment::new_child(env);
-            for stmt in stmts {
-                eval_stmt(stmt, &new_env)?;
+        Stmt::Block { stmts, .. } => return eval_block(stmts, env),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            span,
+        } => {
+            let cond_var = expect_bool(eval_expr(cond, env)?, *span, "if condition")?;
+            if cond_var {
+                return eval_block(then_body, env);
+            } else {
+                return eval_block(else_body, env);
             }
         }
+        Stmt::While { cond, body, span } => loop {
+            let cond_var = expect_bool(eval_expr(cond, env)?, *span, "while condition")?;
+            if !cond_var {
+                break;
+            }
+            match eval_block(body, env)? {
+                // 捕捉透传上来的控制流，控制外层循环的状态
+                ExecFlow::Break(_) => break,
+                ExecFlow::Continue(_) => continue,
+                ExecFlow::Normal => {}
+            }
+        },
+        Stmt::ForIn {
+            var,
+            iterable,
+            body,
+            span,
+        } => {
+            let coll = eval_expr(iterable, env)?;
+            // 支持对数组和对象（键）的遍历
+            match coll {
+                Value::Array(arr) => {
+                    let items: Vec<Value> = arr.borrow().clone();
+                    // 先拍平迭代快照，避免循环体再次借用同一个 RefCell 时触发运行时借用冲突。
+                    for value in items {
+                        let new_env = Environment::new_child(env);
+                        new_env.insert(var.clone(), value, *span)?;
+                        // 依然捕获消费eval_block透传上来的控制流
+                        match eval_block(body, &new_env)? {
+                            ExecFlow::Break(_) => break,
+                            ExecFlow::Continue(_) => continue,
+                            ExecFlow::Normal => {}
+                        }
+                    }
+                }
+                Value::Object(obj) => {
+                    let mut keys: Vec<String> = obj.borrow().keys().cloned().collect();
+                    keys.sort(); // 排序之后稳定遍历
+                    for key in keys {
+                        let new_env = Environment::new_child(env);
+                        new_env.insert(var.clone(), Value::String(key), *span)?;
+                        match eval_block(body, &new_env)? {
+                            ExecFlow::Break(_) => break,
+                            ExecFlow::Continue(_) => continue,
+                            ExecFlow::Normal => {}
+                        }
+                    }
+                }
+                other => {
+                    return Err(RuntimeError::new(
+                        *span,
+                        RuntimeErrorKind::TypeMismatch,
+                        format!(
+                            "for-in iterable must be Array or Object, got {}",
+                            other.type_name()
+                        ),
+                    ));
+                }
+            }
+        }
+        Stmt::ForRange {
+            var,
+            range,
+            body,
+            span,
+        } => {
+            let RangeExpr {
+                start,
+                end,
+                inclusive,
+            } = range;
+            let start = expect_int(eval_expr(start, env)?, *span, "for range start")?;
+            let end = expect_int(eval_expr(end, env)?, *span, "for range end")?;
+            // `start..end` 和 `start..=end` 的具体迭代器类型不同，这里先统一擦成 trait object。
+            let iterator: Box<dyn Iterator<Item = i64>> = if *inclusive {
+                Box::new(start..=end)
+            } else {
+                Box::new(start..end)
+            };
+            for i in iterator {
+                let new_env = Environment::new_child(env);
+                new_env.insert(var.clone(), Value::Int(i), *span)?;
+                match eval_block(body, &new_env)? {
+                    ExecFlow::Break(_) => break,
+                    ExecFlow::Continue(_) => continue,
+                    ExecFlow::Normal => {}
+                }
+            }
+        }
+        Stmt::Break { span } => {
+            return Ok(ExecFlow::Break(*span));
+        }
+        Stmt::Continue { span } => {
+            return Ok(ExecFlow::Continue(*span));
+        }
     }
-    Ok(())
+    Ok(ExecFlow::Normal)
+}
+
+fn eval_block(stmts: &[Stmt], env: &Environment<'_>) -> Result<ExecFlow, RuntimeError> {
+    let new_env = Environment::new_child(env);
+    for stmt in stmts {
+        match eval_stmt(stmt, &new_env)? {
+            ExecFlow::Normal => continue,
+            flow => return Ok(flow),
+        };
+    }
+    Ok(ExecFlow::Normal)
+}
+
+fn expect_bool(value: Value, span: usize, context: &str) -> EvalResult<bool> {
+    match value {
+        Value::Bool(b) => Ok(b),
+        other => Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::TypeMismatch,
+            format!("{context} must be Bool, got {}", other.type_name()),
+        )),
+    }
+}
+
+fn expect_int(value: Value, span: usize, context: &str) -> EvalResult<i64> {
+    match value {
+        Value::Int(i) => Ok(i),
+        other => Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::TypeMismatch,
+            format!("{context} must be Int, got {}", other.type_name()),
+        )),
+    }
 }
 
 pub fn eval_expr(expr: &Expr, env: &Environment) -> EvalResult<Value> {
@@ -222,6 +379,23 @@ pub fn eval_expr(expr: &Expr, env: &Environment) -> EvalResult<Value> {
                     RuntimeErrorKind::NotCallable,
                     format!("{} is not callable", other.type_name()),
                 )),
+            }
+        }
+        ExprKind::Range(RangeExpr {
+            start,
+            end,
+            inclusive,
+        }) => {
+            let start = expect_int(eval_expr(start, env)?, span, "range start")?;
+            let end = expect_int(eval_expr(end, env)?, span, "range end")?;
+
+            // 转为数组
+            if *inclusive {
+                let vec: Vec<Value> = (start..=end).map(|val| Value::Int(val)).collect();
+                Ok(Value::Array(Rc::new(RefCell::new(vec))))
+            } else {
+                let vec: Vec<Value> = (start..end).map(|val| Value::Int(val)).collect();
+                Ok(Value::Array(Rc::new(RefCell::new(vec))))
             }
         }
     }
@@ -1287,5 +1461,222 @@ mod stmt_tests {
             *keys.borrow(),
             vec![Value::String("a".into()), Value::String("b".into())]
         );
+    }
+
+    // ── 控制流 ────────────────────────────────────────────
+
+    #[test]
+    fn eval_if_then_true_branch() {
+        let env = Environment::new();
+        eval_script_src("let x = 0; if true { x = 1; }", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(1)));
+    }
+
+    #[test]
+    fn eval_if_else_false_branch() {
+        let env = Environment::new();
+        eval_script_src("let x = 0; if false { x = 1; } else { x = 2; }", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn eval_if_else_if_chain() {
+        let env = Environment::new();
+        eval_script_src(
+            "let x = 0; if false { x = 1; } else if true { x = 2; } else { x = 3; }",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn eval_if_condition_must_be_bool() {
+        let env = Environment::new();
+        let err = eval_script_src("if 1 { 0; }", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.offset, 2);
+        assert_eq!(err.message, "if condition must be Bool, got Int");
+    }
+
+    #[test]
+    fn eval_while_loop_iterates() {
+        let env = Environment::new();
+        eval_script_src("let x = 0; while x < 3 { x = x + 1; }", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_while_skips_when_condition_false() {
+        let env = Environment::new();
+        eval_script_src("let x = 0; while false { x = 1; }", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(0)));
+    }
+
+    #[test]
+    fn eval_while_break() {
+        let env = Environment::new();
+        eval_script_src(
+            "let x = 0; while x < 10 { x = x + 1; if x == 3 { break; } }",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_while_continue_skips_iteration() {
+        let env = Environment::new();
+        eval_script_src(
+            "let x = 0; let y = 0; while x < 3 { x = x + 1; if x == 2 { continue; } y = y + 1; }",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(3)));
+        assert_eq!(env.get("y", 0), Ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn eval_while_condition_error_is_specific() {
+        let env = Environment::new();
+        let err = eval_script_src("while 1 { 0; }", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.offset, 5);
+        assert_eq!(err.message, "while condition must be Bool, got Int");
+    }
+
+    #[test]
+    fn eval_for_range_exclusive() {
+        let env = Environment::new();
+        eval_script_src("let s = 0; for i in 0..3 { s = s + i; }", &env).unwrap();
+        assert_eq!(env.get("s", 0), Ok(Value::Int(3))); // 0 + 1 + 2
+    }
+
+    #[test]
+    fn eval_for_range_inclusive() {
+        let env = Environment::new();
+        eval_script_src("let s = 0; for i in 0..=3 { s = s + i; }", &env).unwrap();
+        assert_eq!(env.get("s", 0), Ok(Value::Int(6))); // 0 + 1 + 2 + 3
+    }
+
+    #[test]
+    fn eval_for_in_array() {
+        let env = Environment::new();
+        eval_script_src(
+            "let a = [10, 20, 30]; let s = 0; for v in a { s = s + v; }",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("s", 0), Ok(Value::Int(60)));
+    }
+
+    #[test]
+    fn eval_for_in_object_keys() {
+        let env = Environment::new();
+        eval_script_src(
+            "let o = {b: 2, a: 1}; let k = \"\"; for key in o { k = k + key; }",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("k", 0), Ok(Value::String("ab".into())));
+    }
+
+    #[test]
+    fn eval_for_in_array_uses_snapshot_when_body_mutates_source() {
+        let env = Environment::new();
+        eval_script_src(
+            "let a = [1, 2]; let s = 0; for v in a { s = s + v; push(a, 10); }",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("s", 0), Ok(Value::Int(3)));
+        let Value::Array(arr) = env.get("a", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            *arr.borrow(),
+            vec![Value::Int(1), Value::Int(2), Value::Int(10), Value::Int(10)]
+        );
+    }
+
+    #[test]
+    fn eval_for_in_non_iterable_reports_type() {
+        let env = Environment::new();
+        let err = eval_script_src("for x in 1 { 0; }", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.offset, 3);
+        assert_eq!(
+            err.message,
+            "for-in iterable must be Array or Object, got Int"
+        );
+    }
+
+    #[test]
+    fn eval_for_range_start_error_is_specific() {
+        let env = Environment::new();
+        let err = eval_script_src("for i in true..3 { 0; }", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.offset, 3);
+        assert_eq!(err.message, "for range start must be Int, got Bool");
+    }
+
+    #[test]
+    fn eval_for_range_end_error_is_specific() {
+        let env = Environment::new();
+        let err = eval_script_src("for i in 0..false { 0; }", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.offset, 3);
+        assert_eq!(err.message, "for range end must be Int, got Bool");
+    }
+
+    #[test]
+    fn eval_for_break_inside_loop() {
+        let env = Environment::new();
+        eval_script_src(
+            "let s = 0; for i in 0..10 { if i == 3 { break; } s = s + i; }",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("s", 0), Ok(Value::Int(3))); // 0 + 1 + 2
+    }
+
+    #[test]
+    fn eval_for_continue_skips_iteration() {
+        let env = Environment::new();
+        eval_script_src(
+            "let s = 0; for i in 0..5 { if i == 2 { continue; } s = s + i; }",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("s", 0), Ok(Value::Int(8))); // 0 + 1 + 3 + 4
+    }
+
+    #[test]
+    fn eval_break_outside_loop_reports_error() {
+        let env = Environment::new();
+        let err = eval_script_src("break;", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::BreakOutsideLoop);
+        assert_eq!(err.offset, 5);
+        assert_eq!(err.message, "break outside loop");
+    }
+
+    #[test]
+    fn eval_continue_outside_loop_reports_error() {
+        let env = Environment::new();
+        let err = eval_script_src("continue;", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::ContinueOutsideLoop);
+        assert_eq!(err.offset, 8);
+        assert_eq!(err.message, "continue outside loop");
+    }
+
+    #[test]
+    fn eval_nested_while_break_only_inner() {
+        let env = Environment::new();
+        eval_script_src(
+            "let x = 0; let y = 0; while x < 3 { x = x + 1; y = 0; while y < 3 { y = y + 1; if y == 2 { break; } } }",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(3)));
     }
 }

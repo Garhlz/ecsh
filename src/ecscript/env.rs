@@ -48,6 +48,7 @@ impl<'a> Environment<'a> {
         } else {
             if let Some(parent) = self.parent {
                 parent.get(name, span)
+            // builtin 只作为“查不到变量时”的兜底，这样 `let len = 1;` 可以自然遮蔽内置名。
             } else if let Some(builtin) = lookup_builtin(name) {
                 Ok(Value::Builtin(builtin))
             } else {

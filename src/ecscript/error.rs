@@ -48,6 +48,8 @@ pub enum RuntimeErrorKind {
     NotCallable,
     ArityMismatch,
     CircularReference,
+    BreakOutsideLoop,
+    ContinueOutsideLoop,
 }
 
 /// 运行时错误。

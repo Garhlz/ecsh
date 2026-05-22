@@ -1,5 +1,5 @@
 use crate::ecscript::{
-    ast::{Stmt, expr_to_assign_target},
+    ast::{ExprKind, Stmt, expr_to_assign_target},
     error::ParseError,
     lexer::{Delimiter, Token, TokenKind},
     pratt::{TokenStream, parse_expr_in},
@@ -19,6 +19,11 @@ pub fn parse_script(tokens: &[Token]) -> Result<Vec<Stmt>, ParseError> {
 fn parse_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     match state.peek().kind.clone() {
         TokenKind::Let => parse_let(state),
+        TokenKind::If => parse_if(state),
+        TokenKind::While => parse_while(state),
+        TokenKind::For => parse_for(state),
+        TokenKind::Break => parse_break(state),
+        TokenKind::Continue => parse_continue(state),
         TokenKind::Delimiter(Delimiter::RBrace) => Err(ParseError::new(
             state.current_offset(),
             "unexpected '}' at top level".to_string(),
@@ -135,6 +140,133 @@ fn expect_semicolon(state: &mut TokenStream<'_>) -> Result<(), ParseError> {
     Ok(())
 }
 
+fn parse_if(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+    let span = state.current_offset();
+    state.consume();
+    let cond = parse_expr_in(state)?;
+    let then_body = expect_block(state, "if")?;
+
+    // if之后有else部分
+    // 这里的逻辑实际上就是最近匹配
+    if state.check(&TokenKind::Else) {
+        state.consume();
+        // else if 递归调 parse_if
+        let else_body = if state.check(&TokenKind::If) {
+            vec![parse_if(state)?]
+        } else {
+            expect_block(state, "else")?
+        };
+
+        Ok(Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            span,
+        })
+    } else {
+        Ok(Stmt::If {
+            cond,
+            then_body,
+            else_body: Vec::new(),
+            span,
+        })
+    }
+}
+
+fn parse_while(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+    let span = state.current_offset();
+    state.consume();
+    let cond = parse_expr_in(state)?;
+    let body = expect_block(state, "while")?;
+    Ok(Stmt::While { cond, body, span })
+}
+
+fn parse_for(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+    let span = state.current_offset();
+    state.consume();
+    let TokenKind::Identifier(var) = state.peek().kind.clone() else {
+        return Err(ParseError::new(
+            state.current_offset(),
+            format!(
+                "expected variable name after for, found {}",
+                state.peek().kind.describe()
+            ),
+        ));
+    };
+    state.consume();
+
+    let TokenKind::In = state.peek().kind.clone() else {
+        return Err(ParseError::new(
+            state.current_offset(),
+            format!(
+                "expected `in` after for, found {}",
+                state.peek().kind.describe()
+            ),
+        ));
+    };
+    state.consume();
+
+    let expr = parse_expr_in(state)?;
+    match expr.kind {
+        ExprKind::Range(range) => {
+            let body = expect_block(state, "for")?;
+            Ok(Stmt::ForRange {
+                var,
+                range,
+                body,
+                span,
+            })
+        }
+        // 除了语法上已经明确是 `a..b` / `a..=b` 的情况，其他一律保留成普通表达式，
+        // 交给运行时再决定它到底是 Array 还是 Object。
+        _ => {
+            let body = expect_block(state, "for")?;
+            Ok(Stmt::ForIn {
+                var,
+                iterable: expr,
+                body,
+                span,
+            })
+        }
+    }
+}
+
+fn parse_break(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+    let span = state.current_offset();
+    state.consume();
+    expect_semicolon(state)?;
+    Ok(Stmt::Break { span })
+}
+
+fn parse_continue(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+    let span = state.current_offset();
+    state.consume();
+    expect_semicolon(state)?;
+    Ok(Stmt::Continue { span })
+}
+
+fn expect_block(state: &mut TokenStream<'_>, name: &str) -> Result<Vec<Stmt>, ParseError> {
+    if !state.check(&TokenKind::Delimiter(Delimiter::LBrace)) {
+        return Err(ParseError::new(
+            state.current_offset(),
+            format!(
+                "expected '{{' after {name}, found {}",
+                state.peek().kind.describe()
+            ),
+        ));
+    }
+    let Stmt::Block {
+        stmts: body,
+        span: _,
+    } = parse_block(state)?
+    else {
+        return Err(ParseError::new(
+            state.current_offset(),
+            "expected block after {name}",
+        ));
+    };
+    Ok(body)
+}
 #[cfg(test)]
 mod tests {
     use super::parse_script;
@@ -158,6 +290,13 @@ mod tests {
     fn lit_int(n: i64) -> Expr {
         Expr {
             kind: ExprKind::Literal(Literal::Int(n)),
+            span: 0,
+        }
+    }
+
+    fn lit_bool(value: bool) -> Expr {
+        Expr {
+            kind: ExprKind::Literal(Literal::Bool(value)),
             span: 0,
         }
     }
@@ -459,5 +598,147 @@ mod tests {
     #[test]
     fn reports_double_semicolon() {
         assert_parse_error(";;", 1, "expected expression, found ';'");
+    }
+
+    // ── 控制流 ────────────────────────────────────────────
+
+    #[test]
+    fn parses_if_without_else() {
+        assert_eq!(
+            parse_src("if true { 1; }"),
+            vec![Stmt::If {
+                cond: lit_bool(true),
+                then_body: vec![Stmt::ExprStmt {
+                    expr: lit_int(1),
+                    span: 0,
+                }],
+                else_body: vec![],
+                span: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_if_else() {
+        assert_eq!(
+            parse_src("if true { 1; } else { 2; }"),
+            vec![Stmt::If {
+                cond: lit_bool(true),
+                then_body: vec![Stmt::ExprStmt {
+                    expr: lit_int(1),
+                    span: 0,
+                }],
+                else_body: vec![Stmt::ExprStmt {
+                    expr: lit_int(2),
+                    span: 0,
+                }],
+                span: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_if_else_if_chain() {
+        let stmts = parse_src("if false { 1; } else if true { 2; } else { 3; }");
+        assert_eq!(stmts.len(), 1);
+    }
+
+    #[test]
+    fn parses_while_loop() {
+        let stmts = parse_src("while true { 1; }");
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Stmt::While { .. }));
+    }
+
+    #[test]
+    fn parses_for_range() {
+        let stmts = parse_src("for i in 0..10 { 1; }");
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Stmt::ForRange { .. }));
+    }
+
+    #[test]
+    fn parses_for_inclusive_range() {
+        let stmts = parse_src("for i in 0..=5 { 1; }");
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Stmt::ForRange { .. }));
+    }
+
+    #[test]
+    fn parses_for_in_array() {
+        let stmts = parse_src("for v in a { 1; }");
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Stmt::ForIn { .. }));
+    }
+
+    #[test]
+    fn records_if_statement_span_at_keyword() {
+        let stmts = parse_src("if true { 1; }");
+        assert_eq!(stmts[0].span(), 2);
+    }
+
+    #[test]
+    fn records_while_statement_span_at_keyword() {
+        let stmts = parse_src("while true { 1; }");
+        assert_eq!(stmts[0].span(), 5);
+    }
+
+    #[test]
+    fn records_for_statement_span_at_keyword() {
+        let stmts = parse_src("for i in 0..3 { 1; }");
+        assert_eq!(stmts[0].span(), 3);
+    }
+
+    #[test]
+    fn records_break_statement_span_at_keyword() {
+        let stmts = parse_src("break;");
+        assert_eq!(stmts[0].span(), 5);
+    }
+
+    #[test]
+    fn records_continue_statement_span_at_keyword() {
+        let stmts = parse_src("continue;");
+        assert_eq!(stmts[0].span(), 8);
+    }
+
+    #[test]
+    fn parses_break() {
+        let stmts = parse_src("break;");
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Stmt::Break { .. }));
+    }
+
+    #[test]
+    fn parses_continue() {
+        let stmts = parse_src("continue;");
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Stmt::Continue { .. }));
+    }
+
+    #[test]
+    fn reports_unterminated_if_without_block() {
+        assert_parse_error(
+            "if true 1;",
+            9,
+            "expected '{' after if, found integer literal",
+        );
+    }
+
+    #[test]
+    fn reports_while_without_block() {
+        assert_parse_error(
+            "while true 1;",
+            12,
+            "expected '{' after while, found integer literal",
+        );
+    }
+
+    #[test]
+    fn reports_for_without_block() {
+        assert_parse_error(
+            "for i in 0..3 1;",
+            15,
+            "expected '{' after for, found integer literal",
+        );
     }
 }
