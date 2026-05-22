@@ -1,7 +1,8 @@
-# ecscript 当前实现手册（stage 4）
+# ecscript 当前实现手册（stage 5：基础函数）
 
 本文描述 ecscript **当前已经实现** 的语法与语义。  
-这一版已经从 stage 3 的“复合数据和内置函数”推进到 **stage 4 的控制流**：`if / else`、`while`、`for in`、`break`、`continue` 已经打通。
+这一版已经从 stage 4 的“控制流”继续推进到 **stage 5 的第一步**：在 `if / else`、`while`、`for in`、`break`、`continue` 之外，已经打通了**命名函数、普通函数调用和 `return`**。  
+不过**闭包、匿名函数、函数字面量**还没有开始实现。
 
 ---
 
@@ -24,11 +25,15 @@
   - 遍历对象 key
   - 遍历区间 `a..b` / `a..=b`
 - `break` / `continue`
+- 命名函数声明：`func name(args) { ... }`
+- 普通函数调用：`f(x, y)`
+- `return expr;` / `return;`
 - 基于字节偏移的 parse/runtime 错误定位
 
 当前未实现：
 
-- 用户自定义函数、`return`
+- 闭包捕获
+- 匿名函数 / 函数字面量
 - 注释
 - shell 集成后的正式脚本入口
 - block value / 尾表达式返回值
@@ -61,6 +66,8 @@
 - `in`
 - `break`
 - `continue`
+- `func`
+- `return`
 
 ### 2.3 数字
 
@@ -122,8 +129,10 @@ stmt            = let_stmt
                 | if_stmt
                 | while_stmt
                 | for_stmt
+                | func_stmt
                 | break_stmt
                 | continue_stmt
+                | return_stmt
 
 let_stmt        = "let" identifier "=" expr ";"
 assign_stmt     = assign_target "=" expr ";"
@@ -133,8 +142,12 @@ block           = "{" stmt* "}"
 if_stmt         = "if" expr block ("else" (block | if_stmt))?
 while_stmt      = "while" expr block
 for_stmt        = "for" identifier "in" expr block
+func_stmt       = "func" identifier "(" param_list? ")" block
 break_stmt      = "break" ";"
 continue_stmt   = "continue" ";"
+return_stmt     = "return" expr? ";"
+
+param_list      = identifier ("," identifier)*
 
 assign_target   = identifier
                 | postfix "." identifier
@@ -199,12 +212,15 @@ for i in 0..=10 { ... }
 - `len(arr);`
 - `break;`
 - `continue;`
+- `return;`
+- `return expr;`
 
 ### 4.2 不带分号的语句
 
 - `if ... { ... }`
 - `while ... { ... }`
 - `for ... in ... { ... }`
+- `func name(args) { ... }`
 - block 本身
 
 ### 4.3 block 内最后一条普通语句也必须带分号
@@ -272,8 +288,15 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: usize,
     },
+    FuncDeclare {
+        name: String,
+        params: Vec<String>,
+        body: Vec<Stmt>,
+        span: usize,
+    },
     Break { span: usize },
     Continue { span: usize },
+    Return { value: Option<Expr>, span: usize },
 }
 
 pub enum AssignTarget {
@@ -323,6 +346,7 @@ pub enum Value {
     String(String),
     Array(Rc<RefCell<Vec<Value>>>),
     Object(Rc<RefCell<HashMap<String, Value>>>),
+    Function(Rc<Function>),
     Builtin(Builtin),
 }
 ```
@@ -331,6 +355,7 @@ pub enum Value {
 
 - `Array` / `Object` 是共享、可变容器
 - 数组元素类型不要求统一
+- `Function` 当前是**命名函数值**
 - builtin 也是普通运行时值，因此可以被遮蔽
 
 ---
@@ -341,6 +366,7 @@ pub enum Value {
 
 - `new()`：顶层环境
 - `new_child(parent)`：子环境
+- `find_root()`：沿父链找到最外层全局环境
 - `insert()`：在当前层定义变量
 - `get()`：当前层 → 父链 → builtin fallback
 - `set()`：更新已有变量或修改容器内部内容
@@ -352,6 +378,27 @@ let len = 1;
 ```
 
 会遮蔽内置 `len`。
+
+当前函数调用采用一个**无闭包阶段的过渡语义**：
+
+- 调用函数时会创建新的 call frame
+- call frame 里放参数、函数内局部变量、以及函数自己的名字
+- 这个 call frame 的父环境是 **global/root**
+- **不是调用点环境**
+
+也就是说：
+
+```ecs
+let x = 1;
+func f() { return x; }
+
+{
+    let x = 2;
+    f();   // 当前读到 1，不是 2
+}
+```
+
+这样可以先避免“动态作用域”行为；等闭包实现后，再把 root-only 模型升级成 captures + global/root。
 
 ---
 
@@ -371,8 +418,23 @@ let len = 1;
 
 ### 9.2 调用
 
-当前真正可调用的值只有 builtin。  
-用户函数尚未实现。
+当前可调用值有两类：
+
+- builtin
+- 用户定义的命名函数
+
+当前用户函数能力范围：
+
+- 支持 `func add(a, b) { return a + b; }`
+- 支持普通调用 `add(1, 2)`
+- 参数个数必须严格匹配
+- `return;` 等价于返回 `nil`
+
+当前仍未支持：
+
+- 闭包捕获
+- 匿名函数
+- `func(...) { ... }` 这种函数字面量
 
 ### 9.3 容器访问
 
@@ -480,6 +542,32 @@ for i in 0..10 { ... }
 - 只能在循环中使用
 - 顶层或普通 block 中使用会在运行时报错
 
+### 10.7 `func`
+
+```ecs
+func add(a, b) {
+    return a + b;
+}
+```
+
+- 当前只支持**命名函数声明语句**
+- 声明后函数值会绑定到当前作用域
+- 调用时创建独立函数调用帧
+- 当前函数体可以读取：
+  - 参数
+  - 函数内 `let` 局部变量
+  - 函数自己的名字
+  - global/root 中的全局变量
+  - builtin
+- 当前**不会**透传调用者局部变量
+
+### 10.8 `return`
+
+- `return expr;`：返回表达式结果
+- `return;`：返回 `nil`
+- `return` 可以穿过 `if` / `while` / `for` / block 向上传播，直到函数调用边界
+- 顶层使用 `return` 会报运行时错误
+
 ---
 
 ## 11. 错误模型
@@ -493,7 +581,7 @@ for i in 0..10 { ... }
 - 缺失 `,`、`:`、`;`
 - `let` / `for` 后缺标识符
 - 非法赋值左值
-- `if/while/for` 后缺 block
+- `if/while/for/func` 后缺 block
 
 典型报错：
 
@@ -514,10 +602,11 @@ for i in 0..10 { ... }
 | `IndexOutOfBounds` | 数组索引越界 |
 | `NonExistentField` | 对象字段不存在 |
 | `NotCallable` | 调用了不可调用值 |
-| `ArityMismatch` | builtin 参数个数不对 |
+| `ArityMismatch` | builtin 或用户函数参数个数不对 |
 | `CircularReference` | `to_json` 检测到循环引用 |
 | `BreakOutsideLoop` | 循环外使用 `break` |
 | `ContinueOutsideLoop` | 循环外使用 `continue` |
+| `ReturnOutsideFunction` | 函数外使用 `return` |
 
 典型报错：
 
@@ -527,6 +616,7 @@ for i in 0..10 { ... }
 - `for range start must be Int, got Bool`
 - `break outside loop`
 - `continue outside loop`
+- `return outside function`
 - `object has no field 'name'`
 
 ---
@@ -554,9 +644,11 @@ for i in 0..10 { ... }
 - 已经支持 `while`
 - 已经支持 `for in` 遍历数组、对象 key 和区间
 - 已经支持 `break` / `continue`
+- 已经支持命名函数声明、普通函数调用和 `return`
 - `for in obj` 当前遍历的是 **排序后的 key**
 - `for in array` 当前使用 **迭代快照**，循环体修改原数组不会影响本轮迭代序列
-- builtin 仍然只有全局函数调用，没有用户函数
+- 当前函数调用帧只继承 **global/root**，不继承调用者局部变量
+- 闭包、匿名函数、函数字面量还没开始
 
 ---
 
@@ -564,10 +656,9 @@ for i in 0..10 { ... }
 
 从当前实现继续往下做，比较自然的顺序通常是：
 
-- `return`
-- 用户函数与闭包
-- 让 `Call` 同时支持 builtin 和用户函数
-- 更完整的执行流（例如 `return` 向上传播）
+- 闭包与 slot/cell 捕获
+- 匿名函数 / `func(...) { ... }`
+- 对象字段里的函数值
 - block value / 尾表达式
 - shell 集成
 - 更完整的 span / diagnostics 系统

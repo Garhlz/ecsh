@@ -50,6 +50,7 @@ pub enum RuntimeErrorKind {
     CircularReference,
     BreakOutsideLoop,
     ContinueOutsideLoop,
+    ReturnOutsideFunction,
 }
 
 /// 运行时错误。

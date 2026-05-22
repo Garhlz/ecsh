@@ -30,6 +30,8 @@ pub enum TokenKind {
     In,
     Continue,
     Break,
+    Func,
+    Return,
 }
 
 #[derive(Debug, Clone, PartialEq, Copy)]
@@ -166,6 +168,8 @@ impl TokenKind {
             TokenKind::In => "keyword 'in'".to_string(),
             TokenKind::Continue => "keyword 'continue'".to_string(),
             TokenKind::Break => "keyword 'break'".to_string(),
+            TokenKind::Func => "keyword 'func'".to_string(),
+            TokenKind::Return => "keyword 'return'".to_string(),
         }
     }
 }
@@ -289,6 +293,14 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                     }),
                     "break" => tokens.push(Token {
                         kind: TokenKind::Break,
+                        end: offset,
+                    }),
+                    "func" => tokens.push(Token {
+                        kind: TokenKind::Func,
+                        end: offset,
+                    }),
+                    "return" => tokens.push(Token {
+                        kind: TokenKind::Return,
                         end: offset,
                     }),
                     _ => tokens.push(Token {

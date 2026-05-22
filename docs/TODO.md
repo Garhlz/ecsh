@@ -32,7 +32,7 @@
 | 关键字 | 语义 | 示例 |
 |--------|------|------|
 | `let` | 声明新变量（当前作用域新建） | `let x = 10` |
-| `fn` | 函数定义 | `fn add(a, b) { ... }` |
+| `func` | 函数定义 | `func add(a, b) { ... }` |
 | `if` / `else` | 条件分支 | `if x > 0 { ... } else { ... }` |
 | `while` | 条件循环 | `while i <= n { ... }` |
 | `for` | 数字/迭代循环 | `for i in 1..10 { ... }` / `for v in arr { ... }` |
@@ -53,7 +53,7 @@ ls -la          → 关键字未命中 → shell 命令
 
 **MVP 只支持普通赋值 `=`，不支持 `+=` 这类复合赋值。** `x += 1` 并不增加表达能力，只是 `x = x + 1` 的语法糖；等基础语义稳定后，如果确实需要，再成套加入 `+= -= *= /= %=`。
 
-**Parser 不做符号表查询。** 顶层和函数体内部的 `x = 1` / `greet()` 都只做语法判断，产出 `Assign` / `Call` / `ExprStmt` 等 AST 节点。"变量是否已声明"、"标识符是不是函数"这些检查延后到 evaluator 运行阶段。好处：前向引用（`fn a() { b() }` 定义在 `fn b()` 之前）不产生 parse-time 错误，仅运行时报"b is not callable"。
+**Parser 不做符号表查询。** 顶层和函数体内部的 `x = 1` / `greet()` 都只做语法判断，产出 `Assign` / `Call` / `ExprStmt` 等 AST 节点。"变量是否已声明"、"标识符是不是函数"这些检查延后到 evaluator 运行阶段。好处：前向引用（`func a() { b() }` 定义在 `func b()` 之前）不产生 parse-time 错误，仅运行时报"b is not callable"。
 
 **例外**：顶层"关键字未命中 → shell 命令"的分派仍然在 parse 阶段做，因为需要区分"这行走脚本 AST 还是走 shell 执行器"，这不是符号表问题，是语法模式决策。
 
@@ -86,7 +86,7 @@ echo $[HOME]     # → /custom（脚本表达式，与 $HOME 一致但用于表�
 ### 函数体内默认 shell 命令模式
 
 ```sh
-fn build(name) {
+func build(name) {
     echo "building $name..."        # shell 命令，$name 查脚本作用域拿到参数
     gcc -O2 $name.c -o $name        # . 和 - 自然终止 $name 的扫描
 }
@@ -150,12 +150,12 @@ echo Hello $HOME $[x + 1]
 输入行 → tokenize
   │
   ├─ peek 第一个 token
-  │     ├─ 关键字(let/if/while/for/fn/return/break/continue)
+  │     ├─ 关键字(let/if/while/for/func/return/break/continue)
   │     │     → 语句解析器（Statement Parser）
   │     │        ├─ let 语句 → parse_let()
   │     │        ├─ if 语句 → parse_if()（含 else/else if 链）
   │     │        ├─ while/for → parse_loop()
-  │     │        ├─ fn → parse_fn()
+  │     │        ├─ func → parse_func()
   │     │        ├─ return/break/continue
   │     │        └─ 内部遇表达式时 → Pratt Parser
   │     │
@@ -230,7 +230,7 @@ Object 也不需要单独设计"方法"概念。方法就是存储在 Object 字
 
 ```sh
 let obj = {count: 0}
-obj.inc = fn() {
+obj.inc = func() {
     obj.count = obj.count + 1    # 闭包捕获了 obj
 }
 obj.inc()
@@ -238,9 +238,9 @@ obj.inc()
 
 `obj.inc` 查 HashMap 拿到 `Value::Func`，`obj.inc()` 就是函数调用。零额外实现。
 
-**已知问题：闭包循环引用。** `obj.method = fn() { obj.x = 1 }` 会形成 `obj → fn → env → obj` 的 Rc 强引用环。由于 shell 是长寿命进程，频繁使用此模式会导致内存持续增长，不是"退出即回收"能解决的。MVP 阶段的对策：
-- **不鼓励**自捕获对象方法。推荐用全局函数传参：`fn inc(o) { o.count = o.count + 1 }` 再 `inc(obj)`
-- 若确实需要 `obj.method = fn() { ... }`，接受 MVP 不回收的代价
+**已知问题：闭包循环引用。** `obj.method = func() { obj.x = 1 }` 会形成 `obj → func → env → obj` 的 Rc 强引用环。由于 shell 是长寿命进程，频繁使用此模式会导致内存持续增长，不是"退出即回收"能解决的。MVP 阶段的对策：
+- **不鼓励**自捕获对象方法。推荐用全局函数传参：`func inc(o) { o.count = o.count + 1 }` 再 `inc(obj)`
+- 若确实需要 `obj.method = func() { ... }`，接受 MVP 不回收的代价
 - 演进阶段引入 Arena + 标记-清除（Mark-Sweep）彻底解决
 
 ### 字段赋值语义
@@ -449,189 +449,260 @@ echo $[to_json(data)] | jq .name
 - **优先让 AST 干净，再让语法糖降级。** 例如 `x.y()` 直接在 parser 中降成 `Call(FieldAccess(x, "y"), ...)`，不要在 evaluator 里额外分支。
 - **shell 命令模式与 script 表达式模式严格分离。** shell 里只认 `$[...]` 作为脚本表达式入口，不做隐式字段读取。
 
-### 阶段 1：ecscript 表达式内核（最小可运行单元）
+### 阶段 1：ecscript 表达式内核（已完成）
 
-**目标**：先得到一个与 shell 完全解耦的 `expr -> Value` 子系统。
+**目标**：先得到一个与 shell 完全解耦的 `expr -> Value` 子系统。  
+**当前状态**：已完成，形成了 lexer → Pratt parser → evaluator 的独立表达式内核。
 
-**建议新增文件**
-- [ ] `src/script/mod.rs`
-- [ ] `src/script/ast.rs`：`Expr`、一元/二元运算、字面量、变量引用
-- [ ] `src/script/error.rs`：`ParseError` / `RuntimeError`
-- [ ] `src/script/value.rs`：`Value` 枚举 + `Display`
-- [ ] `src/script/lexer.rs`：数字、字符串、标识符、运算符 token
-- [ ] `src/script/pratt.rs`：Pratt parser
-- [ ] `src/script/eval.rs`：表达式求值入口
+**已落地模块**
+- [x] `src/ecscript/ast.rs`：`Expr` / `Literal` / 一元和二元运算
+- [x] `src/ecscript/error.rs`：`ParseError` / `RuntimeError` / `EvalResult<T>`
+- [x] `src/ecscript/value.rs`：`Value`
+- [x] `src/ecscript/lexer.rs`：数字、字符串、标识符、运算符与分隔符 token
+- [x] `src/ecscript/pratt.rs`：Pratt parser
+- [x] `src/ecscript/eval.rs`：表达式求值入口
 
-**本阶段只做这些语法**
-- [ ] 字面量：`Bool` / `Int` / `Float` / `String` / `Nil`
-- [ ] 前缀：`-`、`!`
-- [ ] 中缀：`+ - * / % == != < > <= >= && ||`
-- [ ] 分组：`(...)`
-- [ ] 变量引用：`x`
+**本阶段已实现语法**
+- [x] 字面量：`Bool` / `Int` / `Float` / `String` / `Nil`
+- [x] 前缀：`-`、`!`
+- [x] 中缀：`+ - * / % == != < > <= >= && ||`
+- [x] 分组：`(...)`
+- [x] 变量引用：`x`
 
-**推荐暴露的最小 API**
-- [ ] `parse_expr(src: &str) -> Result<Expr, ParseError>`
-- [ ] `eval_expr(expr: &Expr, env: &Environment) -> EvalResult<Value>`
-- [ ] 或一步到位：`eval_expr_src(src: &str, env: &Environment) -> EvalResult<Value>`
+**当前接口**
+- [x] `parse_expr(tokens: &[Token]) -> Result<Expr, ParseError>`
+- [x] `parse_expr_in(state: &mut TokenStream<'_>) -> Result<Expr, ParseError>`
+- [x] `eval_expr(expr: &Expr, env: &Environment) -> EvalResult<Value>`
 
-**本阶段错误模型**
-- [ ] 明确定义 `ParseError` / `RuntimeError` / `EvalResult<T>`
-- [ ] 先用结构化错误类型，不要只返回字符串
-- [ ] 表达式 evaluator 内部绝不 panic；所有用户可见失败都转为 `EvalResult::Err`
+**本阶段已确认语义**
+- [x] 结构化错误类型已建立，不再只返回字符串
+- [x] 表达式 evaluator 通过 `EvalResult<T>` 传播用户可见失败
+- [x] `&&` / `||` 已实现短路
+- [x] byte offset 已进入 parse/runtime 错误
 
-**开发辅助**
-- [ ] 一个独立 REPL（可以是临时 dev harness），输入表达式后打印值
-
-**测试重点**
-- [ ] 运算符优先级与结合性
-- [ ] 括号覆盖优先级
-- [ ] 变量读取
-- [ ] 类型错误、未定义变量错误
+**测试重点（已覆盖）**
+- [x] 运算符优先级与结合性
+- [x] 括号覆盖优先级
+- [x] 变量读取
+- [x] 类型错误、未定义变量错误
 
 **完成标准**
-- [ ] `1 + 2 * 3`、`!(1 < 2)`、`a + b` 等表达式能稳定求值
-- [ ] parse/eval 错误都通过统一错误类型返回，不 panic
+- [x] `1 + 2 * 3`、`!(1 < 2)`、`a + b` 等表达式能稳定求值
+- [x] parse/eval 错误通过统一错误类型返回，不 panic
 
-### 阶段 2：变量、语句与块
+### 阶段 2：变量、语句与块（已完成）
 
-**目标**：让脚本拥有最基本的“执行多条语句”的能力。
+**目标**：让脚本拥有最基本的“执行多条语句”的能力。  
+**当前状态**：已完成，脚本已经支持多语句执行、词法作用域和 block。
 
-**建议新增/扩展文件**
-- [ ] `src/script/env.rs`：环境链 `Environment`
-- [ ] `src/script/stmt.rs`：`Stmt` AST（`Let` / `Assign` / `ExprStmt` / `Block`）
-- [ ] `src/script/parser.rs`：语句 parser（先不做控制流/函数）
-- [ ] 在 `eval.rs` 中新增 `eval_stmt` / `eval_block`
+**已落地模块**
+- [x] `src/ecscript/env.rs`：环境链 `Environment`
+- [x] `src/ecscript/ast.rs`：`Stmt::{Let, Assign, ExprStmt, Block}` 与 `AssignTarget`
+- [x] `src/ecscript/parser.rs`：语句 parser
+- [x] `src/ecscript/eval.rs`：`eval_script` / `eval_stmt` / `eval_block`
 
-**本阶段语法**
-- [ ] `let x = expr`
-- [ ] `x = expr`
-- [ ] 块 `{ ... }`
-- [ ] 表达式语句 `foo + bar`
+**本阶段已实现语法**
+- [x] `let x = expr;`
+- [x] `x = expr;`
+- [x] 块 `{ ... }`
+- [x] 表达式语句 `foo + bar;`
 
 **本阶段明确不做**
-- [ ] 复合赋值（如 `+=` / `-=`）：暂不支持，避免过早引入语法糖分支
+- [x] 复合赋值（如 `+=` / `-=`）仍然暂不支持
 
-**语义要求**
-- [ ] parser 不查符号表，只产出 AST
-- [ ] 赋值时由 evaluator 检查变量是否存在
-- [ ] 进入 `{}` 压新作用域，退出时弹出
-- [ ] 错误通过 `EvalResult<T>` 传播
-- [ ] 语句执行返回 `EvalResult<ExecFlow>`，为后续 `break/continue/return` 留出统一接口
+**语义要求（已对齐）**
+- [x] parser 不查符号表，只产出 AST
+- [x] 赋值时由 evaluator 检查变量是否存在
+- [x] 进入 `{}` 创建新作用域，退出后局部绑定失效
+- [x] 错误通过 `EvalResult<T>` 传播
+- [x] 语句执行统一走 `ExecFlow`，为后续控制流扩展留出接口
 
 **输入模型**
-- [ ] 增加“整块解析”能力：`parse_script(src) -> Vec<Stmt>`
-- [ ] 定义多行输入规则：`{}`、引号未闭合时继续读续行
+- [x] 已有整块解析能力：`parse_script(tokens) -> Vec<Stmt>`
+- [ ] 多行交互续行规则仍属于后续顶层 shell 集成阶段
 
-**测试重点**
-- [ ] 变量遮蔽
-- [ ] 父作用域读取
-- [ ] 块退出后的可见性
-- [ ] 未声明赋值报错
-- [ ] 运行时错误能正确中止后续语句执行
-
-**完成标准**
-- [ ] 可以执行一个由多条 `let/assign/block` 组成的小脚本
-- [ ] `parse_script` 能处理多行 block，不再局限一行一 parse
-
-### 阶段 3：复合数据与访问语法
-
-**目标**：先把 Array/Object 跑通，再做依赖它们的循环和函数例子。
-
-**建议新增/扩展文件**
-- [ ] 在 `ast.rs` 中加入数组/对象字面量、索引、字段访问节点
-- [ ] 在 `stmt.rs` 中加入 `FieldAssign` / `IndexAssign`
-- [ ] 在 `eval.rs` 中加入容器读写逻辑
-- [ ] `src/script/builtins.rs`：`len/push/pop/insert/remove/json/keys/values`
-
-**本阶段语法**
-- [ ] Array 字面量：`[1, 2, 3]`
-- [ ] Object 字面量：`{name: "elaine"}`
-- [ ] 字段访问：`obj.name` / `obj["name"]`
-- [ ] 数组索引：`arr[0]`
-- [ ] 字段赋值：`obj.name = expr`
-- [ ] 索引赋值：`arr[0] = expr`
-
-**实现注意**
-- [ ] `{k: v}` 与 block `{ ... }` 的 parser 分支要明确区分
-- [ ] `x.y()` 先解析成字段访问，再降成普通 `Call`，不单独引入运行时方法机制
-- [ ] 容器操作统一走全局内置函数，不加隐式 `self/this`
-
-**测试重点**
-- [ ] Object/Array 字面量解析
-- [ ] 字段/索引读写
-- [ ] `values(obj)` / `keys(obj)` / `to_json(obj)`
-- [ ] 错误索引、类型不匹配
+**测试重点（已覆盖）**
+- [x] 变量遮蔽
+- [x] 父作用域读取
+- [x] 块退出后的可见性
+- [x] 未声明赋值报错
+- [x] 运行时错误会正确中止后续语句
 
 **完成标准**
-- [ ] `obj.name`、`arr[0]`、`to_json(data)` 都能在脚本 evaluator 中工作
+- [x] 可以执行一个由多条 `let/assign/block` 组成的小脚本
+- [x] `parse_script` 已能处理 block 结构，不再局限单表达式解析
 
-### 阶段 4：控制流
+### 阶段 3：复合数据与访问语法（已完成）
 
-**目标**：让脚本能写出非平凡流程，但仍然不接 shell。
+**目标**：先把 Array/Object 跑通，再做依赖它们的循环和函数例子。  
+**当前状态**：已完成，数组/对象、访问语法、赋值和 builtin 都已接入当前 evaluator。
 
-**建议扩展**
-- [ ] `Stmt` 新增 `If` / `While` / `ForIn` / `ForRange`
-- [ ] 新增控制流枚举：`ExecFlow::{Normal, Break, Continue, Return(Value)}`
+**已落地模块**
+- [x] `src/ecscript/ast.rs`：数组/对象字面量、索引、字段访问、调用、`Range`
+- [x] `src/ecscript/builtin.rs`：`len/push/pop/insert/remove/to_json/keys/values`
+- [x] `src/ecscript/eval.rs`：容器读写与 builtin 分发
+- [x] `src/ecscript/value.rs`：`Array` / `Object` / `Builtin`
 
-**本阶段语法**
-- [ ] `if / else if / else`
-- [ ] `while`
-- [ ] `for i in 1..10`
-- [ ] `for i in 1..=10`
-- [ ] `for v in arr`
-- [ ] `for k in obj`
-- [ ] `for v in values(obj)`
-- [ ] `break` / `continue`
+**本阶段已实现语法**
+- [x] Array 字面量：`[1, 2, 3]`
+- [x] Object 字面量：`{name: "elaine"}`
+- [x] 字段访问：`obj.name`
+- [x] 对象索引：`obj["name"]`
+- [x] 数组索引：`arr[0]`
+- [x] 字段赋值：`obj.name = expr`
+- [x] 索引赋值：`arr[0] = expr` / `obj["name"] = expr`
 
-**语义要求**
-- [ ] `if` / `while` 条件必须是 `Bool`
-- [ ] `for k in obj` 遍历键名
-- [ ] `for v in values(obj)` 遍历对象值
-- [ ] `break/continue` 只允许在循环内部
-- [ ] `break/continue/return` 走控制流枚举，不走错误通道
+**实现注意（已落地设计）**
+- [x] `{k: v}` 与 block `{ ... }` 在 parser 中明确区分
+- [x] `obj.x = ...` / `arr[i] = ...` 通过 `AssignTarget::{Field, Index}` 表达，而不是单独语句种类
+- [x] object literal 的裸标识符 key 在 parser 阶段直接降成字符串
+- [x] 容器操作统一走全局内置函数，不加隐式 `self/this`
+- [x] builtin 通过 `Environment::get()` fallback 注入，允许用户变量自然遮蔽内置名
 
-**测试重点**
-- [ ] 条件判断的 Bool 限制
-- [ ] range 左闭右开 / 左闭右闭
-- [ ] `break/continue` 对循环流程的影响
+**测试重点（已覆盖）**
+- [x] Object/Array 字面量解析
+- [x] 字段/索引读写
+- [x] `values(obj)` / `keys(obj)` / `to_json(obj)`
+- [x] 越界索引、类型不匹配、循环引用检测
 
 **完成标准**
-- [ ] 用纯脚本实现计数循环、分支和遍历示例
+- [x] `obj.name`、`arr[0]`、`to_json(data)` 都能在脚本 evaluator 中工作
 
-### 阶段 5：函数与闭包
+### 阶段 4：控制流（已完成）
 
-**目标**：补上脚本的抽象能力，并为对象函数字段做好铺垫。
+**目标**：让脚本能写出非平凡流程，但仍然不接 shell。  
+**当前状态**：已完成，控制流已经打通并带有较完整的错误处理和测试。
+
+**已落地模块**
+- [x] `Stmt` 已扩展出 `If` / `While` / `ForIn` / `ForRange` / `Break` / `Continue`
+- [x] `ExecFlow` 已承担 `Normal` / `Break` / `Continue` 的传播职责
+- [x] parser / evaluator / manual 已同步到控制流语义
+
+**本阶段已实现语法**
+- [x] `if / else if / else`
+- [x] `while`
+- [x] `for i in 1..10`
+- [x] `for i in 1..=10`
+- [x] `for v in arr`
+- [x] `for k in obj`
+- [x] `for v in values(obj)`（通过普通表达式求值为数组后工作）
+- [x] `break` / `continue`
+
+**语义要求（已对齐）**
+- [x] `if` / `while` 条件必须是 `Bool`
+- [x] `for k in obj` 当前遍历排序后的键名
+- [x] `for v in values(obj)` 通过 stage3 builtin 自然成立，不需要额外语法特判
+- [x] `break/continue` 只允许在循环内部；顶层使用会报运行时错误
+- [x] `break/continue` 通过控制流枚举传播，不混入普通表达式错误
+- [x] `for v in arr` 当前采用**迭代快照**语义，避免循环体再次借用同一 `RefCell` 时发生冲突
+
+**测试重点（已覆盖）**
+- [x] 条件判断的 Bool 限制
+- [x] range 左闭右开 / 左闭右闭
+- [x] `break/continue` 对循环流程的影响
+- [x] 顶层 `break/continue` 的错误路径
+- [x] 数组快照遍历和对象 key 稳定遍历
+
+**完成标准**
+- [x] 可以用纯脚本实现计数循环、分支和遍历示例
+
+### 阶段 5：函数与闭包（进行中）
+
+**目标**：补上脚本的抽象能力，并为对象函数字段、返回函数值和状态闭包做好铺垫。
+**当前状态**：已完成**无闭包的第一步**：命名函数声明、普通函数调用、`return`、以及“函数只继承 global/root，不继承调用者局部变量”的过渡语义已经落地；闭包捕获和函数字面量尚未开始。
 
 **建议新增/扩展**
-- [ ] `Value::Func`
-- [ ] `Stmt::FnDecl`
-- [ ] `Expr::Call`
-- [ ] `Expr::FnLiteral`（用于 `obj.inc = fn() { ... }`）
+- [x] `Value::Function(Rc<Function>)`
+- [x] `Stmt::FuncDeclare`
+- [x] `Stmt::Return`
+- [ ] `Expr::FuncLiteral`（用于 `obj.inc = func() { ... }`）
+- [x] `ExecFlow::Return(...)`
+- [ ] 将环境中的绑定从 `HashMap<String, Value>` 升级为 `HashMap<String, Slot>`
 
 **本阶段语法**
-- [ ] `fn name(args) { ... }`
-- [ ] `return expr`
-- [ ] `fn() { ... }` 作为表达式
-- [ ] 普通函数调用 `f(x, y)`
-- [ ] 语法糖 `obj.inc()` → `Call(FieldAccess(obj, "inc"), [])`
+- [x] `func name(args) { ... }`
+- [x] `return expr;`
+- [x] `return;`
+- [ ] `func(args) { ... }` 作为表达式
+- [x] 普通函数调用 `f(x, y)`
+- [ ] 语法糖 `obj.inc()` 仍然只是 `Call(FieldAccess(obj, "inc"), [])`
 
-**实现要求**
-- [ ] 函数对象捕获定义时环境
-- [ ] 调用时：参数求值 → 新作用域 → 执行函数体 → 处理 `return`
-- [ ] 前向引用由 runtime 负责报错，不在 parser 拒绝
+**当前过渡语义（无闭包版）**
 
-**已知限制**
-- [ ] `obj.method = fn() { obj.x = 1 }` 会造成循环引用；MVP 允许但不鼓励
+- [x] 调用函数时新建 call frame
+- [x] call frame 中放参数、局部变量和函数自己的名字
+- [x] 当前查找顺序先看 call frame，再看 global/root，最后 builtin fallback
+- [x] 当前**不**透传调用者局部变量，先避免动态作用域
+- [ ] 将来再从这个过渡模型升级到 captures + global/root
+
+**推荐运行时模型：强闭包，但不捕获整个环境**
+
+不要让函数对象直接强引用“定义时整块 `Environment`”。  
+更推荐脚本语言常见的 **slot / cell / upvalue** 路线：
+
+- [ ] 定义 `type Slot = Rc<RefCell<Value>>`
+- [ ] `Environment` 内部改存 `HashMap<String, Slot>`
+- [ ] `let` 时新建 slot
+- [ ] `get(name)` 先找到 slot，再读出当前值
+- [ ] `set(name, value)` 找到 slot 后原地写回
+
+**闭包捕获策略**
+
+- [ ] 函数对象不捕获整块环境，而是只捕获**自由变量对应的 slot**
+- [ ] `Function` 内部保存 `captures: HashMap<String, Slot>`
+- [ ] 这样闭包共享的是“变量绑定”，不是定义时的值快照
+- [ ] 因此闭包可以正确支持：
+  - [ ] 读取外层变量的最新值
+  - [ ] 修改外层变量绑定
+  - [ ] 多个闭包共享同一个被捕获局部变量
+
+**调用时环境组织**
+
+调用时仍然新建 call frame，但查找顺序不再是“整条旧环境链透传”，而是：
+
+1. [ ] 当前调用帧：参数、局部变量、递归函数名
+2. [ ] captures：定义时捕获的自由变量 slot
+3. [ ] global/root：全局变量
+4. [ ] builtin fallback
+
+也就是说：
+
+- [ ] 局部变量和参数始终优先于 capture
+- [ ] capture 优先于全局
+- [ ] 全局变量不必全部捕获，可以保留单独的 global/root 层
+
+**递归支持**
+
+- [ ] 递归函数名不要作为普通自由变量捕获
+- [ ] 调用函数时，把函数自己的名字重新绑定到 call frame
+- [ ] 这样函数体里的 `fact(...)` 先在当前调用帧命中自己
+- [ ] 递归查找能力与闭包捕获职责分离
+
+**为什么采用这条路线**
+
+- [ ] 更接近 Python / Lua 这类脚本语言的强闭包语义
+- [ ] 捕获的是 slot，不是值快照；`make_counter()` 这类例子才能成立
+- [ ] 避免最经典的 `Env -> Function -> Env` 强引用环
+- [ ] 不需要用 `Weak` 去牺牲逃逸闭包的可靠性
 
 **测试重点**
-- [ ] 闭包捕获外层变量
-- [ ] return 非局部退出
+- [x] 普通函数调用与参数绑定
+- [x] `return` 的非局部退出
+- [x] `return;` 返回 `nil`
+- [x] 顶层 `return` 报错
+- [x] 当前函数只读取 global/root，不读取调用者局部变量
+- [ ] 闭包读取外层变量
+- [ ] 闭包修改外层变量
+- [ ] `make_counter()` 这种共享状态闭包
+- [ ] 多个闭包共享同一个 captured slot
+- [ ] 递归（例如 `fact`）
 - [ ] 对象字段里的函数值调用
 
 **完成标准**
-- [ ] `fn add(a,b) { return a + b }`
-- [ ] `obj.inc = fn() { ... }`
-- [ ] `obj.inc()` 语法糖都能运行
+- [x] `func add(a, b) { return a + b; }`
+- [ ] `func make_counter() { let x = 0; return func() { x = x + 1; return x; }; }`
+- [ ] `let c = make_counter(); c(); c();` 能看到共享状态递增
+- [ ] `obj.inc = func() { ... }; obj.inc()` 语法糖可运行
 
 ### 阶段 6：ShellWord 与四种嵌入语法
 
@@ -696,7 +767,7 @@ echo $[to_json(data)] | jq .name
 - [ ] continuation prompt：`{}` / 引号未闭合时继续读
 
 **集成测试重点**
-- [ ] 顶层 `let/fn/if` 与普通 shell 命令共存
+- [ ] 顶层 `let/func/if` 与普通 shell 命令共存
 - [ ] 在函数体内执行 shell 命令并读取脚本变量
 - [ ] 文件执行、`source`、`.ecshrc` 共用同一语义
 
@@ -740,7 +811,7 @@ echo $[to_json(data)] | jq .name
 | 输入 | parser 判定 | 示例 |
 |------|-----------|------|
 | `let` | 脚本语句（声明） | `let x = 10` |
-| `fn` | 脚本语句（函数定义） | `fn add(a,b) { ... }` |
+| `func` | 脚本语句（函数定义） | `func add(a,b) { ... }` |
 | `if` | 脚本语句（条件） | `if x > 0 { ... }` |
 | `while` | 脚本语句（循环） | `while i <= n { ... }` |
 | `for` | 脚本语句（循环） | `for i in 1..10 { ... }` |

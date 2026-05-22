@@ -65,6 +65,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
     let mut left: Expr;
 
     let prefix_span = state.current_offset();
+    // 前缀位置
     match state.peek().kind.clone() {
         TokenKind::Int(i) => {
             left = Expr {
@@ -137,7 +138,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
             }
         }
 
-        // `(` 用于改变运算优先级
+        // `(` 用于改变运算优先级（这里是前缀位置，不会是函数调用）
         TokenKind::Delimiter(Delimiter::LParen) => {
             state.consume();
             left = pratt_parser(state, 0)?;
@@ -286,8 +287,9 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     break;
                 }
             }
+            // 以下是后缀位置
             TokenKind::Delimiter(Delimiter::Dot) => {
-                // `.` 字段访问，是左结合，优先级很高
+                // `.` 对象字段访问，是左结合，优先级很高
                 let bp = 150;
                 if bp <= min_bp {
                     break;
@@ -329,7 +331,9 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                 }
             }
             TokenKind::Delimiter(Delimiter::LParen) => {
-                // 函数调用func(a,b,c)
+                // 调用 func(a,b,c)
+                // 这是一个后缀表达式，只会捕获 func_name(arg1,arg2)这种情况
+                // 函数声明不在这里处理
                 let bp = 150;
                 if bp <= min_bp {
                     break;

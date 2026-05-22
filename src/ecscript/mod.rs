@@ -3,6 +3,7 @@ mod builtin;
 mod env;
 mod error;
 mod eval;
+mod func;
 mod lexer;
 mod parser;
 mod pratt;
