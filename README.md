@@ -29,7 +29,7 @@ shell，主要用于操作系统实验练习。
 - 普通内置命令支持临时重定向，执行结束后恢复 shell 的标准输入输出
 - 管道中支持 `help`、`pwd`、`env`、`status` 这类纯输出型内置命令
 - 统一错误输出，并保留实验要求的命令生命周期提示
-- ecscript 脚本内核（阶段 2 进行中）：在表达式 lexer / Pratt parser / 求值器之上，已支持 `let`、赋值、代码块与词法作用域，带字节偏移错误定位
+- ecscript 脚本内核（阶段 3）：表达式/语句 parser、let/assign/block、数组/对象字面量、字段/索引访问与赋值、内置函数调用（len/push/pop/keys/values/to_json 等）、词法作用域、短路逻辑、字节偏移错误定位
 
 ## 快速开始
 

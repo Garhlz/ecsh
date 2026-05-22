@@ -1,5 +1,5 @@
 use crate::ecscript::{
-    ast::Stmt,
+    ast::{Stmt, expr_to_assign_target},
     error::ParseError,
     lexer::{Delimiter, Token, TokenKind},
     pratt::{TokenStream, parse_expr_in},
@@ -15,6 +15,7 @@ pub fn parse_script(tokens: &[Token]) -> Result<Vec<Stmt>, ParseError> {
     Ok(result_stmts)
 }
 
+/// 把token流转换成单一语句
 fn parse_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     match state.peek().kind.clone() {
         TokenKind::Let => parse_let(state),
@@ -22,52 +23,48 @@ fn parse_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
             state.current_offset(),
             "unexpected '}' at top level".to_string(),
         )),
-        TokenKind::Identifier(_) if state.check_next(&TokenKind::Delimiter(Delimiter::Eq)) => {
-            parse_assignment(state)
-        }
+
         TokenKind::Delimiter(Delimiter::LBrace) => parse_block(state),
-        // 否则尝试解析为表达式语句
-        _ => parse_expr_stmt(state),
+
+        _ => parse_assignment_or_expr_stmt(state),
     }
 }
 
-fn parse_assignment(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+fn parse_assignment_or_expr_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     let span = state.current_offset();
-    if let TokenKind::Identifier(name) = state.peek().kind.clone() {
+    let left_expr = parse_expr_in(state)?;
+    if state.check(&TokenKind::Delimiter(Delimiter::Eq)) {
+        let target = expr_to_assign_target(&left_expr).ok_or_else(|| {
+            ParseError::new(
+                left_expr.span,
+                "invalid assignment target; expected variable, field access, or index access"
+                    .to_string(),
+            )
+        })?;
         state.consume();
-        if !state.check(&TokenKind::Delimiter(Delimiter::Eq)) {
-            return Err(ParseError::new(
-                state.current_offset(),
-                format!(
-                    "expected '=' after '{}', found {}",
-                    name,
-                    state.peek().kind.describe()
-                ),
-            ));
-        }
-        state.consume();
-
         let right_value = parse_expr_in(state)?;
+
         expect_semicolon(state)?;
+
         Ok(Stmt::Assign {
-            name,
+            target,
             expr: right_value,
             span,
         })
     } else {
-        Err(ParseError::new(
-            state.current_offset(),
-            format!(
-                "expected variable name at start of assignment, found {}",
-                state.peek().kind.describe()
-            ),
-        ))
+        expect_semicolon(state)?;
+        Ok(Stmt::ExprStmt {
+            expr: left_expr,
+            span: span,
+        })
     }
 }
 
 fn parse_let(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+    // 这里把let和assign分开处理了
     let span = state.current_offset();
     state.consume(); // consume Let
+    // let 赋值的左值只能是纯标识符，不可以是数组成员或者对象字段
     let TokenKind::Identifier(name) = state.peek().kind.clone() else {
         return Err(ParseError::new(
             state.current_offset(),
@@ -90,6 +87,7 @@ fn parse_let(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     }
     state.consume();
 
+    // 右值是任意表达式
     let right_value = parse_expr_in(state)?;
     expect_semicolon(state)?;
     Ok(Stmt::Let {
@@ -123,16 +121,6 @@ fn parse_block(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     })
 }
 
-fn parse_expr_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
-    let span = state.current_offset();
-    let cur_expr = parse_expr_in(state)?;
-    expect_semicolon(state)?;
-    Ok(Stmt::ExprStmt {
-        expr: cur_expr,
-        span,
-    })
-}
-
 fn expect_semicolon(state: &mut TokenStream<'_>) -> Result<(), ParseError> {
     if !state.check(&TokenKind::Delimiter(Delimiter::Semicolon)) {
         return Err(ParseError::new(
@@ -151,7 +139,7 @@ fn expect_semicolon(state: &mut TokenStream<'_>) -> Result<(), ParseError> {
 mod tests {
     use super::parse_script;
     use crate::ecscript::{
-        ast::{Expr, ExprKind, InfixOper, Literal, Stmt},
+        ast::{AssignTarget, Expr, ExprKind, InfixOper, Literal, Stmt},
         lexer::tokenize,
     };
 
@@ -227,7 +215,7 @@ mod tests {
         assert_eq!(
             parse_src("x = 10;"),
             vec![Stmt::Assign {
-                name: "x".into(),
+                target: AssignTarget::Name("x".into()),
                 expr: lit_int(10),
                 span: 0
             }]
@@ -239,11 +227,47 @@ mod tests {
         assert_eq!(
             parse_src("y = 1 + 2;"),
             vec![Stmt::Assign {
-                name: "y".into(),
+                target: AssignTarget::Name("y".into()),
                 expr: expr_add(lit_int(1), lit_int(2)),
                 span: 0,
             }]
         );
+    }
+
+    #[test]
+    fn parses_field_assign_statement() {
+        let stmts = parse_src("obj.name = 10;");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Stmt::Assign {
+                target: AssignTarget::Field { object, field },
+                expr,
+                ..
+            } => {
+                assert_eq!(*object, var("obj"));
+                assert_eq!(field, "name");
+                assert_eq!(*expr, lit_int(10));
+            }
+            other => panic!("expected field assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_index_assign_statement() {
+        let stmts = parse_src("arr[i] = 10;");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Stmt::Assign {
+                target: AssignTarget::Index { object, index },
+                expr,
+                ..
+            } => {
+                assert_eq!(*object, var("arr"));
+                assert_eq!(*index, var("i"));
+                assert_eq!(*expr, lit_int(10));
+            }
+            other => panic!("expected index assign, got {:?}", other),
+        }
     }
 
     // ── 表达式语句 ───────────────────────────────────────
@@ -392,6 +416,15 @@ mod tests {
     #[test]
     fn reports_assign_missing_rhs() {
         assert_parse_error("x = ;", 5, "expected expression, found ';'");
+    }
+
+    #[test]
+    fn reports_invalid_assignment_target() {
+        assert_parse_error(
+            "1 + 2 = 3;",
+            3,
+            "invalid assignment target; expected variable, field access, or index access",
+        );
     }
 
     #[test]

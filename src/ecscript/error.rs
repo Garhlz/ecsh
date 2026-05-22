@@ -41,6 +41,13 @@ pub enum RuntimeErrorKind {
     DivisionByZero,
     // 类型在当前作用域已经定义
     DuplicateVariable,
+    // 数组越界
+    IndexOutOfBounds,
+    // 字段不存在
+    NonExistentField,
+    NotCallable,
+    ArityMismatch,
+    CircularReference,
 }
 
 /// 运行时错误。

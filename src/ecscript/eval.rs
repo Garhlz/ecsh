@@ -1,5 +1,8 @@
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
 use crate::ecscript::{
     ast::{Expr, ExprKind, InfixOper, Literal, PrefixOper, Stmt},
+    builtin::run_builtin,
     env::Environment,
     error::{EvalResult, RuntimeError, RuntimeErrorKind},
     value::Value,
@@ -26,9 +29,9 @@ pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> EvalResult<()> {
             let value = eval_expr(expr, env)?;
             env.insert(name.clone(), value, *span)?;
         }
-        Stmt::Assign { name, expr, span } => {
+        Stmt::Assign { target, expr, span } => {
             let value = eval_expr(expr, env)?;
-            env.set(name, value, *span)?
+            env.set(target, value, *span)?
         }
         Stmt::ExprStmt { expr, .. } => {
             eval_expr(expr, env)?;
@@ -105,6 +108,120 @@ pub fn eval_expr(expr: &Expr, env: &Environment) -> EvalResult<Value> {
                         InfixOper::And | InfixOper::Or => unreachable!(),
                     }
                 }
+            }
+        }
+        ExprKind::Array(vec_expr) => {
+            let mut values = Vec::new();
+            for expr in vec_expr {
+                let val = eval_expr(expr, env)?;
+                values.push(val);
+            }
+            let arr_val = Value::Array(Rc::new(RefCell::new(values)));
+            Ok(arr_val)
+        }
+        ExprKind::Object(hashmap_expr) => {
+            let mut hash_map = HashMap::new();
+            for (name, value) in hashmap_expr {
+                let right_val = eval_expr(value, env)?;
+                hash_map.insert(name.clone(), right_val);
+            }
+            Ok(Value::Object(Rc::new(RefCell::new(hash_map))))
+        }
+        ExprKind::Index(base, index_expr) => {
+            let base_val = eval_expr(base, env)?;
+            let index_val = eval_expr(index_expr, env)?;
+
+            match (base_val, index_val) {
+                (Value::Array(arr), Value::Int(i)) => {
+                    let idx = crate::ecscript::value::validate_array_index(
+                        i,
+                        arr.borrow().len(),
+                        false,
+                        span,
+                    )?;
+                    arr.borrow().get(idx).cloned().ok_or_else(|| {
+                        RuntimeError::new(
+                            span,
+                            RuntimeErrorKind::IndexOutOfBounds,
+                            format!(
+                                "array index {} out of bounds for length {}",
+                                i,
+                                arr.borrow().len()
+                            ),
+                        )
+                    })
+                }
+                (Value::Object(obj), Value::String(k)) => {
+                    if obj.borrow().contains_key(&k) {
+                        obj.borrow().get(&k).cloned().ok_or_else(|| {
+                            RuntimeError::new(
+                                span,
+                                RuntimeErrorKind::NonExistentField,
+                                format!("object has no field '{}'", k),
+                            )
+                        })
+                    } else {
+                        Err(RuntimeError::new(
+                            span,
+                            RuntimeErrorKind::NonExistentField,
+                            format!("object has no field '{}'", k),
+                        ))
+                    }
+                }
+                (Value::Array(_), other) => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("array index must be Int, got {}", other.type_name()),
+                )),
+                (Value::Object(_), other) => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("object index must be String, got {}", other.type_name()),
+                )),
+                (other, index) => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "cannot index {} with {}",
+                        other.type_name(),
+                        index.type_name()
+                    ),
+                )),
+            }
+        }
+        ExprKind::Field(obj, name) => {
+            let obj_val = eval_expr(obj, env)?;
+            let Value::Object(obj) = obj_val else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("cannot access field '{}' on {}", name, obj_val.type_name()),
+                ));
+            };
+
+            obj.borrow().get(name).cloned().ok_or_else(|| {
+                RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::NonExistentField,
+                    format!("object has no field '{}'", name),
+                )
+            })
+        }
+        ExprKind::Call(name_expr, args_expr) => {
+            let callee = eval_expr(name_expr, env)?;
+            let mut args = Vec::new();
+            for arg_expr in args_expr {
+                let arg = eval_expr(arg_expr, env)?;
+                args.push(arg);
+            }
+
+            match callee {
+                Value::Builtin(builtin) => run_builtin(builtin, args, span),
+                other => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::NotCallable,
+                    format!("{} is not callable", other.type_name()),
+                )),
             }
         }
     }
@@ -440,12 +557,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn eval_array_literal_allows_mixed_types() {
+        let env = Environment::new();
+        let value = eval_src("[1, \"x\", true]", &env).unwrap();
+        let Value::Array(arr) = value else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            *arr.borrow(),
+            vec![Value::Int(1), Value::String("x".into()), Value::Bool(true)]
+        );
+    }
+
+    #[test]
+    fn eval_object_literal_uses_string_keys() {
+        let env = Environment::new();
+        let value = eval_src("{name: 1, \"age\": 2}", &env).unwrap();
+        let Value::Object(obj) = value else {
+            panic!("expected object");
+        };
+        let obj = obj.borrow();
+        assert_eq!(obj.get("name"), Some(&Value::Int(1)));
+        assert_eq!(obj.get("age"), Some(&Value::Int(2)));
+    }
+
     // ── 变量读取 ──────────────────────────────────────────
 
     #[test]
     fn eval_variable_success() {
         let env = env_with("x", Value::Int(10));
         assert_eq!(eval_src("x", &env), Ok(Value::Int(10)));
+    }
+
+    #[test]
+    fn eval_builtin_len_from_environment_fallback() {
+        let env = Environment::new();
+        assert_eq!(eval_src("len([1, 2, 3])", &env), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_builtin_to_json_sorted_output() {
+        let env = Environment::new();
+        assert_eq!(
+            eval_src("to_json({b: 2, a: 1})", &env),
+            Ok(Value::String("{\"a\":1,\"b\":2}".into()))
+        );
     }
 
     #[test]
@@ -779,6 +936,81 @@ mod tests {
         assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
         assert_eq!(err.offset, 3);
     }
+
+    #[test]
+    fn eval_array_index_requires_int() {
+        let env = Environment::new();
+        let err = eval_src("[1][\"x\"]", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.message, "array index must be Int, got String");
+    }
+
+    #[test]
+    fn eval_non_indexable_base_reports_types() {
+        let env = Environment::new();
+        let err = eval_src("1[0]", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.message, "cannot index Int with Int");
+    }
+
+    #[test]
+    fn eval_missing_field_reports_field_name() {
+        let env = Environment::new();
+        let err = eval_src("{a: 1}.b", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::NonExistentField);
+        assert_eq!(err.message, "object has no field 'b'");
+    }
+
+    #[test]
+    fn eval_field_on_non_object() {
+        let env = Environment::new();
+        let err = eval_src("1.name", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.message, "cannot access field 'name' on Int");
+    }
+
+    #[test]
+    fn eval_array_index_out_of_bounds() {
+        let env = Environment::new();
+        let err = eval_src("[1, 2][5]", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::IndexOutOfBounds);
+    }
+
+    #[test]
+    fn eval_array_index_negative() {
+        let env = Environment::new();
+        let err = eval_src("[1][-1]", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::IndexOutOfBounds);
+    }
+
+    #[test]
+    fn eval_object_index_string_reads_field() {
+        let env = Environment::new();
+        assert_eq!(eval_src("{a: 1}[\"a\"]", &env), Ok(Value::Int(1)));
+    }
+
+    #[test]
+    fn eval_call_builtin_len() {
+        let env = Environment::new();
+        assert_eq!(eval_src("len([])", &env), Ok(Value::Int(0)));
+        assert_eq!(eval_src("len([1, 2, 3])", &env), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_call_builtin_push() {
+        let env = env_with(
+            "a",
+            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(vec![Value::Int(
+                1,
+            )]))),
+        );
+        let _ = eval_src("push(a, 2)", &env).unwrap();
+        if let Ok(Value::Array(arr)) = env.get("a", 0) {
+            assert_eq!(*arr.borrow(), vec![Value::Int(1), Value::Int(2)]);
+        } else {
+            panic!("expected array");
+        }
+    }
 }
 
 // ── 语句测试 ─────────────────────────────────────────────────────────
@@ -787,7 +1019,7 @@ mod tests {
 mod stmt_tests {
     use super::{ExecFlow, eval_expr, eval_script};
     use crate::ecscript::{
-        ast::{Expr, ExprKind, Literal, Stmt},
+        ast::{AssignTarget, Expr, ExprKind, Literal, Stmt},
         env::Environment,
         error::{RuntimeError, RuntimeErrorKind},
         lexer::tokenize,
@@ -862,7 +1094,7 @@ mod stmt_tests {
     fn eval_assign_requires_existing_variable() {
         let env = Environment::new();
         let stmts = vec![Stmt::Assign {
-            name: "x".into(),
+            target: AssignTarget::Name("x".into()),
             expr: lit_int(5),
             span: 0,
         }];
@@ -942,5 +1174,118 @@ mod stmt_tests {
         assert_eq!(err.kind, RuntimeErrorKind::UndefinedVariable);
         // let x = 1 executed, but "x = 2" did not (stopped at unknown variable y)
         assert_eq!(env.get("x", 0), Ok(Value::Int(1)));
+    }
+
+    #[test]
+    fn eval_builtin_shadowing_reports_not_callable() {
+        let env = Environment::new();
+        let err = eval_script_src("let len = 1; len([1]);", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::NotCallable);
+        assert_eq!(err.message, "Int is not callable");
+    }
+
+    // ── 字段 / 索引赋值 ───────────────────────────────────
+
+    #[test]
+    fn eval_field_assign_writes_to_object() {
+        let env = Environment::new();
+        eval_script_src("let o = {name: \"e\"}; o.name = \"x\";", &env).unwrap();
+        let Value::Object(obj) = env.get("o", 0).unwrap() else {
+            panic!("expected object");
+        };
+        assert_eq!(
+            obj.borrow().get("name").cloned(),
+            Some(Value::String("x".into()))
+        );
+    }
+
+    #[test]
+    fn eval_index_assign_writes_to_array() {
+        let env = Environment::new();
+        eval_script_src("let a = [1, 2, 3]; a[0] = 99;", &env).unwrap();
+        let Value::Array(arr) = env.get("a", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            *arr.borrow(),
+            vec![Value::Int(99), Value::Int(2), Value::Int(3)]
+        );
+    }
+
+    #[test]
+    fn eval_index_assign_writes_to_object() {
+        let env = Environment::new();
+        eval_script_src("let o = {}; o[\"key\"] = 42;", &env).unwrap();
+        let Value::Object(obj) = env.get("o", 0).unwrap() else {
+            panic!("expected object");
+        };
+        assert_eq!(obj.borrow().get("key").cloned(), Some(Value::Int(42)));
+    }
+
+    #[test]
+    fn eval_index_assign_out_of_bounds() {
+        let env = Environment::new();
+        let err = eval_script_src("let a = [1]; a[5] = 2;", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::IndexOutOfBounds);
+    }
+
+    // ── 内置函数 via script ───────────────────────────────
+
+    #[test]
+    fn eval_builtin_push_via_script() {
+        let env = Environment::new();
+        eval_script_src("let a = [1]; push(a, 2);", &env).unwrap();
+        let Value::Array(arr) = env.get("a", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(*arr.borrow(), vec![Value::Int(1), Value::Int(2)]);
+    }
+
+    #[test]
+    fn eval_builtin_pop_via_script() {
+        let env = Environment::new();
+        eval_script_src("let a = [1, 2]; let x = pop(a);", &env).unwrap();
+        let Value::Array(arr) = env.get("a", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(*arr.borrow(), vec![Value::Int(1)]);
+        assert_eq!(env.get("x", 0), Ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn eval_builtin_insert_via_script() {
+        let env = Environment::new();
+        eval_script_src("let a = [1, 3]; insert(a, 1, 2);", &env).unwrap();
+        let Value::Array(arr) = env.get("a", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            *arr.borrow(),
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+        );
+    }
+
+    #[test]
+    fn eval_builtin_remove_via_script() {
+        let env = Environment::new();
+        eval_script_src("let a = [1, 99, 2]; let x = remove(a, 1);", &env).unwrap();
+        let Value::Array(arr) = env.get("a", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(*arr.borrow(), vec![Value::Int(1), Value::Int(2)]);
+        assert_eq!(env.get("x", 0), Ok(Value::Int(99)));
+    }
+
+    #[test]
+    fn eval_builtin_keys_via_script() {
+        let env = Environment::new();
+        eval_script_src("let o = {b: 2, a: 1}; let k = keys(o);", &env).unwrap();
+        let Value::Array(keys) = env.get("k", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            *keys.borrow(),
+            vec![Value::String("a".into()), Value::String("b".into())]
+        );
     }
 }

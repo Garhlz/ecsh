@@ -1,0 +1,386 @@
+use crate::ecscript::{
+    error::{RuntimeError, RuntimeErrorKind},
+    value::{Builtin, Value},
+};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
+
+pub fn lookup_builtin(name: &str) -> Option<Builtin> {
+    match name {
+        "len" => Some(Builtin::Len),
+        "to_json" => Some(Builtin::ToJson),
+        "keys" => Some(Builtin::Keys),
+        "values" => Some(Builtin::Values),
+        "push" => Some(Builtin::Push),
+        "pop" => Some(Builtin::Pop),
+        "insert" => Some(Builtin::Insert),
+        "remove" => Some(Builtin::Remove),
+        _ => None,
+    }
+}
+
+pub fn run_builtin(builtin: Builtin, args: Vec<Value>, span: usize) -> Result<Value, RuntimeError> {
+    match builtin {
+        Builtin::Len => {
+            expect_arity(&args, 1, span, "len")?;
+
+            match &args[0] {
+                Value::Array(arr) => Ok(Value::Int(arr.borrow().len() as i64)),
+                Value::Object(obj) => Ok(Value::Int(obj.borrow().len() as i64)),
+                // unicode 标量个数
+                Value::String(s) => Ok(Value::Int(s.chars().count() as i64)),
+
+                other => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "len expects Array, Object or String, got {}",
+                        other.type_name()
+                    ),
+                )),
+            }
+        }
+        Builtin::Push => {
+            if args.len() < 2 {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::ArityMismatch,
+                    format!("push expects at least 2 arguments, got {}", args.len()),
+                ));
+            }
+
+            let Value::Array(arr) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("push expects Array, got {}", args[0].type_name()),
+                ));
+            };
+
+            let mut arr_b = arr.borrow_mut();
+            for arg in &args[1..] {
+                arr_b.push(arg.clone());
+            }
+            drop(arr_b);
+
+            Ok(Value::Nil)
+        }
+        Builtin::Pop => {
+            expect_arity(&args, 1, span, "pop")?;
+            let Value::Array(arr) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("pop expects Array, got {}", args[0].type_name()),
+                ));
+            };
+
+            let mut arr_b = arr.borrow_mut();
+            Ok(arr_b.pop().unwrap_or(Value::Nil))
+        }
+        Builtin::Insert => {
+            expect_arity(&args, 3, span, "insert")?;
+
+            let Value::Array(arr) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("insert expects Array, got {}", args[0].type_name()),
+                ));
+            };
+
+            let Value::Int(index) = &args[1] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("insert expects int index, got {}", args[1].type_name()),
+                ));
+            };
+
+            let insert_at = checked_array_index(*index, arr.borrow().len(), true, span, "insert")?;
+            arr.borrow_mut().insert(insert_at, args[2].clone());
+
+            Ok(Value::Nil)
+        }
+        Builtin::Remove => {
+            expect_arity(&args, 2, span, "remove")?;
+
+            let Value::Array(arr) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("remove expects Array, got {}", args[0].type_name()),
+                ));
+            };
+
+            let Value::Int(index) = &args[1] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("remove expects int index, got {}", args[1].type_name()),
+                ));
+            };
+
+            let mut arr_b = arr.borrow_mut();
+            let remove_at = checked_array_index(*index, arr_b.len(), false, span, "remove")?;
+            let val = arr_b.remove(remove_at);
+
+            drop(arr_b);
+
+            Ok(val)
+        }
+        Builtin::Keys => {
+            expect_arity(&args, 1, span, "keys")?;
+
+            let Value::Object(obj) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("keys expects Object, got {}", args[0].type_name()),
+                ));
+            };
+
+            let obj_b = obj.borrow();
+            let mut keys = obj_b.keys().cloned().collect::<Vec<String>>();
+            keys.sort();
+            let keys = keys.into_iter().map(Value::String).collect::<Vec<Value>>();
+            Ok(Value::Array(Rc::new(RefCell::new(keys))))
+        }
+        Builtin::Values => {
+            expect_arity(&args, 1, span, "values")?;
+
+            let Value::Object(obj) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("values expects Object, got {}", args[0].type_name()),
+                ));
+            };
+
+            let obj_b = obj.borrow();
+            let mut entries = obj_b.iter().collect::<Vec<_>>();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            let values = entries
+                .into_iter()
+                .map(|(_, value)| value.clone())
+                .collect::<Vec<Value>>();
+            Ok(Value::Array(Rc::new(RefCell::new(values))))
+        }
+        Builtin::ToJson => {
+            expect_arity(&args, 1, span, "to_json")?;
+            let json = to_json_value(&args[0], span)?;
+            Ok(Value::String(json.to_string()))
+        }
+    }
+}
+
+fn expect_arity(
+    args: &[Value],
+    count: usize,
+    span: usize,
+    builtin_name: &str,
+) -> Result<(), RuntimeError> {
+    if args.len() != count {
+        let noun = if count == 1 { "argument" } else { "arguments" };
+        Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::ArityMismatch,
+            format!(
+                "{} expects {} {}, got {}",
+                builtin_name,
+                count,
+                noun,
+                args.len()
+            ),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn to_json_value(value: &Value, span: usize) -> Result<serde_json::Value, RuntimeError> {
+    let mut visiting = HashSet::new();
+    to_json_value_inner(value, span, &mut visiting)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum JsonVisitKey {
+    Array(*const RefCell<Vec<Value>>),
+    Object(*const RefCell<HashMap<String, Value>>),
+}
+
+fn to_json_value_inner(
+    value: &Value,
+    span: usize,
+    visiting: &mut HashSet<JsonVisitKey>,
+) -> Result<serde_json::Value, RuntimeError> {
+    match value {
+        Value::Nil => Ok(serde_json::Value::Null),
+        Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
+        Value::Int(i) => Ok(serde_json::Value::Number((*i).into())),
+        Value::Float(f) => {
+            let n = serde_json::Number::from_f64(*f).ok_or_else(|| {
+                RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    "cannot json-encode NaN or infinity",
+                )
+            })?;
+            Ok(serde_json::Value::Number(n))
+        }
+        Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+        Value::Array(arr) => {
+            let visit_key = JsonVisitKey::Array(Rc::as_ptr(arr));
+            if !visiting.insert(visit_key) {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::CircularReference,
+                    "to_json cannot serialize cyclic Array/Object values",
+                ));
+            }
+
+            let result = {
+                let values = arr.borrow();
+                let mut out = Vec::with_capacity(values.len());
+                for item in values.iter() {
+                    out.push(to_json_value_inner(item, span, visiting)?);
+                }
+                Ok(serde_json::Value::Array(out))
+            };
+
+            visiting.remove(&visit_key);
+            result
+        }
+        Value::Object(obj) => {
+            let visit_key = JsonVisitKey::Object(Rc::as_ptr(obj));
+            if !visiting.insert(visit_key) {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::CircularReference,
+                    "to_json cannot serialize cyclic Array/Object values",
+                ));
+            }
+
+            let result = {
+                let values = obj.borrow();
+                let mut entries: Vec<_> = values.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0)); // 保证输出稳定
+                let mut map = serde_json::Map::new();
+                for (k, v) in entries {
+                    map.insert(k.clone(), to_json_value_inner(v, span, visiting)?);
+                }
+                Ok(serde_json::Value::Object(map))
+            };
+
+            visiting.remove(&visit_key);
+            result
+        }
+        _ => Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::TypeMismatch,
+            format!("to_json does not support {}", value.type_name()),
+        )),
+    }
+}
+
+fn checked_array_index(
+    index: i64,
+    len: usize,
+    allow_end: bool,
+    span: usize,
+    _builtin_name: &str,
+) -> Result<usize, RuntimeError> {
+    crate::ecscript::value::validate_array_index(index, len, allow_end, span)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_builtin;
+    use crate::ecscript::{
+        error::RuntimeErrorKind,
+        value::{Builtin, Value},
+    };
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+    #[test]
+    fn keys_are_sorted() {
+        let obj = Rc::new(RefCell::new(HashMap::from([
+            ("b".to_string(), Value::Int(2)),
+            ("a".to_string(), Value::Int(1)),
+        ])));
+
+        let result = run_builtin(Builtin::Keys, vec![Value::Object(obj)], 0).unwrap();
+        let Value::Array(keys) = result else {
+            panic!("expected array");
+        };
+
+        assert_eq!(
+            *keys.borrow(),
+            vec![Value::String("a".into()), Value::String("b".into())]
+        );
+    }
+
+    #[test]
+    fn values_follow_sorted_keys() {
+        let obj = Rc::new(RefCell::new(HashMap::from([
+            ("b".to_string(), Value::Int(2)),
+            ("a".to_string(), Value::Int(1)),
+        ])));
+
+        let result = run_builtin(Builtin::Values, vec![Value::Object(obj)], 0).unwrap();
+        let Value::Array(values) = result else {
+            panic!("expected array");
+        };
+
+        assert_eq!(*values.borrow(), vec![Value::Int(1), Value::Int(2)]);
+    }
+
+    #[test]
+    fn insert_checks_negative_index() {
+        let arr = Rc::new(RefCell::new(vec![Value::Int(1)]));
+        let err = run_builtin(
+            Builtin::Insert,
+            vec![Value::Array(arr), Value::Int(-1), Value::Int(2)],
+            0,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, RuntimeErrorKind::IndexOutOfBounds);
+    }
+
+    #[test]
+    fn remove_checks_out_of_bounds_index() {
+        let arr = Rc::new(RefCell::new(vec![Value::Int(1)]));
+        let err =
+            run_builtin(Builtin::Remove, vec![Value::Array(arr), Value::Int(1)], 0).unwrap_err();
+
+        assert_eq!(err.kind, RuntimeErrorKind::IndexOutOfBounds);
+    }
+
+    #[test]
+    fn to_json_detects_array_cycle() {
+        let arr = Rc::new(RefCell::new(Vec::new()));
+        arr.borrow_mut().push(Value::Array(arr.clone()));
+
+        let err = run_builtin(Builtin::ToJson, vec![Value::Array(arr)], 0).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::CircularReference);
+        assert_eq!(
+            err.message,
+            "to_json cannot serialize cyclic Array/Object values"
+        );
+    }
+
+    #[test]
+    fn to_json_sorts_object_keys() {
+        let obj = Rc::new(RefCell::new(HashMap::from([
+            ("b".to_string(), Value::Int(2)),
+            ("a".to_string(), Value::Int(1)),
+        ])));
+
+        let result = run_builtin(Builtin::ToJson, vec![Value::Object(obj)], 0).unwrap();
+        assert_eq!(result, Value::String("{\"a\":1,\"b\":2}".into()));
+    }
+}

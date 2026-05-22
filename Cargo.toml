@@ -8,3 +8,5 @@ description = "Elaine & Cornelia's shell: a learning-oriented Unix-like shell wr
 [dependencies]
 nix = { version = "0.31.3", features = ["process", "fs", "term", "hostname", "signal"] }
 rustyline = "18.0.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
