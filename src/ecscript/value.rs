@@ -1,3 +1,4 @@
+use crate::ecscript::ast::Stmt;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -10,7 +11,7 @@ pub enum Value {
     String(String),
     Array(Rc<RefCell<Vec<Value>>>),
     Object(Rc<RefCell<HashMap<String, Value>>>),
-    // Func(Rc<Func>),
+    Function(Rc<Function>),
     Builtin(Builtin),
 }
 
@@ -25,6 +26,7 @@ impl Value {
             Value::Array(_) => "Array",
             Value::Object(_) => "Object",
             Value::Builtin(_) => "Builtin",
+            Value::Function(_) => "Function",
         }
     }
 }
@@ -73,4 +75,12 @@ pub enum Builtin {
     Pop,
     Insert,
     Remove,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Function {
+    pub name: Option<String>, // 后续支持匿名函数
+    pub params: Vec<String>,
+    pub stmts: Vec<Stmt>,
+    // pub captures
 }

@@ -26,7 +26,13 @@ impl<'a> Environment<'a> {
             parent: Some(parent),
         }
     }
-
+    pub fn find_root(&'a self) -> &'a Environment<'a> {
+        if self.parent.is_some() {
+            self.parent.unwrap().find_root()
+        } else {
+            self
+        }
+    }
     // 当前层环境没有，插入；有则报错
     // let 语句。会遮蔽父环境的变量名
     pub fn insert(&self, name: String, value: Value, span: usize) -> EvalResult<()> {
@@ -49,6 +55,7 @@ impl<'a> Environment<'a> {
             if let Some(parent) = self.parent {
                 parent.get(name, span)
             // builtin 只作为“查不到变量时”的兜底，这样 `let len = 1;` 可以自然遮蔽内置名。
+            // 当前builtin类型只可能是从环境中查找失败得到的
             } else if let Some(builtin) = lookup_builtin(name) {
                 Ok(Value::Builtin(builtin))
             } else {

@@ -24,13 +24,13 @@ fn parse_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
         TokenKind::For => parse_for(state),
         TokenKind::Break => parse_break(state),
         TokenKind::Continue => parse_continue(state),
+        TokenKind::Return => parse_return(state),
         TokenKind::Delimiter(Delimiter::RBrace) => Err(ParseError::new(
             state.current_offset(),
             "unexpected '}' at top level".to_string(),
         )),
-
         TokenKind::Delimiter(Delimiter::LBrace) => parse_block(state),
-
+        TokenKind::Func => parse_func(state),
         _ => parse_assignment_or_expr_stmt(state),
     }
 }
@@ -231,6 +231,70 @@ fn parse_for(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     }
 }
 
+/// 这里parse出来的是函数声明的语句
+fn parse_func(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+    let span = state.current_offset();
+    state.consume(); // "func" token
+    let TokenKind::Identifier(name) = state.peek().kind.clone() else {
+        return Err(ParseError::new(
+            state.current_offset(),
+            format!(
+                "expected function variable name after func, found {}",
+                state.peek().kind.describe()
+            ),
+        ));
+    };
+    state.consume(); // 函数名
+    if !state.check(&TokenKind::Delimiter(Delimiter::LParen)) {
+        return Err(ParseError::new(
+            state.current_offset(),
+            format!(
+                "expected '(' after function name, found {}",
+                state.peek().kind.describe()
+            ),
+        ));
+    }
+    state.consume(); // 左括号
+    let mut params = Vec::new();
+
+    loop {
+        // 括号中可以为空
+        if matches!(state.peek().kind, TokenKind::Delimiter(Delimiter::RParen)) {
+            state.consume();
+            break;
+        }
+        // 注意这里parse出来的是函数定义语句 func test(a,b){}
+        let TokenKind::Identifier(name) = state.peek().kind.clone() else {
+            return Err(ParseError::new(
+                state.current_offset(),
+                "expected param name string in function declare params",
+            ));
+        };
+        state.consume(); // 参数的名称，这里只是标识符token
+        params.push(name);
+        if matches!(state.peek().kind, TokenKind::Delimiter(Delimiter::RParen)) {
+            state.consume();
+            break;
+        } else if matches!(state.peek().kind, TokenKind::Delimiter(Delimiter::Comma)) {
+            state.consume();
+        } else {
+            return Err(ParseError::new(
+                state.current_offset(),
+                "expected comma of right paren in function params",
+            ));
+        }
+    }
+
+    let body = expect_block(state, "func")?;
+
+    Ok(Stmt::FuncDeclare {
+        name,
+        params,
+        body,
+        span: span,
+    })
+}
+
 fn parse_break(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     let span = state.current_offset();
     state.consume();
@@ -243,6 +307,22 @@ fn parse_continue(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     state.consume();
     expect_semicolon(state)?;
     Ok(Stmt::Continue { span })
+}
+
+fn parse_return(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+    let span = state.current_offset();
+    state.consume();
+    if state.check(&TokenKind::Delimiter(Delimiter::Semicolon)) {
+        state.consume();
+        Ok(Stmt::Return { value: None, span })
+    } else {
+        let return_expr = parse_expr_in(state)?;
+        expect_semicolon(state)?; // 这里依然要分号
+        Ok(Stmt::Return {
+            value: Some(return_expr),
+            span,
+        })
+    }
 }
 
 fn expect_block(state: &mut TokenStream<'_>, name: &str) -> Result<Vec<Stmt>, ParseError> {
@@ -262,7 +342,7 @@ fn expect_block(state: &mut TokenStream<'_>, name: &str) -> Result<Vec<Stmt>, Pa
     else {
         return Err(ParseError::new(
             state.current_offset(),
-            "expected block after {name}",
+            format!("expected block after {name}"),
         ));
     };
     Ok(body)
@@ -690,6 +770,12 @@ mod tests {
     }
 
     #[test]
+    fn records_func_statement_span_at_keyword() {
+        let stmts = parse_src("func f() { return; }");
+        assert_eq!(stmts[0].span(), 4);
+    }
+
+    #[test]
     fn records_break_statement_span_at_keyword() {
         let stmts = parse_src("break;");
         assert_eq!(stmts[0].span(), 5);
@@ -713,6 +799,68 @@ mod tests {
         let stmts = parse_src("continue;");
         assert_eq!(stmts.len(), 1);
         assert!(matches!(stmts[0], Stmt::Continue { .. }));
+    }
+
+    #[test]
+    fn parses_func_declare_with_params_and_return() {
+        let stmts = parse_src("func add(a, b) { return a + b; }");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Stmt::FuncDeclare {
+                name, params, body, ..
+            } => {
+                assert_eq!(name, "add");
+                assert_eq!(params, &vec!["a".to_string(), "b".to_string()]);
+                assert_eq!(body.len(), 1);
+                match &body[0] {
+                    Stmt::Return {
+                        value: Some(expr), ..
+                    } => {
+                        assert_eq!(*expr, expr_add(var("a"), var("b")));
+                    }
+                    other => panic!("expected return statement, got {:?}", other),
+                }
+            }
+            other => panic!("expected function declaration, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_func_declare_with_empty_params() {
+        let stmts = parse_src("func ping() { return; }");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Stmt::FuncDeclare {
+                name, params, body, ..
+            } => {
+                assert_eq!(name, "ping");
+                assert!(params.is_empty());
+                assert_eq!(body.len(), 1);
+                assert!(matches!(body[0], Stmt::Return { value: None, .. }));
+            }
+            other => panic!("expected function declaration, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_return_with_value() {
+        let stmts = parse_src("return 1 + 2;");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Stmt::Return {
+                value: Some(expr), ..
+            } => {
+                assert_eq!(*expr, expr_add(lit_int(1), lit_int(2)));
+            }
+            other => panic!("expected return with value, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_return_without_value() {
+        let stmts = parse_src("return;");
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0], Stmt::Return { value: None, .. }));
     }
 
     #[test]

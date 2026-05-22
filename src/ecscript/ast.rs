@@ -42,11 +42,23 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: usize,
     },
+    FuncDeclare {
+        // func f(a,b) = {}
+        name: String,
+        params: Vec<String>,
+        body: Vec<Stmt>,
+        span: usize,
+    },
+
     // break continue也是完整的语句
     Break {
         span: usize,
     },
     Continue {
+        span: usize,
+    },
+    Return {
+        value: Option<Expr>,
         span: usize,
     },
 }
@@ -153,6 +165,8 @@ impl Stmt {
             Stmt::ForRange { span, .. } => *span,
             Stmt::Break { span } => *span,
             Stmt::Continue { span } => *span,
+            Stmt::FuncDeclare { span, .. } => *span,
+            Stmt::Return { span, .. } => *span,
         }
     }
 }

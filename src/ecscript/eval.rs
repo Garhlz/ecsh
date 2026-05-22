@@ -5,20 +5,22 @@ use crate::ecscript::{
     builtin::run_builtin,
     env::Environment,
     error::{EvalResult, RuntimeError, RuntimeErrorKind},
-    value::Value,
+    func::call_function,
+    value::{Function, Value},
 };
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecFlow {
     Normal,
     Break(usize),
     Continue(usize),
-    // Return(Value),
+    Return { value: Option<Value>, span: usize },
 }
 
 pub fn eval_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<ExecFlow> {
     for stmt in stmts {
         match eval_stmt(stmt, env)? {
             ExecFlow::Normal => continue,
+            // 最外层控制层接收到normal之外的执行流都有问题
             ExecFlow::Break(span) => {
                 return Err(RuntimeError::new(
                     span,
@@ -33,6 +35,14 @@ pub fn eval_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<ExecFlow
                     "continue outside loop",
                 ));
             }
+            // return 执行流是被函数调用块消费掉的，其他地方只能结束并且向上透传
+            ExecFlow::Return { span, .. } => {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::ReturnOutsideFunction,
+                    "return outside function",
+                ));
+            }
         }
     }
     Ok(ExecFlow::Normal)
@@ -43,7 +53,7 @@ pub fn eval_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<ExecFlow
 ///
 /// 有能力改变控制流的语句自己返回，否则用全局的Normal
 /// 循环语句消费break/continue，其他都只是透传
-/// 写完之后重构多次
+/// 写完之后已多次重构
 pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, RuntimeError> {
     match stmt {
         Stmt::Let { name, expr, span } => {
@@ -81,6 +91,7 @@ pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, Runtime
                 ExecFlow::Break(_) => break,
                 ExecFlow::Continue(_) => continue,
                 ExecFlow::Normal => {}
+                whole @ ExecFlow::Return { .. } => return Ok(whole),
             }
         },
         Stmt::ForIn {
@@ -103,6 +114,7 @@ pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, Runtime
                             ExecFlow::Break(_) => break,
                             ExecFlow::Continue(_) => continue,
                             ExecFlow::Normal => {}
+                            whole @ ExecFlow::Return { .. } => return Ok(whole),
                         }
                     }
                 }
@@ -116,6 +128,7 @@ pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, Runtime
                             ExecFlow::Break(_) => break,
                             ExecFlow::Continue(_) => continue,
                             ExecFlow::Normal => {}
+                            whole @ ExecFlow::Return { .. } => return Ok(whole),
                         }
                     }
                 }
@@ -157,14 +170,45 @@ pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, Runtime
                     ExecFlow::Break(_) => break,
                     ExecFlow::Continue(_) => continue,
                     ExecFlow::Normal => {}
+                    whole @ ExecFlow::Return { .. } => return Ok(whole),
                 }
             }
         }
+        Stmt::FuncDeclare {
+            name,
+            params,
+            body,
+            span,
+        } => {
+            let func = Function {
+                name: Some(name.clone()),
+                params: params.clone(),
+                stmts: body.clone(),
+            };
+            let func_val = Value::Function(Rc::new(func));
+            // TODO 这里先简化为直接往环境中插入 函数这个值
+            env.insert(name.clone(), func_val, *span)?;
+        }
+
         Stmt::Break { span } => {
             return Ok(ExecFlow::Break(*span));
         }
         Stmt::Continue { span } => {
             return Ok(ExecFlow::Continue(*span));
+        }
+        Stmt::Return { value, span } => {
+            if let Some(return_expr) = value {
+                let return_value = eval_expr(return_expr, env)?;
+                return Ok(ExecFlow::Return {
+                    value: Some(return_value),
+                    span: *span,
+                });
+            } else {
+                return Ok(ExecFlow::Return {
+                    value: None,
+                    span: *span,
+                });
+            }
         }
     }
     Ok(ExecFlow::Normal)
@@ -203,7 +247,7 @@ fn expect_int(value: Value, span: usize, context: &str) -> EvalResult<i64> {
     }
 }
 
-pub fn eval_expr(expr: &Expr, env: &Environment) -> EvalResult<Value> {
+pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
     let span = expr.span;
     match &expr.kind {
         ExprKind::Literal(lit) => match lit {
@@ -373,6 +417,13 @@ pub fn eval_expr(expr: &Expr, env: &Environment) -> EvalResult<Value> {
             }
 
             match callee {
+                Value::Function(func) => {
+                    if let Some(value) = call_function(func, &args, env, span)? {
+                        return Ok(value);
+                    } else {
+                        return Ok(Value::Nil);
+                    }
+                }
                 Value::Builtin(builtin) => run_builtin(builtin, args, span),
                 other => Err(RuntimeError::new(
                     span,
@@ -1678,5 +1729,56 @@ mod stmt_tests {
         )
         .unwrap();
         assert_eq!(env.get("x", 0), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_func_call_returns_value() {
+        let env = Environment::new();
+        eval_script_src("func add(a, b) { return a + b; } let x = add(1, 2);", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_func_return_without_value_becomes_nil() {
+        let env = Environment::new();
+        eval_script_src("func noop() { return; } let x = noop();", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Nil));
+    }
+
+    #[test]
+    fn eval_func_return_inside_loop_exits_function() {
+        let env = Environment::new();
+        eval_script_src(
+            "func first() { while true { return 7; } } let x = first();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(7)));
+    }
+
+    #[test]
+    fn eval_func_uses_global_not_caller_local_scope() {
+        let env = Environment::new();
+        eval_script_src(
+            "let x = 1; let y = 0; func read_x() { return x; } { let x = 2; y = read_x(); }",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(1)));
+    }
+
+    #[test]
+    fn eval_func_arity_mismatch_reports_error() {
+        let env = Environment::new();
+        let err = eval_script_src("func add(a, b) { return a + b; } add(1);", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::ArityMismatch);
+    }
+
+    #[test]
+    fn eval_return_outside_function_reports_error() {
+        let env = Environment::new();
+        let err = eval_script_src("return 1;", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::ReturnOutsideFunction);
+        assert_eq!(err.message, "return outside function");
     }
 }
