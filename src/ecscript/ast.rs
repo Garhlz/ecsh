@@ -19,6 +19,42 @@ pub enum Stmt {
         stmts: Vec<Stmt>,
         span: usize,
     }, // 代码块，新的作用域推入栈
+    If {
+        cond: Expr,
+        then_body: Vec<Stmt>,
+        else_body: Vec<Stmt>,
+        span: usize,
+    },
+    While {
+        cond: Expr,
+        body: Vec<Stmt>,
+        span: usize,
+    },
+    ForIn {
+        var: String,
+        iterable: Expr,
+        body: Vec<Stmt>,
+        span: usize,
+    },
+    ForRange {
+        var: String,
+        range: RangeExpr,
+        body: Vec<Stmt>,
+        span: usize,
+    },
+    // break continue也是完整的语句
+    Break {
+        span: usize,
+    },
+    Continue {
+        span: usize,
+    },
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct RangeExpr {
+    pub start: Box<Expr>,
+    pub end: Box<Expr>,
+    pub inclusive: bool, // 1..10 = false, 1..=10 = true
 }
 
 impl PartialEq for Stmt {
@@ -46,6 +82,58 @@ impl PartialEq for Stmt {
             ) => a == b && ae == be,
             (Stmt::ExprStmt { expr: a, .. }, Stmt::ExprStmt { expr: b, .. }) => a == b,
             (Stmt::Block { stmts: a, .. }, Stmt::Block { stmts: b, .. }) => a == b,
+            (
+                Stmt::If {
+                    cond: ac,
+                    then_body: at,
+                    else_body: ae,
+                    ..
+                },
+                Stmt::If {
+                    cond: bc,
+                    then_body: bt,
+                    else_body: be,
+                    ..
+                },
+            ) => ac == bc && at == bt && ae == be,
+            (
+                Stmt::While {
+                    cond: ac, body: ab, ..
+                },
+                Stmt::While {
+                    cond: bc, body: bb, ..
+                },
+            ) => ac == bc && ab == bb,
+            (
+                Stmt::ForIn {
+                    var: av,
+                    iterable: ai,
+                    body: ab,
+                    ..
+                },
+                Stmt::ForIn {
+                    var: bv,
+                    iterable: bi,
+                    body: bb,
+                    ..
+                },
+            ) => av == bv && ai == bi && ab == bb,
+            (
+                Stmt::ForRange {
+                    var: av,
+                    range: ar,
+                    body: ab,
+                    ..
+                },
+                Stmt::ForRange {
+                    var: bv,
+                    range: br,
+                    body: bb,
+                    ..
+                },
+            ) => av == bv && ar == br && ab == bb,
+            (Stmt::Break { .. }, Stmt::Break { .. }) => true,
+            (Stmt::Continue { .. }, Stmt::Continue { .. }) => true,
             _ => false,
         }
     }
@@ -58,6 +146,13 @@ impl Stmt {
             Stmt::Assign { span, .. } => *span,
             Stmt::ExprStmt { span, .. } => *span,
             Stmt::Block { span, .. } => *span,
+            // 控制流
+            Stmt::If { span, .. } => *span,
+            Stmt::While { span, .. } => *span,
+            Stmt::ForIn { span, .. } => *span,
+            Stmt::ForRange { span, .. } => *span,
+            Stmt::Break { span } => *span,
+            Stmt::Continue { span } => *span,
         }
     }
 }
@@ -146,6 +241,9 @@ pub enum ExprKind {
 
     // 函数调用
     Call(Box<Expr>, Vec<Expr>),
+
+    // 循环遍历的 1..10 / 1..=10，也视为表达式。但是暂时只能出现于for i in 1..10语法中
+    Range(RangeExpr),
 }
 
 #[derive(Debug, Clone, PartialEq)]

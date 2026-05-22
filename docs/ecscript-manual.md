@@ -1,7 +1,7 @@
-# ecscript 当前实现手册（stage 3）
+# ecscript 当前实现手册（stage 4）
 
 本文描述 ecscript **当前已经实现** 的语法与语义。  
-这一版已经从 stage 2 的“语句、块、作用域”推进到 **stage 3 的复合数据、访问语法和内置函数调用**，但仍然不是完整脚本语言。
+这一版已经从 stage 3 的“复合数据和内置函数”推进到 **stage 4 的控制流**：`if / else`、`while`、`for in`、`break`、`continue` 已经打通。
 
 ---
 
@@ -9,23 +9,30 @@
 
 当前已实现：
 
-- 表达式 lexer / Pratt parser / evaluator
+- expression lexer / Pratt parser / evaluator
 - script / stmt parser
-- `let` 声明、赋值语句、表达式语句、block
-- 词法作用域环境与父环境查找
+- `let`、赋值、表达式语句、block
+- 词法作用域与父环境查找
 - 数组 / 对象字面量
 - 字段访问、索引访问
 - 字段赋值、索引赋值
-- 内置函数调用：`len` / `push` / `pop` / `insert` / `remove` / `keys` / `values` / `to_json`
+- 全局 builtin：`len` / `push` / `pop` / `insert` / `remove` / `keys` / `values` / `to_json`
+- `if / else if / else`
+- `while`
+- `for in`：
+  - 遍历数组
+  - 遍历对象 key
+  - 遍历区间 `a..b` / `a..=b`
+- `break` / `continue`
 - 基于字节偏移的 parse/runtime 错误定位
 
 当前未实现：
 
-- `if` / `while` / `for`
 - 用户自定义函数、`return`
 - 注释
 - shell 集成后的正式脚本入口
 - block value / 尾表达式返回值
+- 模块系统
 
 ---
 
@@ -47,8 +54,13 @@
 - `nil`
 - `true`
 - `false`
-
-其他合法标识符按普通变量名处理。
+- `if`
+- `else`
+- `while`
+- `for`
+- `in`
+- `break`
+- `continue`
 
 ### 2.3 数字
 
@@ -57,7 +69,7 @@
 | 十进制整数 | `42` | 无前缀 |
 | 十进制浮点 | `3.14` `.5` | `.5` 在运行时等价于 `0.5` |
 
-不支持科学计数法、十六进制、八进制。`-1` 由 lexer 拆成 `-` 和 `1`，再由 parser 组装成前缀表达式。
+不支持科学计数法、十六进制、八进制。
 
 ### 2.4 字符串
 
@@ -84,18 +96,15 @@
 
 ### 2.6 分隔符
 
-`(` `)` `{` `}` `[` `]` `,` `.` `;` `:` `=`
+`(` `)` `{` `}` `[` `]` `,` `.` `;` `:` `=` `..` `..=`
 
-当前会进入 parser / evaluator 的主要是：
+其中：
 
-- `(` `)`：分组 / 调用
-- `{` `}`：block / 对象字面量
-- `[` `]`：数组字面量 / 索引访问
 - `.`：字段访问
-- `,`
-- `;`
-- `:`
-- `=`
+- `[]`：索引访问 / 数组字面量
+- `()`：分组 / 调用
+- `{}`：block / 对象字面量
+- `..` / `..=`：区间表达式
 
 ---
 
@@ -104,107 +113,104 @@
 当前 parser 接受的是 **script**，也就是一串语句。
 
 ```ebnf
-script       = stmt* EOF
+script          = stmt* EOF
 
-stmt         = let_stmt
-             | assign_stmt
-             | expr_stmt
-             | block
+stmt            = let_stmt
+                | assign_stmt
+                | expr_stmt
+                | block
+                | if_stmt
+                | while_stmt
+                | for_stmt
+                | break_stmt
+                | continue_stmt
 
-let_stmt     = "let" identifier "=" expr ";"
-assign_stmt  = assign_target "=" expr ";"
-expr_stmt    = expr ";"
-block        = "{" stmt* "}"
+let_stmt        = "let" identifier "=" expr ";"
+assign_stmt     = assign_target "=" expr ";"
+expr_stmt       = expr ";"
+block           = "{" stmt* "}"
 
-assign_target = identifier
-              | postfix "." identifier
-              | postfix "[" expr "]"
+if_stmt         = "if" expr block ("else" (block | if_stmt))?
+while_stmt      = "while" expr block
+for_stmt        = "for" identifier "in" expr block
+break_stmt      = "break" ";"
+continue_stmt   = "continue" ";"
 
-expr         = logical_or
-logical_or   = logical_and ("||" logical_and)*
-logical_and  = comparison ("&&" comparison)*
-comparison   = term (("==" | "!=" | "<" | ">" | "<=" | ">=") term)*
-term         = sum (("+" | "-") sum)*
-sum          = prefix (("*" | "/" | "%") prefix)*
-prefix       = ("!" | "-") prefix | postfix
-postfix      = primary (("." identifier) | ("[" expr "]") | ("(" arg_list? ")"))*
-arg_list     = expr ("," expr)*
-primary      = "nil"
-             | "true"
-             | "false"
-             | number
-             | string
-             | identifier
-             | array_literal
-             | object_literal
-             | "(" expr ")"
+assign_target   = identifier
+                | postfix "." identifier
+                | postfix "[" expr "]"
 
-array_literal  = "[" (expr ("," expr)* ","?)? "]"
-object_literal = "{" (object_entry ("," object_entry)* ","?)? "}"
-object_entry   = (identifier | string) ":" expr
+expr            = range
+range           = logical_or ((".." | "..=") logical_or)?
+logical_or      = logical_and ("||" logical_and)*
+logical_and     = comparison ("&&" comparison)*
+comparison      = term (("==" | "!=" | "<" | ">" | "<=" | ">=") term)*
+term            = sum (("+" | "-") sum)*
+sum             = prefix (("*" | "/" | "%") prefix)*
+prefix          = ("!" | "-") prefix | postfix
+postfix         = primary (("." identifier) | ("[" expr "]") | ("(" arg_list? ")"))*
+arg_list        = expr ("," expr)*
+primary         = "nil"
+                | "true"
+                | "false"
+                | number
+                | string
+                | identifier
+                | array_literal
+                | object_literal
+                | "(" expr ")"
+
+array_literal   = "[" (expr ("," expr)* ","?)? "]"
+object_literal  = "{" (object_entry ("," object_entry)* ","?)? "}"
+object_entry    = (identifier | string) ":" expr
 ```
 
-### 3.1 关于 `{ ... }` 的歧义
+### 3.1 `{ ... }` 的歧义
 
-当前在 **statement 位置** 遇到 `{ ... }` 会解析成 block。  
+在 **statement 位置** 遇到 `{ ... }` 会解析成 block。  
 对象字面量只在 **expression 位置** 解析，例如：
 
 ```ecs
 let x = {name: 1};
 ```
 
-而：
+### 3.2 `for in` 的三种来源
+
+当前 `for x in expr { ... }` 支持：
 
 ```ecs
-{name: 1}
+for x in [1, 2, 3] { ... }
+for k in {a: 1, b: 2} { ... }   // 遍历 key
+for i in 0..10 { ... }
+for i in 0..=10 { ... }
 ```
 
-在顶层 statement 位置会按 block 路径处理，不会被当成对象字面量。
-
-### 3.2 关于调用
-
-当前已经支持通用的 postfix 调用语法：
-
-```ecs
-len(arr)
-obj.f(x)
-foo()[0]
-```
-
-但**当前真正可调用的值只有 builtin**。  
-用户自定义函数还未实现。
+其中 `0..10` / `0..=10` 会在 parser 阶段直接产出 `Range` AST。
 
 ---
 
 ## 4. 分号与块规则
 
-### 4.1 普通语句必须以分号结尾
-
-下面这些都必须带 `;`：
+### 4.1 必须带分号的语句
 
 - `let x = 1;`
 - `x = 2;`
-- `obj.name = 3;`
-- `arr[i] = 4;`
 - `1 + 2;`
 - `len(arr);`
+- `break;`
+- `continue;`
 
-### 4.2 block 本身不带分号
+### 4.2 不带分号的语句
 
-```ecs
-{ let x = 1; }
-```
+- `if ... { ... }`
+- `while ... { ... }`
+- `for ... in ... { ... }`
+- block 本身
 
-当前 block 自己作为语句时不需要写成：
-
-```ecs
-{ let x = 1; };
-```
-
-### 4.3 块内最后一条普通语句也必须带分号
+### 4.3 block 内最后一条普通语句也必须带分号
 
 当前 **不支持尾表达式省分号**。  
-block 仍然是 **statement block**，不是 **expression block**。
+block 仍然是 statement block，不是 expression block。
 
 ---
 
@@ -221,12 +227,14 @@ block 仍然是 **statement block**，不是 **expression block**。
 | 比较 | `==` `!=` `<` `>` `<=` `>=` | 左结合 |
 | 逻辑与 | `&&` | 左结合 |
 | 逻辑或 | `\|\|` | 左结合 |
+| 区间 | `..` `..=` | 左结合 |
 
-例如：
+示例：
 
-- `obj.arr[0]` 解析为 `(obj.arr)[0]`
-- `foo.bar(x)` 解析为 `(foo.bar)(x)`
-- `1 + arr[0] * 2` 中 `[]` 比算术绑定更紧
+- `obj.arr[0]`
+- `foo.bar(x)`
+- `1 + arr[0] * 2`
+- `0..10`
 
 ---
 
@@ -240,6 +248,32 @@ pub enum Stmt {
     Assign { target: AssignTarget, expr: Expr, span: usize },
     ExprStmt { expr: Expr, span: usize },
     Block { stmts: Vec<Stmt>, span: usize },
+
+    If {
+        cond: Expr,
+        then_body: Vec<Stmt>,
+        else_body: Vec<Stmt>,
+        span: usize,
+    },
+    While {
+        cond: Expr,
+        body: Vec<Stmt>,
+        span: usize,
+    },
+    ForIn {
+        var: String,
+        iterable: Expr,
+        body: Vec<Stmt>,
+        span: usize,
+    },
+    ForRange {
+        var: String,
+        range: RangeExpr,
+        body: Vec<Stmt>,
+        span: usize,
+    },
+    Break { span: usize },
+    Continue { span: usize },
 }
 
 pub enum AssignTarget {
@@ -252,11 +286,6 @@ pub enum AssignTarget {
 ### 6.2 表达式节点
 
 ```rust
-pub struct Expr {
-    pub kind: ExprKind,
-    pub span: usize,
-}
-
 pub enum ExprKind {
     Literal(Literal),
     Variable(String),
@@ -268,18 +297,18 @@ pub enum ExprKind {
     Index(Box<Expr>, Box<Expr>),
     Field(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
+    Range(RangeExpr),
+}
+
+pub struct RangeExpr {
+    pub start: Box<Expr>,
+    pub end: Box<Expr>,
+    pub inclusive: bool,
 }
 ```
 
-`Stmt` 和 `Expr` 上的 `span` 都是**源码字节偏移**，用于错误定位。  
-当前约定是：**statement 的 span 一律指向该语句起始 token 的结束偏移**。
-
-对象字面量的 key 已经在 parser 阶段收敛成 `String`：
-
-- `{name: 1}` 的 key 是 `"name"`
-- `{"name": 1}` 的 key 也是 `"name"`
-
-当前**不支持动态 key**（例如 `{[expr]: value}`）。
+`Stmt` 和 `Expr` 上的 `span` 都是源码字节偏移。  
+当前约定是：**statement 的 span 指向该语句起始 token 的结束偏移**。
 
 ---
 
@@ -300,29 +329,21 @@ pub enum Value {
 
 说明：
 
-- `Array` / `Object` 是**共享、可变**容器
-- 数组元素类型**不要求统一**
-- builtin 也是运行时值的一种，因此可以被变量读取、传递、遮蔽
+- `Array` / `Object` 是共享、可变容器
+- 数组元素类型不要求统一
+- builtin 也是普通运行时值，因此可以被遮蔽
 
 ---
 
-## 8. 环境、作用域与 builtin 查找
+## 8. 环境与名字查找
 
-当前 `Environment` 支持父链：
+`Environment` 支持父链：
 
-- `new()`：创建顶层环境
-- `new_child(parent)`：创建子环境
-- `insert(name, value, span)`：在**当前层**定义变量
-- `get(name, span)`：先查当前层，不存在再沿父链向上查
-- `set(target, value, span)`：修改最近一层变量，或修改容器内部元素/字段
-
-### 8.1 builtin fallback
-
-`get(name, span)` 的查找顺序是：
-
-1. 当前作用域
-2. 父作用域链
-3. builtin 名字表
+- `new()`：顶层环境
+- `new_child(parent)`：子环境
+- `insert()`：在当前层定义变量
+- `get()`：当前层 → 父链 → builtin fallback
+- `set()`：更新已有变量或修改容器内部内容
 
 这意味着：
 
@@ -330,16 +351,7 @@ pub enum Value {
 let len = 1;
 ```
 
-会遮蔽内置的 `len`。
-
-### 8.2 作用域语义
-
-- `let` 只在当前作用域定义变量
-- block 会创建新的子环境
-- block 内可以读取外层变量
-- block 内给外层已有变量赋值时，会沿父链更新外层
-- block 内 `let x = ...;` 可以遮蔽外层同名变量
-- 同一作用域内重复 `let` 会报错
+会遮蔽内置 `len`。
 
 ---
 
@@ -357,137 +369,41 @@ let len = 1;
 | `[1, 2]` | `Value::Array(...)` |
 | `{name: 1}` | `Value::Object(...)` |
 
-### 9.2 变量
+### 9.2 调用
 
-变量表达式会从当前环境开始沿父链查找。  
-到根后仍不存在时，再尝试按 builtin 名字查找。  
-仍找不到才报 `UndefinedVariable`。
+当前真正可调用的值只有 builtin。  
+用户函数尚未实现。
 
-### 9.3 前缀运算符
+### 9.3 容器访问
 
-**`-expr`**
+- `arr[i]`：数组索引，`i` 必须是 `Int`
+- `obj["name"]`：对象索引，索引必须是 `String`
+- `obj.name`：对象字段访问
 
-- 接受 `Int` 或 `Float`
-- 返回同类型结果
-- 其他类型报 `TypeMismatch`
+### 9.4 区间表达式
 
-**`!expr`**
-
-- 只接受 `Bool`
-- 没有 truthy / falsy 自动转换
-
-### 9.4 算术运算
-
-有 `Int` 和 `Float` 混合时，`Int` 会提升为 `Float`。
-
-| 运算 | 类型组合 | 结果 |
-|------|---------|------|
-| `+` | Int/Int, Int/Float, Float/Int, Float/Float | 数值 |
-| `+` | String/String | 拼接 |
-| `-` | Int/Int, Int/Float, Float/Int, Float/Float | 数值 |
-| `*` | Int/Int, Int/Float, Float/Int, Float/Float | 数值 |
-| `/` | Int/Int（整除）, Int/Float, Float/Int, Float/Float | 数值 |
-| `%` | Int/Int | 整数 |
-
-边界行为：
-
-- `Int / Int` 使用 Rust 的向零截断除法
-- 除数为 `0` 或 `0.0` 报 `DivisionByZero`
-- `%` 仅支持整数；`% 0` 报 `DivisionByZero`
-
-### 9.5 比较与相等性
-
-**`==` / `!=`** 支持：
-
-- `Int` 与 `Int` / `Float`
-- `Float` 与 `Int` / `Float`
-- `Nil` 与 `Nil`
-- `Bool` 与 `Bool`
-- `String` 与 `String`
-
-其他跨类型比较报 `TypeMismatch`。
-
-**`<` `>` `<=` `>=`** 只支持数值类型（Int/Float 四种组合）。
-
-### 9.6 逻辑运算
-
-`&&` 和 `||` 只接受 `Bool` 操作数，无 truthy / falsy 自动转换。
-
-并且**短路求值**：
-
-- `false && rhs` 不会求值 `rhs`
-- `true || rhs` 不会求值 `rhs`
-
-### 9.7 容器访问
-
-#### 数组索引
+当前支持：
 
 ```ecs
-arr[0]
+0..3
+0..=3
 ```
 
-- 基值必须是 `Array`
-- 索引必须是 `Int`
-- 当前不支持负索引
-- 越界报 `IndexOutOfBounds`
+在运行时，区间表达式当前会被求值成 `Array<Int>`。  
+在 `for i in 0..3 { ... }` 这种语法里，parser 会直接产出 `ForRange` 语句节点。
 
-#### 对象索引
-
-```ecs
-obj["name"]
-```
-
-- 基值必须是 `Object`
-- 索引必须求值为 `String`
-- 字段不存在时报 `NonExistentField`
-
-#### 对象字段访问
-
-```ecs
-obj.name
-```
-
-- 基值必须是 `Object`
-- 字段名来自源码标识符，不做动态求值
-- 字段不存在时报 `NonExistentField`
-
-### 9.8 调用
-
-当前调用表达式的流程是：
-
-1. 先求值 callee
-2. 再从左到右求值参数
-3. callee 必须是 `Value::Builtin`
-
-其他值被调用时会报 `NotCallable`。
-
-当前真正可调用的值主要是全局 builtin；用户函数尚未实现。
-
-### 9.9 当前 builtin
+### 9.5 builtin
 
 | 名字 | 语义 | 备注 |
 |------|------|------|
 | `len(x)` | 返回长度 | 支持 `Array` / `Object` / `String` |
 | `push(arr, v...)` | 向数组尾部追加一个或多个值 | 返回 `nil` |
 | `pop(arr)` | 弹出尾元素 | 空数组返回 `nil` |
-| `insert(arr, i, v)` | 在位置 `i` 插入 | `i` 允许等于长度 |
+| `insert(arr, i, v)` | 在位置 `i` 插入 | `i == len` 合法 |
 | `remove(arr, i)` | 删除并返回位置 `i` 的元素 | 越界报错 |
 | `keys(obj)` | 返回对象 key 数组 | 按 key 排序 |
 | `values(obj)` | 返回对象 value 数组 | 顺序与排序后的 key 一致 |
 | `to_json(x)` | 转成 JSON 字符串 | 对象 key 排序；检测循环引用 |
-
-#### `len(String)`
-
-当前 `len("你好")` 返回的是 **Unicode 标量值数量**，不是 UTF-8 字节数。
-
-#### `to_json`
-
-`to_json`：
-
-- 返回 `Value::String`
-- 对 `Object` 的输出按 key 排序，结果稳定
-- `NaN` / `Infinity` 不可序列化，会报错
-- 若数组/对象形成循环引用，会报 `CircularReference`
 
 ---
 
@@ -499,53 +415,70 @@ obj.name
 let x = expr;
 ```
 
-执行顺序：
-
-1. 先计算右侧表达式
-2. 再把结果写入当前作用域
-3. 如果当前作用域已存在同名变量，报 `DuplicateVariable`
+- 先求右值
+- 再写入当前作用域
+- 当前作用域重复定义报 `DuplicateVariable`
 
 ### 10.2 赋值
 
-```ecs
-x = 1;
-obj.name = 2;
-arr[i] = 3;
-obj["name"] = 4;
-```
-
-赋值目标当前只允许三种：
+当前允许三种赋值目标：
 
 - 变量
 - 字段访问
 - 索引访问
 
-其他表达式（如 `1 + 2 = 3`）会在 parse 阶段报错。
+其他形式（如 `1 + 2 = 3`）会在 parse 阶段报错。
 
-#### 变量赋值
+### 10.3 `if / else if / else`
 
-- 从当前作用域向上查找最近绑定
-- 找到就更新
-- 整条作用域链都找不到则报 `UndefinedVariable`
+```ecs
+if cond { ... }
+if cond { ... } else { ... }
+if cond { ... } else if cond2 { ... } else { ... }
+```
 
-#### 字段赋值
+- `cond` 必须求值为 `Bool`
+- `then_body` / `else_body` 通过 block 语义执行
 
-- 基值必须是 `Object`
-- 当前语义是 `insert` / 覆盖，不要求字段预先存在
+### 10.4 `while`
 
-#### 索引赋值
+```ecs
+while cond { ... }
+```
 
-- `Array` + `Int`：更新数组元素
-- `Object` + `String`：按 key 写入 / 覆盖
+- 每轮开始都会重新求值 `cond`
+- `cond` 必须是 `Bool`
+- 支持 `break` / `continue`
 
-### 10.3 表达式语句
+### 10.5 `for in`
 
-表达式会被求值，但结果被丢弃。
+```ecs
+for v in arr { ... }
+for k in obj { ... }
+for i in 0..10 { ... }
+```
 
-### 10.4 block
+#### 遍历数组
 
-执行 block 时会创建新的子环境。  
-block 内定义的新变量不会泄露到外层；但对外层已有变量的赋值会生效。
+- 当前会先拍一个元素快照，再执行循环体
+- 因此循环体里即使修改原数组，也不会影响本轮已经决定好的迭代序列
+- 这样可以避免 `RefCell` 借用冲突
+
+#### 遍历对象
+
+- 当前遍历的是对象 key
+- key 会先排序，因此顺序稳定
+
+#### 遍历区间
+
+- `a..b`：不包含 `b`
+- `a..=b`：包含 `b`
+- 起点和终点都必须是 `Int`
+
+### 10.6 `break` / `continue`
+
+- 只能在循环中使用
+- 顶层或普通 block 中使用会在运行时报错
 
 ---
 
@@ -553,23 +486,18 @@ block 内定义的新变量不会泄露到外层；但对外层已有变量的�
 
 ### 11.1 ParseError
 
-词法 / 语法阶段错误，包括：
+典型场景：
 
 - 非法字符、非法转义、未闭合字符串
-- 缺失 `)`、缺失 `]`、缺失 `}`
-- 缺失 `,` / `:` / `;`
-- `let` 后缺变量名
+- 缺失 `)`、`]`、`}`
+- 缺失 `,`、`:`、`;`
+- `let` / `for` 后缺标识符
 - 非法赋值左值
-- 在错误位置遇到 `}`
+- `if/while/for` 后缺 block
 
-当前错误文案尽量写成：
+典型报错：
 
-```text
-expected X, found Y
-```
-
-或语义更明确的短句，例如：
-
+- `expected '{' after while, found integer literal`
 - `invalid assignment target; expected variable, field access, or index access`
 - `unexpected '}' at top level`
 
@@ -582,52 +510,53 @@ expected X, found Y
 | `UndefinedVariable` | 变量未定义 |
 | `TypeMismatch` | 类型不匹配 |
 | `DivisionByZero` | 除零或模零 |
-| `DuplicateVariable` | 同一作用域内重复定义变量 |
+| `DuplicateVariable` | 同一作用域内重复定义 |
 | `IndexOutOfBounds` | 数组索引越界 |
 | `NonExistentField` | 对象字段不存在 |
 | `NotCallable` | 调用了不可调用值 |
 | `ArityMismatch` | builtin 参数个数不对 |
 | `CircularReference` | `to_json` 检测到循环引用 |
+| `BreakOutsideLoop` | 循环外使用 `break` |
+| `ContinueOutsideLoop` | 循环外使用 `continue` |
 
-当前错误文案会尽量带上类型名、字段名、下标或 builtin 名，例如：
+典型报错：
 
-- `undefined variable 'x'`
-- `array index must be Int, got String`
+- `if condition must be Bool, got Int`
+- `while condition must be Bool, got String`
+- `for-in iterable must be Array or Object, got Int`
+- `for range start must be Int, got Bool`
+- `break outside loop`
+- `continue outside loop`
 - `object has no field 'name'`
-- `cannot access field 'name' on Int`
-- `Int is not callable`
-- `insert index 3 out of bounds for length 2`
-- `to_json cannot serialize cyclic Array/Object values`
 
 ---
 
 ## 12. 偏移定位
 
-`ParseError.offset` 和 `RuntimeError.offset` 都是**字节偏移**，不是 `[start, end)` 区间。
+`ParseError.offset` 和 `RuntimeError.offset` 都是**字节偏移**。
 
 当前大致约定：
 
-| 节点 / 场景 | offset 指向 |
-|------------|-------------|
+| 场景 | offset 指向 |
+|------|-------------|
 | 字面量 / 变量表达式 | 对应 token 的结束偏移 |
 | 前缀表达式 | 前缀运算符的结束偏移 |
 | 中缀表达式 | 中缀运算符的结束偏移 |
-| 任意 statement（`let` / `assign` / expr-stmt / block） | 语句起始 token 的结束偏移 |
-| 缺分号 | 当前看到的下一个 token（例如 `}` 或 EOF） |
+| 普通语句 | 语句起始 token 的结束偏移 |
+| 顶层 `break` / `continue` | `break` / `continue` 关键字的结束偏移 |
 
 ---
 
 ## 13. 当前阶段速记
 
-- 已经支持基本语句、block 和词法作用域
-- 已经支持数组 / 对象字面量
-- 已经支持 `obj.name`、`obj["name"]`、`arr[i]`
-- 已经支持 `obj.name = expr`、`obj["name"] = expr`、`arr[i] = expr`
-- object literal 的 key 当前只能是标识符或字符串
-- 普通语句必须以 `;` 结束
-- `&&` / `||` 已实现短路
-- 已经有最小 builtin 调用能力，但**还没有用户函数**
-- `to_json` 会稳定排序对象 key，并检测循环引用
+- 已经支持 block、作用域、复合数据和 builtin
+- 已经支持 `if / else if / else`
+- 已经支持 `while`
+- 已经支持 `for in` 遍历数组、对象 key 和区间
+- 已经支持 `break` / `continue`
+- `for in obj` 当前遍历的是 **排序后的 key**
+- `for in array` 当前使用 **迭代快照**，循环体修改原数组不会影响本轮迭代序列
+- builtin 仍然只有全局函数调用，没有用户函数
 
 ---
 
@@ -635,10 +564,10 @@ expected X, found Y
 
 从当前实现继续往下做，比较自然的顺序通常是：
 
-- `if` / `while`
-- 更完整的 `ExecFlow`（`break` / `continue` / `return`）
+- `return`
 - 用户函数与闭包
 - 让 `Call` 同时支持 builtin 和用户函数
+- 更完整的执行流（例如 `return` 向上传播）
 - block value / 尾表达式
 - shell 集成
-- 更完整的 span / 诊断系统
+- 更完整的 span / diagnostics 系统

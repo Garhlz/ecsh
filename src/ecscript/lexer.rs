@@ -23,6 +23,13 @@ pub enum TokenKind {
 
     // 保留字
     Let,
+    If,
+    Else,
+    While,
+    For,
+    In,
+    Continue,
+    Break,
 }
 
 #[derive(Debug, Clone, PartialEq, Copy)]
@@ -152,6 +159,13 @@ impl TokenKind {
             TokenKind::Delimiter(delimiter) => format!("'{}'", delimiter.lexeme()),
             TokenKind::EOF => "end of input".to_string(),
             TokenKind::Let => "keyword 'let'".to_string(),
+            TokenKind::If => "keyword 'if'".to_string(),
+            TokenKind::Else => "keyword 'else'".to_string(),
+            TokenKind::While => "keyword 'while'".to_string(),
+            TokenKind::For => "keyword 'for'".to_string(),
+            TokenKind::In => "keyword 'in'".to_string(),
+            TokenKind::Continue => "keyword 'continue'".to_string(),
+            TokenKind::Break => "keyword 'break'".to_string(),
         }
     }
 }
@@ -244,12 +258,39 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                         end: offset,
                     }),
 
-                    // 其他保留字
+                    // 保留字
                     "let" => tokens.push(Token {
                         kind: TokenKind::Let,
                         end: offset,
                     }),
-
+                    "if" => tokens.push(Token {
+                        kind: TokenKind::If,
+                        end: offset,
+                    }),
+                    "else" => tokens.push(Token {
+                        kind: TokenKind::Else,
+                        end: offset,
+                    }),
+                    "while" => tokens.push(Token {
+                        kind: TokenKind::While,
+                        end: offset,
+                    }),
+                    "for" => tokens.push(Token {
+                        kind: TokenKind::For,
+                        end: offset,
+                    }),
+                    "in" => tokens.push(Token {
+                        kind: TokenKind::In,
+                        end: offset,
+                    }),
+                    "continue" => tokens.push(Token {
+                        kind: TokenKind::Continue,
+                        end: offset,
+                    }),
+                    "break" => tokens.push(Token {
+                        kind: TokenKind::Break,
+                        end: offset,
+                    }),
                     _ => tokens.push(Token {
                         kind: TokenKind::Identifier(ident),
                         end: offset,

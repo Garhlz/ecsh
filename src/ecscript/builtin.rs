@@ -96,7 +96,7 @@ pub fn run_builtin(builtin: Builtin, args: Vec<Value>, span: usize) -> Result<Va
                 return Err(RuntimeError::new(
                     span,
                     RuntimeErrorKind::TypeMismatch,
-                    format!("insert expects int index, got {}", args[1].type_name()),
+                    format!("insert expects Int index, got {}", args[1].type_name()),
                 ));
             };
 
@@ -120,7 +120,7 @@ pub fn run_builtin(builtin: Builtin, args: Vec<Value>, span: usize) -> Result<Va
                 return Err(RuntimeError::new(
                     span,
                     RuntimeErrorKind::TypeMismatch,
-                    format!("remove expects int index, got {}", args[1].type_name()),
+                    format!("remove expects Int index, got {}", args[1].type_name()),
                 ));
             };
 
@@ -358,6 +358,20 @@ mod tests {
             run_builtin(Builtin::Remove, vec![Value::Array(arr), Value::Int(1)], 0).unwrap_err();
 
         assert_eq!(err.kind, RuntimeErrorKind::IndexOutOfBounds);
+    }
+
+    #[test]
+    fn insert_reports_index_type() {
+        let arr = Rc::new(RefCell::new(vec![Value::Int(1)]));
+        let err = run_builtin(
+            Builtin::Insert,
+            vec![Value::Array(arr), Value::String("x".into()), Value::Int(2)],
+            0,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.message, "insert expects Int index, got String");
     }
 
     #[test]

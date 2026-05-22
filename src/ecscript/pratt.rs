@@ -1,6 +1,6 @@
 use crate::ecscript::error::ParseError;
 
-use crate::ecscript::ast::{Expr, ExprKind, Literal};
+use crate::ecscript::ast::{Expr, ExprKind, Literal, RangeExpr};
 use crate::ecscript::lexer::{Delimiter, Token, TokenKind};
 
 pub struct TokenStream<'a> {
@@ -203,10 +203,11 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
 
                 let key: String = if let TokenKind::Identifier(s) = state.peek().kind.clone() {
                     state.consume();
-                    s // 标识符 → 直接当字符串
+                    // `{name: 1}` 里的 `name` 在语法层就降成字符串 key，避免后面被当变量求值。
+                    s
                 } else if let TokenKind::String(s) = state.peek().kind.clone() {
                     state.consume();
-                    s // 带引号的字符串 → 字面量值
+                    s
                 } else {
                     return Err(ParseError::new(
                         state.current_offset(),
@@ -358,6 +359,40 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     kind: ExprKind::Call(Box::new(left), argvs),
                     span: state.current_offset(),
                 }
+            }
+            // 区间优先级故意放得比算术/比较更低，这样 `1 + 2..10` 会先形成左边的完整表达式。
+            TokenKind::Delimiter(Delimiter::DotDot) => {
+                let bp = 10;
+                if bp <= min_bp {
+                    break;
+                }
+                state.consume();
+                let end = pratt_parser(state, bp)?;
+                left = Expr {
+                    kind: ExprKind::Range(RangeExpr {
+                        start: Box::new(left),
+                        end: Box::new(end),
+                        inclusive: false,
+                    }),
+                    span: state.current_offset(),
+                };
+            }
+            // inclusive range，和 `..` 一样走表达式层；`for` 再把它特判成 ForRange 语句。
+            TokenKind::Delimiter(Delimiter::DotDotEq) => {
+                let bp = 10;
+                if bp <= min_bp {
+                    break;
+                }
+                state.consume();
+                let end = pratt_parser(state, bp)?;
+                left = Expr {
+                    kind: ExprKind::Range(RangeExpr {
+                        start: Box::new(left),
+                        end: Box::new(end),
+                        inclusive: true,
+                    }),
+                    span: state.current_offset(),
+                };
             }
             _ => break,
         }
