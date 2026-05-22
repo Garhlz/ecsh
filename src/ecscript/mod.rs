@@ -1,4 +1,5 @@
 mod ast;
+mod builtin;
 mod env;
 mod error;
 mod eval;

@@ -115,6 +115,7 @@ pub enum Delimiter {
     DotDot,    // ..
     DotDotEq,  // ..=
     Eq,        // =
+    Colon,     // :
 }
 
 impl Delimiter {
@@ -132,6 +133,7 @@ impl Delimiter {
             Delimiter::DotDot => "..",
             Delimiter::DotDotEq => "..=",
             Delimiter::Eq => "=",
+            Delimiter::Colon => ":",
         }
     }
 }
@@ -442,6 +444,13 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 offset += ch.len_utf8();
                 tokens.push(Token {
                     kind: TokenKind::Operator(Operator::Percent),
+                    end: offset,
+                })
+            }
+            ':' => {
+                offset += ch.len_utf8();
+                tokens.push(Token {
+                    kind: TokenKind::Delimiter(Delimiter::Colon),
                     end: offset,
                 })
             }

@@ -38,6 +38,7 @@ impl<'a> TokenStream<'a> {
     }
 }
 
+/// 把token流转换为单个表达式
 pub fn parse_expr(tokens: &[Token]) -> Result<Expr, ParseError> {
     let mut state = TokenStream::new(tokens);
     let expr = pratt_parser(&mut state, 0)?;
@@ -116,7 +117,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
             state.consume();
         }
 
-        // prefix
+        // prefix operator
         TokenKind::Operator(oper) => {
             if let Some((cur_bp, prefix_oper)) = oper.prefix_info() {
                 state.consume();
@@ -135,7 +136,8 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                 ));
             }
         }
-        // (
+
+        // `(` 用于改变运算优先级
         TokenKind::Delimiter(Delimiter::LParen) => {
             state.consume();
             left = pratt_parser(state, 0)?;
@@ -148,6 +150,108 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                 ));
             }
         }
+
+        // `[` 用于数组字面量  Array(Vec<Expr>) [1,2,3]
+        TokenKind::Delimiter(Delimiter::LBracket) => {
+            state.consume();
+            let mut arr = Vec::new();
+            loop {
+                if state.check(&TokenKind::Delimiter(Delimiter::RBracket)) {
+                    state.consume();
+                    left = Expr {
+                        kind: ExprKind::Array(arr),
+                        span: state.current_offset(),
+                    };
+                    break;
+                }
+                // 可能是空数组
+                let element = pratt_parser(state, 0)?;
+                arr.push(element);
+
+                if state.check(&TokenKind::Delimiter(Delimiter::Comma)) {
+                    state.consume();
+                } else if state.check(&TokenKind::Delimiter(Delimiter::RBracket)) {
+                    state.consume();
+                    left = Expr {
+                        kind: ExprKind::Array(arr),
+                        span: state.current_offset(),
+                    };
+                    break;
+                } else {
+                    return Err(ParseError::new(
+                        state.current_offset(),
+                        "expected ',' or ']'",
+                    ));
+                }
+            }
+        }
+
+        // `{`用于对象的字面量表达式 Object(Vec<(String, Expr)>) {"a": 1, "b": 2}
+        TokenKind::Delimiter(Delimiter::LBrace) => {
+            state.consume();
+            let mut obj: Vec<(String, Expr)> = Vec::new();
+
+            loop {
+                if state.check(&TokenKind::Delimiter(Delimiter::RBrace)) {
+                    state.consume();
+                    left = Expr {
+                        kind: ExprKind::Object(obj),
+                        span: state.current_offset(),
+                    };
+                    break;
+                } // 支持为空
+
+                let key: String = if let TokenKind::Identifier(s) = state.peek().kind.clone() {
+                    state.consume();
+                    s // 标识符 → 直接当字符串
+                } else if let TokenKind::String(s) = state.peek().kind.clone() {
+                    state.consume();
+                    s // 带引号的字符串 → 字面量值
+                } else {
+                    return Err(ParseError::new(
+                        state.current_offset(),
+                        format!(
+                            "expected object field name, found {}",
+                            state.peek().kind.describe()
+                        ),
+                    ));
+                };
+
+                // 中间的冒号
+                if matches!(
+                    state.peek().kind.clone(),
+                    TokenKind::Delimiter(Delimiter::Colon)
+                ) {
+                    state.consume();
+                } else {
+                    return Err(ParseError::new(
+                        state.current_offset(),
+                        format!("expected ':', found {}", state.peek().kind.describe()),
+                    ));
+                }
+
+                let value = pratt_parser(state, 0)?;
+
+                obj.push((key, value));
+
+                if state.check(&TokenKind::Delimiter(Delimiter::Comma)) {
+                    state.consume();
+                } else if state.check(&TokenKind::Delimiter(Delimiter::RBrace)) {
+                    state.consume();
+                    left = Expr {
+                        kind: ExprKind::Object(obj),
+                        span: state.current_offset(),
+                    };
+                    break;
+                } else {
+                    return Err(ParseError::new(
+                        state.current_offset(),
+                        "expected ',' or '}'",
+                    ));
+                }
+            }
+        }
+
         _ => {
             return Err(ParseError::new(
                 state.current_offset(),
@@ -168,6 +272,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
             TokenKind::Operator(oper) => {
                 if let Some((left_bp, right_bp, infix_oper)) = oper.infix_info() {
                     if left_bp <= min_bp {
+                        // 这里是针对左结合运算符设置的
                         break;
                     }
                     state.consume();
@@ -178,6 +283,80 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     };
                 } else {
                     break;
+                }
+            }
+            TokenKind::Delimiter(Delimiter::Dot) => {
+                // `.` 字段访问，是左结合，优先级很高
+                let bp = 150;
+                if bp <= min_bp {
+                    break;
+                }
+                state.consume();
+                if let TokenKind::Identifier(name) = state.peek().kind.clone() {
+                    state.consume();
+                    left = Expr {
+                        kind: ExprKind::Field(Box::new(left), name),
+                        span: state.current_offset(),
+                    }
+                } else {
+                    return Err(ParseError::new(
+                        state.current_offset(),
+                        format!(
+                            "expected field name after '.', found {}",
+                            state.peek().kind.describe()
+                        ),
+                    ));
+                }
+            }
+            TokenKind::Delimiter(Delimiter::LBracket) => {
+                // 数组索引 var[expr]
+                let bp = 150;
+                if bp <= min_bp {
+                    break;
+                }
+                state.consume();
+                let expr = pratt_parser(state, 0)?;
+                if state.check(&TokenKind::Delimiter(Delimiter::RBracket)) {
+                    state.consume();
+                } else {
+                    return Err(ParseError::new(state.current_offset(), "expected ']'"));
+                }
+
+                left = Expr {
+                    kind: ExprKind::Index(Box::new(left), Box::new(expr)),
+                    span: state.current_offset(),
+                }
+            }
+            TokenKind::Delimiter(Delimiter::LParen) => {
+                // 函数调用func(a,b,c)
+                let bp = 150;
+                if bp <= min_bp {
+                    break;
+                }
+                state.consume();
+                let mut argvs: Vec<Expr> = Vec::new();
+                loop {
+                    if state.check(&TokenKind::Delimiter(Delimiter::RParen)) {
+                        state.consume();
+                        break;
+                    } // 参数列表可以为空
+                    let expr = pratt_parser(state, 0)?;
+                    argvs.push(expr);
+                    if state.check(&TokenKind::Delimiter(Delimiter::RParen)) {
+                        state.consume();
+                        break;
+                    } else if state.check(&TokenKind::Delimiter(Delimiter::Comma)) {
+                        state.consume();
+                    } else {
+                        return Err(ParseError::new(
+                            state.current_offset(),
+                            "expected ',' or ')'",
+                        ));
+                    }
+                }
+                left = Expr {
+                    kind: ExprKind::Call(Box::new(left), argvs),
+                    span: state.current_offset(),
                 }
             }
             _ => break,
@@ -259,6 +438,25 @@ mod tests {
         }
     }
 
+    fn array(elements: Vec<Expr>) -> Expr {
+        Expr {
+            kind: ExprKind::Array(elements),
+            span: 0,
+        }
+    }
+
+    fn object(entries: Vec<(&str, Expr)>) -> Expr {
+        Expr {
+            kind: ExprKind::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.to_string(), value))
+                    .collect(),
+            ),
+            span: 0,
+        }
+    }
+
     #[test]
     fn parses_operator_precedence() {
         assert_parse(
@@ -296,6 +494,42 @@ mod tests {
     #[test]
     fn parses_variable_reference() {
         assert_parse("foo", var("foo"));
+    }
+
+    #[test]
+    fn parses_empty_array_literal() {
+        assert_parse("[]", array(vec![]));
+    }
+
+    #[test]
+    fn parses_object_literal_with_identifier_keys() {
+        assert_parse(
+            "{name: 1, age: 2}",
+            object(vec![("name", lit_int(1)), ("age", lit_int(2))]),
+        );
+    }
+
+    #[test]
+    fn parses_field_index_and_call_chain() {
+        assert_parse(
+            "foo.bar[0](x)",
+            Expr {
+                kind: ExprKind::Call(
+                    Box::new(Expr {
+                        kind: ExprKind::Index(
+                            Box::new(Expr {
+                                kind: ExprKind::Field(Box::new(var("foo")), "bar".into()),
+                                span: 0,
+                            }),
+                            Box::new(lit_int(0)),
+                        ),
+                        span: 0,
+                    }),
+                    vec![var("x")],
+                ),
+                span: 0,
+            },
+        );
     }
 
     // ── 前缀运算符 ──────────────────────────────────────

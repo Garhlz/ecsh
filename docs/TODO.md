@@ -7,9 +7,9 @@
 一切语言特性的设计遵循一个原则：**看代码的人一眼就知道发生了什么。**
 
 - 声明变量用 `let`，而不是裸赋值（避免"x=1 是命令还是赋值？"的歧义）
-- 所有操作数据的函数是**全局内置函数**（`push(arr, val)`、`run(cmd)`、`json(obj)`），不加在数据结构上作为方法
+- 所有操作数据的函数是**全局内置函数**（`push(arr, val)`、`run(cmd)`、`to_json(obj)`），不加在数据结构上作为方法
 - Array 和 Object 分离，不混淆（不搞 Lua table 那种"同一结构同时是数组和字典"）
-- 数据结构操作分两层：结构访问用短语法标记（`arr[0]` / `obj.name`），容器操作用全局内置函数（`push(arr, val)` / `json(obj)`）
+- 数据结构操作分两层：结构访问用短语法标记（`arr[0]` / `obj.name`），容器操作用全局内置函数（`push(arr, val)` / `to_json(obj)`）
 - 四种嵌入语法各用不同定界符：`$VAR` / `${VAR}` / `$(cmd)` / `$[expr]`，互不混用
 - 脚本解析和 shell 命令解析由**关键字前缀**切换，不依赖隐式类型推断
 
@@ -200,7 +200,7 @@ enum Value {
 不采用 Lua 的 unified Table，而是**显式分离**两种容器。理由：
 - 类型错误信息更友好（"expected Array, got Object"）
 - `len()` 语义天然正确（Array 就是连续存储）
-- `json()` 序列化不需要猜类型
+- `to_json()` 序列化不需要猜类型
 - 符合整体"显式优于隐式"的设计风格
 
 | 类型 | 字面量 | 内部存储 | 用途 |
@@ -212,7 +212,7 @@ enum Value {
 
 ### Array 操作：全局内置函数
 
-Array 是纯粹的 `Vec<Value>`，不绑任何方法。所有操作通过**全局内置函数**完成，与 `run()`、`json()` 风格一致：
+Array 是纯粹的 `Vec<Value>`，不绑任何方法。所有操作通过**全局内置函数**完成，与 `run()`、`to_json()` 风格一致：
 
 ```sh
 push(arr, val)       # 末尾追加
@@ -396,18 +396,18 @@ let r = run("grep", "x", "no_such_file")
 | 环境变量读取 | `${VAR}` | **仅** `std::env::var`，不查脚本作用域 |
 | 表达式嵌入 | `$[expr]` | 脚本表达式求值；仅标量值可隐式转字符串，`Array/Object` 运行时报错 |
 | 命令替换 | `$(cmd)` | 执行 shell 命令，输出替换到原位置 |
-| 显式 JSON 转换 | `$[json(expr)]` | 将 `Array/Object` 显式序列化为 JSON 字符串后嵌入单个参数 |
+| 显式 JSON 转换 | `$[to_json(expr)]` | 将 `Array/Object` 显式序列化为 JSON 字符串后嵌入单个参数 |
 | 参数展开（显式） | `$[...arr]` | 将数组显式拆散为多个独立的 argv 参数（降维） |
 
-`$[arr]`、`$[json(arr)]` 和 `$[...arr]` 的区别：
+`$[arr]`、`$[to_json(arr)]` 和 `$[...arr]` 的区别：
 ```sh
 let a = [1, 2, 3]
 echo $[a]       # → RuntimeError（Array 不能隐式字符串化）
-echo $[json(a)] # → echo "[1,2,3]"（一个 JSON 字符串参数）
+echo $[to_json(a)] # → echo "[1,2,3]"（一个 JSON 字符串参数）
 echo $[...a]    # → echo 1 2 3（三个独立参数）
 ```
 
-这条规则体现“显式优于隐式”：`$[expr]` 适合标量值（`String/Int/Float/Bool/Nil`）嵌入；复合值必须显式说明你想要的是 **JSON 字符串**（`json(obj)`）还是 **argv 展开**（`$[...arr]`）。若后续需要其他文本化策略，再单独加内置函数（如 `join(arr, ",")`），而不是让 `Array/Object` 自动变字符串。
+这条规则体现“显式优于隐式”：`$[expr]` 适合标量值（`String/Int/Float/Bool/Nil`）嵌入；复合值必须显式说明你想要的是 **JSON 字符串**（`to_json(obj)`）还是 **argv 展开**（`$[...arr]`）。若后续需要其他文本化策略，再单独加内置函数（如 `join(arr, ",")`），而不是让 `Array/Object` 自动变字符串。
 
 ### Shell → Script（状态捕获）
 
@@ -432,11 +432,11 @@ if result.code != 0 || result.signal != 0 {
 
 ```sh
 let data = {name: "elaine", age: 25}
-echo $[json(data)] > /tmp/data.json
-echo $[json(data)] | jq .name
+echo $[to_json(data)] > /tmp/data.json
+echo $[to_json(data)] | jq .name
 ```
 
-`json(table)` 内置函数将 Object/Array 序列化为 JSON 字符串。若要把脚本表达式结果送入 shell 的重定向或管道，先用 `$[...]` 把它嵌入为 shell 参数；`Array/Object` 本身不能直接通过 `$[expr]` 隐式字符串化，必须显式写成 `json(...)`（或未来其他专用转换函数）。`|` 管道仅在 shell 命令行模式下可用，脚本表达式内不要混用。
+`to_json(table)` 内置函数将 Object/Array 序列化为 JSON 字符串。若要把脚本表达式结果送入 shell 的重定向或管道，先用 `$[...]` 把它嵌入为 shell 参数；`Array/Object` 本身不能直接通过 `$[expr]` 隐式字符串化，必须显式写成 `to_json(...)`（或未来其他专用转换函数）。`|` 管道仅在 shell 命令行模式下可用，脚本表达式内不要混用。
 
 ---
 
@@ -559,11 +559,11 @@ echo $[json(data)] | jq .name
 **测试重点**
 - [ ] Object/Array 字面量解析
 - [ ] 字段/索引读写
-- [ ] `values(obj)` / `keys(obj)` / `json(obj)`
+- [ ] `values(obj)` / `keys(obj)` / `to_json(obj)`
 - [ ] 错误索引、类型不匹配
 
 **完成标准**
-- [ ] `obj.name`、`arr[0]`、`json(data)` 都能在脚本 evaluator 中工作
+- [ ] `obj.name`、`arr[0]`、`to_json(data)` 都能在脚本 evaluator 中工作
 
 ### 阶段 4：控制流
 
@@ -649,7 +649,7 @@ echo $[json(data)] | jq .name
 - [ ] `$VAR`：执行时查脚本作用域，失败再 fallback env
 - [ ] `${VAR}`：执行时只查 env
 - [ ] `$[expr]`：执行时调用脚本 evaluator；仅标量值允许隐式字符串化
-- [ ] `$[expr]` 遇到 `Array/Object` 时抛 `RuntimeError`，提示使用 `json(expr)` 或 `$[...arr]`
+- [ ] `$[expr]` 遇到 `Array/Object` 时抛 `RuntimeError`，提示使用 `to_json(expr)` 或 `$[...arr]`
 - [ ] `$[...arr]`：执行时展开成多个 argv
 - [ ] `$(cmd)`：执行时 fork 子 shell，捕获 stdout
 
@@ -762,7 +762,7 @@ echo $[json(data)] | jq .name
 | `${VAR}` | **仅** `std::env::var`（不查脚本作用域） | 字符串，单参数 | `echo ${HOME}/work` |
 | `$(cmd)` | 执行 shell 命令 | 捕捉 stdout，单参数 | `echo $(date)` |
 | `$[expr]` | 脚本表达式求值 | 标量值转字符串；`Array/Object` 报错 | `echo $[x + 1]` |
-| `$[json(expr)]` | 脚本表达式求值并序列化为 JSON | JSON 字符串，单参数 | `echo $[json(obj)]` |
+| `$[to_json(expr)]` | 脚本表达式求值并序列化为 JSON | JSON 字符串，单参数 | `echo $[to_json(obj)]` |
 | `$[...arr]` | 脚本表达式求值 + 展开 | 数组拆散为多个参数 | `echo $[...a]` |
 
 **优先级**: `$VAR` 先查脚本作用域，不存在才 fallback 到环境变量。`${VAR}` 只查环境变量——花括号是显式的"我要环境变量"的信号。若脚本声明了 `let HOME = "/x"`，`$HOME` 取脚本值 `/x`，`${HOME}` 仍取环境变量值。
@@ -809,7 +809,7 @@ let calc = "result: $[1 + 2]"    # → "result: 3"
 | 长度 | `len(arr)` | — |
 | 插入 | `insert(arr, i, val)` | — |
 | 删除 | `remove(arr, i)` | — |
-| 序列化 | `json(arr)` | `json(obj)` |
+| 序列化 | `to_json(arr)` | `to_json(obj)` |
 
 ### 五、`run()` 函数
 
