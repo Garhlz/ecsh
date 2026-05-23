@@ -51,7 +51,7 @@ arr[0] = val    → 标识符 + [ expr ] + =  → 产出 IndexAssign AST
 ls -la          → 关键字未命中 → shell 命令
 ```
 
-**MVP 只支持普通赋值 `=`，不支持 `+=` 这类复合赋值。** `x += 1` 并不增加表达能力，只是 `x = x + 1` 的语法糖；等基础语义稳定后，如果确实需要，再成套加入 `+= -= *= /= %=`。
+**MVP 现在已经支持普通赋值 `=` 与复合赋值 `+= -= *= /= %=`。** 复合赋值仍然只是语法糖，但在实现上保留为独立语句节点，这样像 `arr[next_idx()] += 2` 这类左值不会被重复求值。
 
 **Parser 不做符号表查询。** 顶层和函数体内部的 `x = 1` / `greet()` 都只做语法判断，产出 `Assign` / `Call` / `ExprStmt` 等 AST 节点。"变量是否已声明"、"标识符是不是函数"这些检查延后到 evaluator 运行阶段。好处：前向引用（`func a() { b() }` 定义在 `func b()` 之前）不产生 parse-time 错误，仅运行时报"b is not callable"。
 
@@ -508,7 +508,7 @@ echo $[to_json(data)] | jq .name
 - [x] 表达式语句 `foo + bar;`
 
 **本阶段明确不做**
-- [x] 复合赋值（如 `+=` / `-=`）仍然暂不支持
+- [x] 复合赋值（如 `+=` / `-=`）在当时阶段范围内暂不支持；已于阶段 5.5 落地
 
 **语义要求（已对齐）**
 - [x] parser 不查符号表，只产出 AST
@@ -606,103 +606,173 @@ echo $[to_json(data)] | jq .name
 **完成标准**
 - [x] 可以用纯脚本实现计数循环、分支和遍历示例
 
-### 阶段 5：函数与闭包（进行中）
+### 阶段 5：函数与闭包（已完成）
 
 **目标**：补上脚本的抽象能力，并为对象函数字段、返回函数值和状态闭包做好铺垫。
-**当前状态**：已完成**无闭包的第一步**：命名函数声明、普通函数调用、`return`、以及“函数只继承 global/root，不继承调用者局部变量”的过渡语义已经落地；闭包捕获和函数字面量尚未开始。
+**当前状态**：已完成。命名函数、匿名函数、`return`、强闭包捕获、对象字段中的函数值调用都已经落地；当前保留的已知边界是“闭包捕获只自动传一层”，多跳透传仍是后续增强项。
 
 **建议新增/扩展**
 - [x] `Value::Function(Rc<Function>)`
 - [x] `Stmt::FuncDeclare`
 - [x] `Stmt::Return`
-- [ ] `Expr::FuncLiteral`（用于 `obj.inc = func() { ... }`）
+- [x] `Expr::FuncLiteral`（lambda / func literal）
 - [x] `ExecFlow::Return(...)`
-- [ ] 将环境中的绑定从 `HashMap<String, Value>` 升级为 `HashMap<String, Slot>`
+- [x] 将环境绑定升级为 `HashMap<String, Binding>`，其中 `Binding = Direct(Value) | Shared(Slot)`
 
 **本阶段语法**
 - [x] `func name(args) { ... }`
 - [x] `return expr;`
 - [x] `return;`
-- [ ] `func(args) { ... }` 作为表达式
+- [x] `(args) => expr` / `(args) => { ... }` 作为表达式
 - [x] 普通函数调用 `f(x, y)`
-- [ ] 语法糖 `obj.inc()` 仍然只是 `Call(FieldAccess(obj, "inc"), [])`
+- [x] `obj.inc()` 仍然只是 `Call(FieldAccess(obj, "inc"), [])`
 
-**当前过渡语义（无闭包版）**
+**当前语义（已落地）**
 
 - [x] 调用函数时新建 call frame
 - [x] call frame 中放参数、局部变量和函数自己的名字
-- [x] 当前查找顺序先看 call frame，再看 global/root，最后 builtin fallback
-- [x] 当前**不**透传调用者局部变量，先避免动态作用域
-- [ ] 将来再从这个过渡模型升级到 captures + global/root
+- [x] 当前查找顺序为 call frame → captures → global/root → builtin fallback
+- [x] 当前**不**透传调用者局部变量，避免动态作用域
+- [x] 命名函数递归依靠 call frame 重新绑定函数名
+- [ ] 多跳闭包捕获自动透传仍未完成（`return () => () => x` 仍需中间层显式引用）
 
-**推荐运行时模型：强闭包，但不捕获整个环境**
+**已采用运行时模型：强闭包，但不捕获整个环境**
 
 不要让函数对象直接强引用“定义时整块 `Environment`”。  
 更推荐脚本语言常见的 **slot / cell / upvalue** 路线：
 
-- [ ] 定义 `type Slot = Rc<RefCell<Value>>`
-- [ ] `Environment` 内部改存 `HashMap<String, Slot>`
-- [ ] `let` 时新建 slot
-- [ ] `get(name)` 先找到 slot，再读出当前值
-- [ ] `set(name, value)` 找到 slot 后原地写回
+- [x] 定义 `type Slot = Rc<RefCell<Value>>`
+- [x] `Environment` 内部改存 `HashMap<String, Binding>`
+- [x] `let` 默认写入 `Binding::Direct(Value)`
+- [x] `get(name)` 能同时读取 `Direct` / `Shared`
+- [x] `set(name, value)` 能原地写回共享 slot
 
 **闭包捕获策略**
 
-- [ ] 函数对象不捕获整块环境，而是只捕获**自由变量对应的 slot**
-- [ ] `Function` 内部保存 `captures: HashMap<String, Slot>`
-- [ ] 这样闭包共享的是“变量绑定”，不是定义时的值快照
-- [ ] 因此闭包可以正确支持：
-  - [ ] 读取外层变量的最新值
-  - [ ] 修改外层变量绑定
-  - [ ] 多个闭包共享同一个被捕获局部变量
+- [x] 函数对象不捕获整块环境，而是只捕获**自由变量对应的 slot**
+- [x] `Function` 内部保存 `captures: HashMap<String, Slot>`
+- [x] 闭包共享的是“变量绑定”，不是定义时的值快照
+- [x] 因此闭包可以正确支持：
+  - [x] 读取外层变量的最新值
+  - [x] 修改外层变量绑定
+  - [x] 多个闭包共享同一个被捕获局部变量
 
 **调用时环境组织**
 
 调用时仍然新建 call frame，但查找顺序不再是“整条旧环境链透传”，而是：
 
-1. [ ] 当前调用帧：参数、局部变量、递归函数名
-2. [ ] captures：定义时捕获的自由变量 slot
-3. [ ] global/root：全局变量
-4. [ ] builtin fallback
+1. [x] 当前调用帧：参数、局部变量、递归函数名
+2. [x] captures：定义时捕获的自由变量 slot
+3. [x] global/root：全局变量
+4. [x] builtin fallback
 
 也就是说：
 
-- [ ] 局部变量和参数始终优先于 capture
-- [ ] capture 优先于全局
-- [ ] 全局变量不必全部捕获，可以保留单独的 global/root 层
+- [x] 局部变量和参数始终优先于 capture
+- [x] capture 优先于全局
+- [x] 全局变量不必全部捕获，可以保留单独的 global/root 层
 
 **递归支持**
 
-- [ ] 递归函数名不要作为普通自由变量捕获
-- [ ] 调用函数时，把函数自己的名字重新绑定到 call frame
-- [ ] 这样函数体里的 `fact(...)` 先在当前调用帧命中自己
-- [ ] 递归查找能力与闭包捕获职责分离
+- [x] 递归函数名不要作为普通自由变量捕获
+- [x] 调用函数时，把函数自己的名字重新绑定到 call frame
+- [x] 这样函数体里的 `fact(...)` 先在当前调用帧命中自己
+- [x] 递归查找能力与闭包捕获职责分离
 
 **为什么采用这条路线**
 
-- [ ] 更接近 Python / Lua 这类脚本语言的强闭包语义
-- [ ] 捕获的是 slot，不是值快照；`make_counter()` 这类例子才能成立
-- [ ] 避免最经典的 `Env -> Function -> Env` 强引用环
-- [ ] 不需要用 `Weak` 去牺牲逃逸闭包的可靠性
+- [x] 更接近 Python / Lua 这类脚本语言的强闭包语义
+- [x] 捕获的是 slot，不是值快照；`make_counter()` 这类例子才能成立
+- [x] 避免最经典的“整块环境被函数对象直接强持有”
+- [x] 不需要用 `Weak` 去牺牲逃逸闭包的可靠性
 
 **测试重点**
 - [x] 普通函数调用与参数绑定
 - [x] `return` 的非局部退出
 - [x] `return;` 返回 `nil`
 - [x] 顶层 `return` 报错
-- [x] 当前函数只读取 global/root，不读取调用者局部变量
-- [ ] 闭包读取外层变量
-- [ ] 闭包修改外层变量
-- [ ] `make_counter()` 这种共享状态闭包
-- [ ] 多个闭包共享同一个 captured slot
-- [ ] 递归（例如 `fact`）
-- [ ] 对象字段里的函数值调用
+- [x] 当前函数只读取调用时 `call frame -> captures -> global/root`，不读取调用者局部变量
+- [x] 闭包读取外层变量
+- [x] 闭包修改外层变量
+- [x] `make_counter()` 这种共享状态闭包
+- [x] 多个闭包共享同一个 captured slot
+- [x] 递归（具名函数递归 / 对象中的匿名递归调用）
+- [x] 对象字段里的函数值调用
 
 **完成标准**
 - [x] `func add(a, b) { return a + b; }`
-- [ ] `func make_counter() { let x = 0; return func() { x = x + 1; return x; }; }`
-- [ ] `let c = make_counter(); c(); c();` 能看到共享状态递增
-- [ ] `obj.inc = func() { ... }; obj.inc()` 语法糖可运行
+- [x] `func make_counter() { let x = 0; return () => { x = x + 1; return x; }; }`
+- [x] `let c = make_counter(); c(); c();` 能看到共享状态递增
+- [x] `obj.inc = () => { ... }; obj.inc()` 可运行
+
+### 阶段 5.5：语言易用性打磨（进行中）
+
+**目标**：在进入 shell 集成之前，先补一批“低风险、高体感收益”的语言特性，让 ecscript 从“语义已经成立”进一步提升到“写起来顺手、报错可读”。
+
+**这一阶段的原则**
+
+- 优先做 **lexer / parser 局部改动就能完成** 的特性
+- 优先做 **日常脚本高频出现** 的特性
+- 避免在这一阶段提前把语言推向“全面 block value / 模块系统 / shell bridge”这种跨模块大改
+
+**P0：应该优先做**
+
+- [x] 注释：`// ...` 与 `/* ... */`
+- [x] 诊断从 byte offset 升级到 `line:column`，并能展示源代码行
+
+**为什么优先**
+
+- [x] 注释几乎是最低成本、最高体感收益的缺口；没有注释，脚本一变长可维护性就明显下降
+- [x] 当前错误对象虽然内部仍保存 offset，但解释器层已经能稳定格式化出 `line:column + 源码行 + ^`
+
+**P1：高 ROI，但比 P0 稍晚**
+
+- [x] 原始字符串：`r"..."`
+- [x] 复合赋值：`+= -= *= /= %=`
+- [ ] 函数 / lambda 的尾表达式返回值
+
+**关于尾表达式返回值的建议边界**
+
+- [ ] 若要做，建议**只先做函数 / lambda 体的隐式尾返回**
+- [ ] 暂时**不要**把普通 block 全部升级为有值表达式
+- [ ] 例如先支持：
+  - [ ] `func add(a, b) { a + b }`
+  - [ ] `let inc = (x) => { x + 1 }`
+- [ ] 这样能提升函数书写体验，但不会过早引入“block value”整套语义
+
+**P2：值得做，但建议继续后放**
+
+- [ ] 双引号字符串插值（如 `"hello ${name}"` 或等价设计）
+- [ ] 更完整的字符串字面量族（多行字符串、更丰富的 raw string 定界等）
+
+**为什么暂缓**
+
+- [ ] 字符串插值会和 shell 侧 `${VAR}` / `$[expr]` 设计形成语义邻接，最好在 shell 集成方向更清晰后再定
+- [ ] 这类特性提升体验明显，但实现和语法决策都比注释 / 原始字符串 / 复合赋值更容易牵一发动全身
+
+**明确不放在 5.5 的内容**
+
+- [ ] `run()` builtin：它更接近 shell bridge，应归到阶段 6/7
+- [ ] 模块系统：属于工程化扩展，不是当前 MVP 的阻塞项
+- [ ] `try/catch`：当前语言仍然适合保持“运行时错误终止执行”的简单模型
+- [ ] 模式匹配 / class / 原型链：都不是当前投入产出比最高的方向
+
+**我建议的实际推进顺序**
+
+1. [x] 注释
+2. [x] 行列号诊断
+3. [x] 原始字符串 `r"..."`
+4. [x] 复合赋值
+5. [ ] 函数 / lambda 尾表达式返回值
+
+**完成标准**
+
+- [x] 可以在脚本里自然写注释说明算法和数据
+- [x] parse/runtime error 至少能稳定报出 `line:column`（解释器层格式化 API 已提供；入口层默认接线仍可继续补）
+- [x] 相邻表达式起始 token（如 `42 true` / `42"hi"`）会给出更明确的 parse error，而不是只停在模糊的分号报错
+- [x] 常见路径 / 正则可以用原始字符串减少转义噪音
+- [x] 计数器和累加逻辑不再大量重复 `x = x + 1`
+- [ ] 简短函数和 lambda 不再被 `return` / 分号样板代码淹没
 
 ### 阶段 6：ShellWord 与四种嵌入语法
 
@@ -854,7 +924,7 @@ echo $[to_json(data)] | jq .name
 | `42` | Int | `let n = 42` |
 | `3.14` | Float | `let pi = 3.14` |
 | `"hello"` | String | `let s = "hello"` |
-| `'raw'` | String（字面量，不展开） | `let s = 'no $expansion'` |
+| `r"raw"` | String（原始字符串，不处理转义） | `let s = r"c:\tmp\$HOME"` |
 | `nil` | Nil | `let x = nil` |
 | `[1, 2, 3]` | Array | `let a = [1, 2]` |
 | `{k: "v"}` | Object | `let o = {name: "hi"}` |

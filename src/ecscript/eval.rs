@@ -1,7 +1,10 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use crate::ecscript::{
-    ast::{AssignTarget, Expr, ExprKind, InfixOper, Literal, PrefixOper, RangeExpr, StmtKind},
+    ast::{
+        AssignTarget, CompoundAssignOp, Expr, ExprKind, InfixOper, Literal, PrefixOper, RangeExpr,
+        StmtKind,
+    },
     builtin::run_builtin,
     env::Environment,
     error::{EvalResult, RuntimeError, RuntimeErrorKind},
@@ -67,6 +70,13 @@ pub fn eval_stmt(
         StmtKind::Assign { target, expr } => {
             let value = eval_expr(expr, env)?;
             assign_target(target, value, env, span)?
+        }
+        StmtKind::CompoundAssign { target, op, expr } => {
+            let target = resolve_assign_target(target, env, span)?;
+            let left = target.load(span)?;
+            let right = eval_expr(expr, env)?;
+            let value = eval_compound_assign(*op, left, right, span)?;
+            target.store(value, span)?;
         }
         StmtKind::ExprStmt { expr } => {
             eval_expr(expr, env)?;
@@ -248,18 +258,92 @@ fn expect_int(value: Value, span: usize, context: &str) -> EvalResult<i64> {
     }
 }
 
-/// 执行赋值操作。
-///
-/// 将 eval_expr 逻辑留在 eval 层，env 只负责变量名的作用域查找，
-/// 避免环境层反向依赖求值层。
-fn assign_target(
+enum ResolvedAssignTarget<'a> {
+    Name {
+        name: String,
+        env: &'a Environment<'a>,
+    },
+    Field {
+        object: Rc<RefCell<HashMap<String, Value>>>,
+        field: String,
+    },
+    ArrayIndex {
+        array: Rc<RefCell<Vec<Value>>>,
+        index: usize,
+    },
+    ObjectIndex {
+        object: Rc<RefCell<HashMap<String, Value>>>,
+        key: String,
+    },
+}
+
+impl<'a> ResolvedAssignTarget<'a> {
+    fn load(&self, span: usize) -> EvalResult<Value> {
+        match self {
+            ResolvedAssignTarget::Name { name, env } => env.get(name, span),
+            ResolvedAssignTarget::Field { object, field } => {
+                object.borrow().get(field).cloned().ok_or_else(|| {
+                    RuntimeError::new(
+                        span,
+                        RuntimeErrorKind::NonExistentField,
+                        format!("object has no field '{}'", field),
+                    )
+                })
+            }
+            ResolvedAssignTarget::ArrayIndex { array, index } => {
+                array.borrow().get(*index).cloned().ok_or_else(|| {
+                    RuntimeError::new(
+                        span,
+                        RuntimeErrorKind::IndexOutOfBounds,
+                        format!(
+                            "array index {} out of bounds for length {}",
+                            index,
+                            array.borrow().len()
+                        ),
+                    )
+                })
+            }
+            ResolvedAssignTarget::ObjectIndex { object, key } => {
+                object.borrow().get(key).cloned().ok_or_else(|| {
+                    RuntimeError::new(
+                        span,
+                        RuntimeErrorKind::NonExistentField,
+                        format!("object has no field '{}'", key),
+                    )
+                })
+            }
+        }
+    }
+
+    fn store(&self, value: Value, span: usize) -> EvalResult<()> {
+        match self {
+            ResolvedAssignTarget::Name { name, env } => env.set(name, value, span),
+            ResolvedAssignTarget::Field { object, field } => {
+                object.borrow_mut().insert(field.clone(), value);
+                Ok(())
+            }
+            ResolvedAssignTarget::ArrayIndex { array, index } => {
+                array.borrow_mut()[*index] = value;
+                Ok(())
+            }
+            ResolvedAssignTarget::ObjectIndex { object, key } => {
+                object.borrow_mut().insert(key.clone(), value);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn resolve_assign_target<'a>(
     target: &AssignTarget,
-    value: Value,
-    env: &Environment<'_>,
+    env: &'a Environment<'a>,
     span: usize,
-) -> EvalResult<()> {
+) -> EvalResult<ResolvedAssignTarget<'a>> {
     match target {
-        AssignTarget::Name(name) => env.set(name, value, span),
+        AssignTarget::Name(name) => Ok(ResolvedAssignTarget::Name {
+            name: name.clone(),
+            env,
+        }),
         AssignTarget::Field { object, field } => {
             let base_val = eval_expr(object, env)?;
             let Value::Object(obj) = base_val else {
@@ -273,8 +357,10 @@ fn assign_target(
                     ),
                 ));
             };
-            obj.borrow_mut().insert(field.clone(), value);
-            Ok(())
+            Ok(ResolvedAssignTarget::Field {
+                object: obj,
+                field: field.clone(),
+            })
         }
         AssignTarget::Index { object, index } => {
             let base_val = eval_expr(object, env)?;
@@ -288,13 +374,15 @@ fn assign_target(
                         false,
                         span,
                     )?;
-                    arr.borrow_mut()[idx] = value;
-                    Ok(())
+                    Ok(ResolvedAssignTarget::ArrayIndex {
+                        array: arr,
+                        index: idx,
+                    })
                 }
-                (Value::Object(obj), Value::String(k)) => {
-                    obj.borrow_mut().insert(k, value);
-                    Ok(())
-                }
+                (Value::Object(obj), Value::String(k)) => Ok(ResolvedAssignTarget::ObjectIndex {
+                    object: obj,
+                    key: k,
+                }),
                 (Value::Array(_), other) => Err(RuntimeError::new(
                     span,
                     RuntimeErrorKind::TypeMismatch,
@@ -322,6 +410,35 @@ fn assign_target(
                 )),
             }
         }
+    }
+}
+
+/// 执行赋值操作。
+///
+/// 将 eval_expr 逻辑留在 eval 层，env 只负责变量名的作用域查找，
+/// 避免环境层反向依赖求值层。
+fn assign_target(
+    target: &AssignTarget,
+    value: Value,
+    env: &Environment<'_>,
+    span: usize,
+) -> EvalResult<()> {
+    let target = resolve_assign_target(target, env, span)?;
+    target.store(value, span)
+}
+
+fn eval_compound_assign(
+    op: CompoundAssignOp,
+    left: Value,
+    right: Value,
+    span: usize,
+) -> EvalResult<Value> {
+    match op {
+        CompoundAssignOp::Add => eval_add(left, right, span),
+        CompoundAssignOp::Sub => eval_sub(left, right, span),
+        CompoundAssignOp::Mul => eval_mul(left, right, span),
+        CompoundAssignOp::Div => eval_div(left, right, span),
+        CompoundAssignOp::Mod => eval_mod(left, right, span),
     }
 }
 
@@ -1445,6 +1562,27 @@ mod stmt_tests {
         assert_eq!(err.kind, RuntimeErrorKind::UndefinedVariable);
     }
 
+    #[test]
+    fn eval_compound_assign_updates_variable() {
+        let env = Environment::new();
+        eval_script_src("let x = 10; x += 20;", &env).unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(30)));
+    }
+
+    #[test]
+    fn eval_compound_assign_uses_string_concatenation_for_plus_eq() {
+        let env = Environment::new();
+        eval_script_src("let s = \"ec\"; s += \"script\";", &env).unwrap();
+        assert_eq!(env.get("s", 0), Ok(Value::String("ecscript".into())));
+    }
+
+    #[test]
+    fn eval_compound_assign_requires_existing_variable() {
+        let env = Environment::new();
+        let err = eval_script_src("x += 1;", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::UndefinedVariable);
+    }
+
     // ── 表达式语句 ────────────────────────────────────────
 
     #[test]
@@ -1567,6 +1705,44 @@ mod stmt_tests {
         let env = Environment::new();
         let err = eval_script_src("let a = [1]; a[5] = 2;", &env).unwrap_err();
         assert_eq!(err.kind, RuntimeErrorKind::IndexOutOfBounds);
+    }
+
+    #[test]
+    fn eval_field_compound_assign_reads_then_writes_object_field() {
+        let env = Environment::new();
+        eval_script_src("let o = {count: 1}; o.count += 2;", &env).unwrap();
+        let Value::Object(obj) = env.get("o", 0).unwrap() else {
+            panic!("expected object");
+        };
+        assert_eq!(obj.borrow().get("count").cloned(), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_index_compound_assign_reads_then_writes_array_element() {
+        let env = Environment::new();
+        eval_script_src("let a = [1, 2, 3]; a[1] *= 5;", &env).unwrap();
+        let Value::Array(arr) = env.get("a", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            *arr.borrow(),
+            vec![Value::Int(1), Value::Int(10), Value::Int(3)]
+        );
+    }
+
+    #[test]
+    fn eval_compound_assign_resolves_target_only_once() {
+        let env = Environment::new();
+        eval_script_src(
+            "let calls = 0; func next_idx() { calls += 1; return 0; } let a = [1]; a[next_idx()] += 2;",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("calls", 0), Ok(Value::Int(1)));
+        let Value::Array(arr) = env.get("a", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(*arr.borrow(), vec![Value::Int(3)]);
     }
 
     // ── 内置函数 via script ───────────────────────────────

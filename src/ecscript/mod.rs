@@ -1,7 +1,7 @@
 mod ast;
 mod builtin;
 mod env;
-mod error;
+pub mod error;
 mod eval;
 mod func;
 mod lexer;

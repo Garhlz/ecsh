@@ -9,6 +9,11 @@ pub enum StmtKind {
         target: AssignTarget,
         expr: Expr,
     },
+    CompoundAssign {
+        target: AssignTarget,
+        op: CompoundAssignOp,
+        expr: Expr,
+    },
     ExprStmt {
         expr: Expr,
     }, // 单个表达式构成的语句
@@ -62,6 +67,15 @@ impl PartialEq for Stmt {
     fn eq(&self, other: &Self) -> bool {
         self.kind == other.kind
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompoundAssignOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
 }
 
 #[derive(Debug, Clone, PartialEq)]

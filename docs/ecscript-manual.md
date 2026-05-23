@@ -1,7 +1,7 @@
-# ecscript 当前实现手册（stage 5 完成）
+# ecscript 当前实现手册（stage 5.5 进行中）
 
 本文描述 ecscript **当前已经实现** 的语法与语义。  
-这一版已打通完整的函数系统：**命名函数、匿名函数、闭包捕获和 `return`**。
+这一版已经打通完整的函数系统，并补上了一批 stage 5.5 易用性特性：**注释、复合赋值、原始字符串，以及带源码行的错误格式化 API**。
 
 ---
 
@@ -11,7 +11,8 @@
 
 - expression lexer / Pratt parser / evaluator
 - script / stmt parser
-- `let`、赋值、表达式语句、block
+- `let`、赋值、复合赋值、表达式语句、block
+- 注释：`// ...` 与 `/* ... */`
 - 词法作用域与父环境查找（Slot/Binding 模型）
 - 数组 / 对象字面量
 - 字段访问、索引访问
@@ -25,15 +26,17 @@
 - `(args) => expr` / `(args) => { stmts }` — 匿名函数（lambda/func literal）
 - 普通函数调用：`f(x, y)`、`obj.method()`
 - `return expr;` / `return;`
+- 原始字符串：`r"..."`
 - **强闭包**：自由变量自动提升为 heap slot，闭包共享可变绑定
 - 基于字节偏移的 parse/runtime 错误定位
+- `ParseError::format_with_source(src)` / `RuntimeError::format_with_source(src)` 的源码定位格式化
 
 当前未实现：
 
-- 注释
 - shell 集成后的正式脚本入口
 - block value / 尾表达式返回值
 - 模块系统
+- 字符串插值 / 多行字符串等更完整的字符串系统
 
 ### 已知设计边界（非 bug）
 
@@ -43,13 +46,19 @@
 
 3. **自由变量 vs builtin 同名。** 如果 lambda 内部要调用 builtin `push`，而外层有同名的局部变量（如 `let push = ...`），则 builtin 可能被遮蔽。避免给闭包变量起 builtin 同名。
 
+4. **带源码行的错误展示目前还是显式 API。** 错误对象内部仍只保存 byte offset；如果调用方想拿到 `line:column + 源码行 + ^` 的格式，需要显式调用 `format_with_source(src)`。
+
 ---
 
 ## 2. 词法
 
-### 2.1 空白
+### 2.1 空白与注释
 
-空白字符被忽略，不产生 token。
+空白字符被忽略，不产生 token。  
+注释也在 lexer 阶段直接跳过，不产生 token：
+
+- `// ...`：单行注释，跳过直到换行
+- `/* ... */`：多行注释，跳过直到 `*/`
 
 ### 2.2 标识符
 
@@ -82,9 +91,32 @@
 
 不支持科学计数法、十六进制、八进制。
 
+数字字面量后面不能直接跟标识符字符；例如：
+
+- `123ab`
+- `1.23ms`
+- `.5foo`
+
+这些都会在 lexer 阶段直接报 `invalid numeric literal`，而不是拆成“数字 + 标识符”。
+
+如果数字后面跟着的是**另一个表达式起始 token**，例如：
+
+- `42 true`
+- `42"hi"`
+
+这类问题不会归到“非法数字后缀”，而会在 parser 阶段报更直接的错误，例如：
+
+- `expected operator or ';' after expression, found keyword 'true'`
+- `expected operator or ';' after expression, found string literal`
+
 ### 2.4 字符串
 
-仅支持双引号字符串 `"..."`。
+支持两种字符串：
+
+| 语法 | 含义 |
+|------|------|
+| `"..."` | 普通字符串，支持转义 |
+| `r"..."` | 原始字符串，不处理转义 |
 
 转义序列：
 
@@ -94,6 +126,16 @@
 | `\"` | `"` |
 | `\n` | 换行 |
 | `\t` | 制表 |
+
+原始字符串示例：
+
+```ecs
+let path = r"c:\tmp\ecs\test.txt";
+let pattern = r"\d+\.\d+";
+```
+
+`r"..."` 中的反斜杠按字面量保留，不会把 `\n` / `\t` 当成转义。  
+当前版本的 raw string 仍然以 `"` 结束，因此**不能直接包含双引号本身**。
 
 ### 2.5 运算符
 
@@ -107,7 +149,7 @@
 
 ### 2.6 分隔符
 
-`(` `)` `{` `}` `[` `]` `,` `.` `;` `:` `=` `..` `..=`
+`(` `)` `{` `}` `[` `]` `,` `.` `;` `:` `=` `+=` `-=` `*=` `/=` `%=` `..` `..=` `=>`
 
 其中：
 
@@ -139,7 +181,7 @@ stmt            = let_stmt
                 | return_stmt
 
 let_stmt        = "let" identifier "=" expr ";"
-assign_stmt     = assign_target "=" expr ";"
+assign_stmt     = assign_target ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr ";"
 expr_stmt       = expr ";"
 block           = "{" stmt* "}"
 
@@ -227,6 +269,7 @@ let no_args = () => 42;
 
 - `let x = 1;`
 - `x = 2;`
+- `x += 1;`
 - `1 + 2;`
 - `len(arr);`
 - `break;`
@@ -278,44 +321,33 @@ block 仍然是 statement block，不是 expression block。
 ### 6.1 语句节点
 
 ```rust
-pub enum Stmt {
-    Let { name: String, expr: Expr, span: usize },
-    Assign { target: AssignTarget, expr: Expr, span: usize },
-    ExprStmt { expr: Expr, span: usize },
-    Block { stmts: Vec<Stmt>, span: usize },
+pub enum StmtKind {
+    Let { name: String, expr: Expr },
+    Assign { target: AssignTarget, expr: Expr },
+    CompoundAssign { target: AssignTarget, op: CompoundAssignOp, expr: Expr },
+    ExprStmt { expr: Expr },
+    Block { stmts: Vec<Stmt> },
+    If { cond: Expr, then_body: Vec<Stmt>, else_body: Vec<Stmt> },
+    While { cond: Expr, body: Vec<Stmt> },
+    ForIn { var: String, iterable: Expr, body: Vec<Stmt> },
+    ForRange { var: String, range: RangeExpr, body: Vec<Stmt> },
+    FuncDeclare { name: String, params: Vec<String>, body: Vec<Stmt> },
+    Break,
+    Continue,
+    Return { value: Option<Expr> },
+}
 
-    If {
-        cond: Expr,
-        then_body: Vec<Stmt>,
-        else_body: Vec<Stmt>,
-        span: usize,
-    },
-    While {
-        cond: Expr,
-        body: Vec<Stmt>,
-        span: usize,
-    },
-    ForIn {
-        var: String,
-        iterable: Expr,
-        body: Vec<Stmt>,
-        span: usize,
-    },
-    ForRange {
-        var: String,
-        range: RangeExpr,
-        body: Vec<Stmt>,
-        span: usize,
-    },
-    FuncDeclare {
-        name: String,
-        params: Vec<String>,
-        body: Vec<Stmt>,
-        span: usize,
-    },
-    Break { span: usize },
-    Continue { span: usize },
-    Return { value: Option<Expr>, span: usize },
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub span: usize,
+}
+
+pub enum CompoundAssignOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
 }
 
 pub enum AssignTarget {
@@ -340,7 +372,7 @@ pub enum ExprKind {
     Field(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
     Range(RangeExpr),
-    FuncLiteral { params: Vec<String>, body: Vec<Stmt>, expr_body: Option<Expr> },
+    FuncLiteral { params: Vec<String>, body: Vec<Stmt> },
 }
 
 pub struct RangeExpr {
@@ -475,20 +507,23 @@ func f() { return x; }
 当前可调用值有两类：
 
 - builtin
-- 用户定义的命名函数
+- 用户定义函数值（命名函数声明或 lambda）
 
 当前用户函数能力范围：
 
 - 支持 `func add(a, b) { return a + b; }`
+- 支持 `let add = (a, b) => a + b;`
+- 支持 `let make_counter = () => { ... };`
 - 支持普通调用 `add(1, 2)`
+- 支持把函数值放进变量、对象字段，再通过调用表达式执行
+- 支持闭包捕获外层局部变量
 - 参数个数必须严格匹配
 - `return;` 等价于返回 `nil`
 
 当前仍未支持：
 
-- 闭包捕获
-- 匿名函数
-- `func(...) { ... }` 这种函数字面量
+- `func(...) { ... }` 这种关键字形式的函数字面量
+- 普通 block / 函数体的尾表达式隐式返回
 
 ### 9.3 容器访问
 
@@ -544,6 +579,14 @@ let x = expr;
 - 索引访问
 
 其他形式（如 `1 + 2 = 3`）会在 parse 阶段报错。
+
+同时支持复合赋值：
+
+- `x += 1`
+- `obj.count -= 1`
+- `arr[i] *= 2`
+
+当前实现不会把 `x += y` 直接粗暴降级成 `x = x + y`；对于字段/索引左值，会先解析一次目标，再完成读-改-写，避免 `arr[next_idx()] += 2` 这类情况把左值副作用执行两次。
 
 ### 10.3 `if / else if / else`
 
@@ -631,6 +674,8 @@ func add(a, b) {
 典型场景：
 
 - 非法字符、非法转义、未闭合字符串
+- 非法数字字面量后缀（如 `123ab`、`1.23ms`）
+- 相邻表达式之间缺少运算符或语句分隔（如 `42 true`、`42"hi"`）
 - 缺失 `)`、`]`、`}`
 - 缺失 `,`、`:`、`;`
 - `let` / `for` 后缺标识符
@@ -641,6 +686,7 @@ func add(a, b) {
 
 - `expected '{' after while, found integer literal`
 - `invalid assignment target; expected variable, field access, or index access`
+- `expected operator or ';' after expression, found string literal`
 - `unexpected '}' at top level`
 
 ### 11.2 RuntimeError
@@ -675,7 +721,7 @@ func add(a, b) {
 
 ---
 
-## 12. 偏移定位
+## 12. 偏移定位与源码格式化
 
 `ParseError.offset` 和 `RuntimeError.offset` 都是**字节偏移**。
 
@@ -689,6 +735,21 @@ func add(a, b) {
 | 普通语句 | 语句起始 token 的结束偏移 |
 | 顶层 `break` / `continue` | `break` / `continue` 关键字的结束偏移 |
 
+如果调用方同时持有源码字符串，可以额外调用：
+
+- `ParseError::format_with_source(src)`
+- `RuntimeError::format_with_source(src)`
+
+格式会变成：
+
+```text
+ecscript parse error at 3:17: expected ')'
+ 3 | let x = add(1, 2;
+   |                 ^
+```
+
+当前这是解释器层提供的格式化 API；是否默认这样打印，取决于更外层入口代码有没有接入它。
+
 ---
 
 ## 13. 当前阶段速记
@@ -699,10 +760,14 @@ func add(a, b) {
 - 已经支持 `for in` 遍历数组、对象 key 和区间
 - 已经支持 `break` / `continue`
 - 已经支持命名函数、匿名函数、闭包捕获和 `return`
+- 已经支持 `//` / `/* */` 注释
+- 已经支持原始字符串 `r"..."`
+- 已经支持复合赋值 `+= -= *= /= %=`
 - `for in obj` 当前遍历的是 **排序后的 key**
 - `for in array` 当前使用 **迭代快照**，循环体修改原数组不会影响本轮迭代序列
 - 当前函数调用链是 **local → captures → global/root**，不继承调用者局部变量
 - 闭包只捕获自由变量，不会复制整个外层环境
+- parse/runtime error 已经可以格式化成 `line:column + 源码行 + caret`
 
 ---
 
@@ -714,5 +779,5 @@ func add(a, b) {
 - block value / 尾表达式
 - 模块系统
 - shell 集成
-- 更完整的 span / diagnostics 系统
+- 把源码格式化错误默认接入解释器入口
 - 字节码 VM / 后端演化

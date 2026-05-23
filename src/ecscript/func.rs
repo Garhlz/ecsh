@@ -100,6 +100,21 @@ fn visit_stmt(stmt: &Stmt, stack: &mut Vec<HashSet<String>>, free_set: &mut Hash
             }
             visit_expr(expr, stack, free_set);
         }
+        StmtKind::CompoundAssign { target, expr, .. } => {
+            match target {
+                AssignTarget::Name(name) => {
+                    upvalue(name, stack, free_set);
+                }
+                AssignTarget::Index { object, index } => {
+                    visit_expr(object, stack, free_set);
+                    visit_expr(index, stack, free_set);
+                }
+                AssignTarget::Field { object, .. } => {
+                    visit_expr(object, stack, free_set);
+                }
+            }
+            visit_expr(expr, stack, free_set);
+        }
         StmtKind::ExprStmt { expr } => {
             visit_expr(expr, stack, free_set);
         }
