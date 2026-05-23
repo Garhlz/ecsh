@@ -1,8 +1,8 @@
 use crate::ecscript::error::ParseError;
 
-use crate::ecscript::ast::{Expr, ExprKind, Literal, RangeExpr};
+use crate::ecscript::ast::{Expr, ExprKind, Literal, RangeExpr, Stmt, StmtKind};
 use crate::ecscript::lexer::{Delimiter, Token, TokenKind};
-
+use crate::ecscript::parser::expect_block;
 pub struct TokenStream<'a> {
     tokens: &'a [Token],
     pos: usize,
@@ -35,6 +35,12 @@ impl<'a> TokenStream<'a> {
 
     pub fn current_offset(&self) -> usize {
         self.peek().end
+    }
+    pub fn save(&self) -> usize {
+        self.pos
+    }
+    pub fn load(&mut self, new_pos: usize) {
+        self.pos = new_pos;
     }
 }
 
@@ -139,16 +145,62 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
         }
 
         // `(` 用于改变运算优先级（这里是前缀位置，不会是函数调用）
+        // 匿名函数 (x, y) => x + y; 也需要使用此位置
         TokenKind::Delimiter(Delimiter::LParen) => {
+            let span = state.current_offset();
             state.consume();
-            left = pratt_parser(state, 0)?;
-            if state.check(&TokenKind::Delimiter(Delimiter::RParen)) {
-                state.consume();
+
+            // save & load
+            let pos = state.save();
+
+            let params = {
+                let mut try_parse_lambda = || -> Option<Vec<String>> {
+                    let mut params: Vec<String> = Vec::new();
+                    loop {
+                        if state.check(&TokenKind::Delimiter(Delimiter::RParen)) {
+                            state.consume();
+                            break;
+                        }
+
+                        let TokenKind::Identifier(name) = state.peek().kind.clone() else {
+                            return None;
+                        };
+                        state.consume();
+                        params.push(name);
+
+                        if state.check(&TokenKind::Delimiter(Delimiter::RParen)) {
+                            state.consume();
+                            break;
+                        } else if state.check(&TokenKind::Delimiter(Delimiter::Comma)) {
+                            state.consume();
+                        } else {
+                            return None;
+                        }
+                    }
+                    // 必须有=>箭头
+                    if !state.check(&TokenKind::Delimiter(Delimiter::FatArrow)) {
+                        return None;
+                    };
+                    state.consume();
+                    Some(params)
+                };
+                try_parse_lambda()
+            };
+
+            if let Some(params) = params {
+                return parse_lambda(state, params, span);
             } else {
-                return Err(ParseError::new(
-                    state.current_offset(),
-                    format!("expected ')', found {}", state.peek().kind.describe()),
-                ));
+                state.load(pos);
+
+                left = pratt_parser(state, 0)?;
+                if state.check(&TokenKind::Delimiter(Delimiter::RParen)) {
+                    state.consume();
+                } else {
+                    return Err(ParseError::new(
+                        state.current_offset(),
+                        format!("expected ')', found {}", state.peek().kind.describe()),
+                    ));
+                }
             }
         }
 
@@ -404,10 +456,36 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
     Ok(left)
 }
 
+fn parse_lambda(
+    state: &mut TokenStream<'_>,
+    params: Vec<String>,
+    span: usize,
+) -> Result<Expr, ParseError> {
+    if state.check(&TokenKind::Delimiter(Delimiter::LBrace)) {
+        let body = expect_block(state, "lambda")?;
+
+        Ok(Expr {
+            kind: ExprKind::FuncLiteral { params, body },
+            span,
+        })
+    } else {
+        let expr = parse_expr_in(state)?;
+
+        let body = vec![Stmt {
+            kind: StmtKind::Return { value: Some(expr) },
+            span,
+        }];
+        Ok(Expr {
+            kind: ExprKind::FuncLiteral { params, body },
+            span,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_expr;
-    use crate::ecscript::ast::{Expr, ExprKind, InfixOper, Literal, PrefixOper};
+    use crate::ecscript::ast::{Expr, ExprKind, InfixOper, Literal, PrefixOper, Stmt, StmtKind};
     use crate::ecscript::lexer::tokenize;
 
     fn assert_parse(src: &str, expected: Expr) {
@@ -492,6 +570,23 @@ mod tests {
                     .map(|(key, value)| (key.to_string(), value))
                     .collect(),
             ),
+            span: 0,
+        }
+    }
+
+    fn lambda(params: Vec<&str>, body: Vec<Stmt>) -> Expr {
+        Expr {
+            kind: ExprKind::FuncLiteral {
+                params: params.into_iter().map(str::to_string).collect(),
+                body,
+            },
+            span: 0,
+        }
+    }
+
+    fn return_stmt(value: Option<Expr>) -> Stmt {
+        Stmt {
+            kind: StmtKind::Return { value },
             span: 0,
         }
     }
@@ -736,6 +831,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parses_lambda_with_expression_body() {
+        assert_parse(
+            "(x) => x + 1",
+            lambda(
+                vec!["x"],
+                vec![return_stmt(Some(infix(
+                    var("x"),
+                    InfixOper::Add,
+                    lit_int(1),
+                )))],
+            ),
+        );
+    }
+
+    #[test]
+    fn parses_lambda_with_block_body() {
+        assert_parse(
+            "(a, b) => { return a + b; }",
+            lambda(
+                vec!["a", "b"],
+                vec![return_stmt(Some(infix(var("a"), InfixOper::Add, var("b"))))],
+            ),
+        );
+    }
+
+    #[test]
+    fn parens_without_arrow_remain_grouping() {
+        assert_parse("(x + 1)", infix(var("x"), InfixOper::Add, lit_int(1)));
+    }
+
     // ── 错误 ────────────────────────────────────────────
 
     #[test]
@@ -760,5 +886,10 @@ mod tests {
     #[test]
     fn reports_bare_operator_at_start() {
         assert_parse_error("* 5", 1, "unexpected operator '*' at start of expression");
+    }
+
+    #[test]
+    fn reports_missing_lambda_body() {
+        assert_parse_error("(x) =>", 6, "expected expression, found end of input");
     }
 }

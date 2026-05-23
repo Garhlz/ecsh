@@ -125,6 +125,7 @@ pub enum Delimiter {
     DotDotEq,  // ..=
     Eq,        // =
     Colon,     // :
+    FatArrow,  // =>
 }
 
 impl Delimiter {
@@ -143,6 +144,7 @@ impl Delimiter {
             Delimiter::DotDotEq => "..=",
             Delimiter::Eq => "=",
             Delimiter::Colon => ":",
+            Delimiter::FatArrow => "=>",
         }
     }
 }
@@ -458,6 +460,9 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 let kind = if chars.next_if_eq(&'=').is_some() {
                     offset += '='.len_utf8();
                     TokenKind::Operator(Operator::EqEq)
+                } else if chars.next_if_eq(&'>').is_some() {
+                    offset += '>'.len_utf8();
+                    TokenKind::Delimiter(Delimiter::FatArrow)
                 } else {
                     TokenKind::Delimiter(Delimiter::Eq)
                 };

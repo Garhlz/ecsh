@@ -1,14 +1,12 @@
 use crate::ecscript::{
-    ast::AssignTarget,
-    builtin::lookup_builtin,
     error::{EvalResult, RuntimeError, RuntimeErrorKind},
-    eval::eval_expr,
-    value::Value,
+    value::{Binding, Slot, Value},
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 pub struct Environment<'a> {
-    vars: RefCell<HashMap<String, Value>>,
+    vars: RefCell<HashMap<String, Binding>>,
     parent: Option<&'a Environment<'a>>,
 }
 
@@ -35,7 +33,7 @@ impl<'a> Environment<'a> {
     }
     // 当前层环境没有，插入；有则报错
     // let 语句。会遮蔽父环境的变量名
-    pub fn insert(&self, name: String, value: Value, span: usize) -> EvalResult<()> {
+    pub fn insert(&self, name: String, value: Binding, span: usize) -> EvalResult<()> {
         if self.vars.borrow().contains_key(&name) {
             Err(RuntimeError::new(
                 span,
@@ -49,14 +47,15 @@ impl<'a> Environment<'a> {
     }
 
     pub fn get(&self, name: &str, span: usize) -> EvalResult<Value> {
-        if let Some(value) = self.vars.borrow().get(name).cloned() {
-            Ok(value)
+        if let Some(value) = self.vars.borrow().get(name) {
+            match value {
+                Binding::Direct(value) => Ok(value.clone()),
+                Binding::Shared(slot) => Ok(slot.borrow().clone()),
+            }
         } else {
             if let Some(parent) = self.parent {
                 parent.get(name, span)
-            // builtin 只作为“查不到变量时”的兜底，这样 `let len = 1;` 可以自然遮蔽内置名。
-            // 当前builtin类型只可能是从环境中查找失败得到的
-            } else if let Some(builtin) = lookup_builtin(name) {
+            } else if let Some(builtin) = crate::ecscript::builtin::lookup_builtin(name) {
                 Ok(Value::Builtin(builtin))
             } else {
                 Err(RuntimeError::new(
@@ -68,99 +67,84 @@ impl<'a> Environment<'a> {
         }
     }
 
-    // 重新赋值语句
-    pub fn set(&self, target: &AssignTarget, value: Value, span: usize) -> EvalResult<()> {
-        match target {
-            AssignTarget::Name(name) => {
-                if self.vars.borrow().contains_key(name) {
-                    self.vars.borrow_mut().insert(name.to_string(), value);
-                    Ok(())
-                } else {
-                    // 如果有父环境，沿着父指针向上寻找
-                    if let Some(parent) = self.parent {
-                        parent.set(target, value, span)
-                    } else {
-                        Err(RuntimeError::new(
-                            span,
-                            RuntimeErrorKind::UndefinedVariable,
-                            format!("undefined variable '{}'", name),
-                        ))
-                    }
-                }
-            }
-            /*
-            AssignTarget::Field / Index
-            这是“对某个已经求值出来的容器做原地修改”，不需要再单独找名字所在作用域。
-            因为 base/object 先 eval_expr(...)，里面如果有变量读取，本来就会通过 env.get()自动沿作用域链查找。
-            */
-            // 处理arr[i] = some_expr 这种类型的
-            // 还有object["key"] 这种情况
-            AssignTarget::Index {
-                object: base,
-                index: index_expr,
-            } => {
-                let base_val = eval_expr(base, &self)?;
-                let index_val = eval_expr(index_expr, &self)?;
+    /// 重新赋值——沿作用域链查找变量并更新。
+    ///
+    /// 只处理简单的变量名赋值（`x = value`）。
+    /// 字段赋值（`obj.name = value`）和索引赋值（`arr[i] = value`）
+    /// 由 eval 层的 `assign_target` 函数处理，避免环境层反向依赖求值层。
+    pub fn set(&self, name: &str, value: Value, span: usize) -> EvalResult<()> {
+        enum Found {
+            Direct,
+            Shared(Slot),
+        }
 
-                match (base_val, index_val) {
-                    (Value::Array(arr), Value::Int(i)) => {
-                        let idx = crate::ecscript::value::validate_array_index(
-                            i,
-                            arr.borrow().len(),
-                            false,
-                            span,
-                        )?;
-                        arr.borrow_mut()[idx] = value;
-                        Ok(())
-                    }
-                    (Value::Object(obj), Value::String(k)) => {
-                        // 这里是不管原本是否存在都进行插入
-                        obj.borrow_mut().insert(k, value);
-                        Ok(())
-                    }
-                    (Value::Array(_), other) => Err(RuntimeError::new(
-                        span,
-                        RuntimeErrorKind::TypeMismatch,
-                        format!(
-                            "array assignment index must be Int, got {}",
-                            other.type_name()
-                        ),
-                    )),
-                    (Value::Object(_), other) => Err(RuntimeError::new(
-                        span,
-                        RuntimeErrorKind::TypeMismatch,
-                        format!(
-                            "object assignment index must be String, got {}",
-                            other.type_name()
-                        ),
-                    )),
-                    (other, index) => Err(RuntimeError::new(
-                        span,
-                        RuntimeErrorKind::TypeMismatch,
-                        format!(
-                            "cannot assign through index on {} with {}",
-                            other.type_name(),
-                            index.type_name()
-                        ),
-                    )),
-                }
+        // 先在读借用下探测类型，clone Slot（只增加引用计数），然后立刻 drop 读借用。
+        // 这样后续的 borrow_mut 不会与活跃的 borrow 冲突。
+        let found = {
+            let vars = self.vars.borrow();
+            vars.get(name).map(|b| match b {
+                Binding::Direct(..) => Found::Direct,
+                Binding::Shared(slot) => Found::Shared(slot.clone()),
+            })
+        };
+
+        match found {
+            Some(Found::Direct) => {
+                self.vars
+                    .borrow_mut()
+                    .insert(name.to_string(), Binding::Direct(value));
+                Ok(())
             }
-            // 处理 obj.name = some_expr
-            AssignTarget::Field { object: obj, field } => {
-                let base_val = eval_expr(obj, &self)?;
-                if let Value::Object(obj) = base_val {
-                    obj.borrow_mut().insert(field.clone(), value);
-                    Ok(())
+            Some(Found::Shared(slot)) => {
+                *slot.borrow_mut() = value;
+                Ok(())
+            }
+            None => {
+                // 尝试递归从父环境中寻找
+                if let Some(parent) = self.parent {
+                    parent.set(name, value, span)
                 } else {
                     Err(RuntimeError::new(
                         span,
-                        RuntimeErrorKind::TypeMismatch,
-                        format!(
-                            "cannot assign field '{}' on {}",
-                            field,
-                            base_val.type_name()
-                        ),
+                        RuntimeErrorKind::UndefinedVariable,
+                        format!("undefined variable '{}'", name),
                     ))
+                }
+            }
+        }
+    }
+
+    pub fn capture_upvalue(&self, name: &str, span: usize) -> Option<Slot> {
+        if self.parent.is_none() {
+            // 当前层已经是root层，不进行变量提升
+            return None;
+        }
+
+        // 先在读借用下探测类型，clone Slot（只增加引用计数），然后立刻 drop 读借用。
+        // 这样后续的 borrow_mut 不会与活跃的 borrow 冲突。
+        let found_value = {
+            let vars = self.vars.borrow();
+            vars.get(name).map(|b| match b {
+                Binding::Direct(value) => Binding::Direct(value.clone()),
+                Binding::Shared(slot) => Binding::Shared(slot.clone()),
+            })
+        };
+
+        match found_value {
+            Some(Binding::Direct(value)) => {
+                let slot = Rc::new(RefCell::new(value));
+                self.vars
+                    .borrow_mut()
+                    .insert(name.to_string(), Binding::Shared(slot.clone())); //slot.clone()只增加引用计数
+                Some(slot)
+            }
+            Some(Binding::Shared(slot)) => Some(slot.clone()),
+            None => {
+                if let Some(parent) = self.parent {
+                    parent.capture_upvalue(name, span)
+                } else {
+                    // 已经是root环境，在任何函数中都可以访问，不需要提升到堆上
+                    None
                 }
             }
         }
