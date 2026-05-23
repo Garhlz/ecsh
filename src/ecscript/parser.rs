@@ -1,5 +1,5 @@
 use crate::ecscript::{
-    ast::{ExprKind, Stmt, expr_to_assign_target},
+    ast::{Stmt, StmtKind, expr_to_assign_target},
     error::ParseError,
     lexer::{Delimiter, Token, TokenKind},
     pratt::{TokenStream, parse_expr_in},
@@ -51,25 +51,25 @@ fn parse_assignment_or_expr_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, Pa
 
         expect_semicolon(state)?;
 
-        Ok(Stmt::Assign {
-            target,
-            expr: right_value,
+        Ok(Stmt {
+            kind: StmtKind::Assign {
+                target,
+                expr: right_value,
+            },
             span,
         })
     } else {
         expect_semicolon(state)?;
-        Ok(Stmt::ExprStmt {
-            expr: left_expr,
-            span: span,
+        Ok(Stmt {
+            kind: StmtKind::ExprStmt { expr: left_expr },
+            span,
         })
     }
 }
 
 fn parse_let(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
-    // 这里把let和assign分开处理了
     let span = state.current_offset();
     state.consume(); // consume Let
-    // let 赋值的左值只能是纯标识符，不可以是数组成员或者对象字段
     let TokenKind::Identifier(name) = state.peek().kind.clone() else {
         return Err(ParseError::new(
             state.current_offset(),
@@ -92,12 +92,13 @@ fn parse_let(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     }
     state.consume();
 
-    // 右值是任意表达式
     let right_value = parse_expr_in(state)?;
     expect_semicolon(state)?;
-    Ok(Stmt::Let {
-        name,
-        expr: right_value,
+    Ok(Stmt {
+        kind: StmtKind::Let {
+            name,
+            expr: right_value,
+        },
         span,
     })
 }
@@ -120,8 +121,8 @@ fn parse_block(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
         let cur_stmt = parse_stmt(state)?;
         block_stmts.push(cur_stmt);
     }
-    Ok(Stmt::Block {
-        stmts: block_stmts,
+    Ok(Stmt {
+        kind: StmtKind::Block { stmts: block_stmts },
         span,
     })
 }
@@ -146,28 +147,29 @@ fn parse_if(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     let cond = parse_expr_in(state)?;
     let then_body = expect_block(state, "if")?;
 
-    // if之后有else部分
-    // 这里的逻辑实际上就是最近匹配
     if state.check(&TokenKind::Else) {
         state.consume();
-        // else if 递归调 parse_if
         let else_body = if state.check(&TokenKind::If) {
             vec![parse_if(state)?]
         } else {
             expect_block(state, "else")?
         };
 
-        Ok(Stmt::If {
-            cond,
-            then_body,
-            else_body,
+        Ok(Stmt {
+            kind: StmtKind::If {
+                cond,
+                then_body,
+                else_body,
+            },
             span,
         })
     } else {
-        Ok(Stmt::If {
-            cond,
-            then_body,
-            else_body: Vec::new(),
+        Ok(Stmt {
+            kind: StmtKind::If {
+                cond,
+                then_body,
+                else_body: Vec::new(),
+            },
             span,
         })
     }
@@ -178,7 +180,10 @@ fn parse_while(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     state.consume();
     let cond = parse_expr_in(state)?;
     let body = expect_block(state, "while")?;
-    Ok(Stmt::While { cond, body, span })
+    Ok(Stmt {
+        kind: StmtKind::While { cond, body },
+        span,
+    })
 }
 
 fn parse_for(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
@@ -208,23 +213,21 @@ fn parse_for(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
 
     let expr = parse_expr_in(state)?;
     match expr.kind {
-        ExprKind::Range(range) => {
+        crate::ecscript::ast::ExprKind::Range(range) => {
             let body = expect_block(state, "for")?;
-            Ok(Stmt::ForRange {
-                var,
-                range,
-                body,
+            Ok(Stmt {
+                kind: StmtKind::ForRange { var, range, body },
                 span,
             })
         }
-        // 除了语法上已经明确是 `a..b` / `a..=b` 的情况，其他一律保留成普通表达式，
-        // 交给运行时再决定它到底是 Array 还是 Object。
         _ => {
             let body = expect_block(state, "for")?;
-            Ok(Stmt::ForIn {
-                var,
-                iterable: expr,
-                body,
+            Ok(Stmt {
+                kind: StmtKind::ForIn {
+                    var,
+                    iterable: expr,
+                    body,
+                },
                 span,
             })
         }
@@ -270,7 +273,7 @@ fn parse_func(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
                 "expected param name string in function declare params",
             ));
         };
-        state.consume(); // 参数的名称，这里只是标识符token
+        state.consume();
         params.push(name);
         if matches!(state.peek().kind, TokenKind::Delimiter(Delimiter::RParen)) {
             state.consume();
@@ -287,11 +290,9 @@ fn parse_func(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
 
     let body = expect_block(state, "func")?;
 
-    Ok(Stmt::FuncDeclare {
-        name,
-        params,
-        body,
-        span: span,
+    Ok(Stmt {
+        kind: StmtKind::FuncDeclare { name, params, body },
+        span,
     })
 }
 
@@ -299,14 +300,20 @@ fn parse_break(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     let span = state.current_offset();
     state.consume();
     expect_semicolon(state)?;
-    Ok(Stmt::Break { span })
+    Ok(Stmt {
+        kind: StmtKind::Break,
+        span,
+    })
 }
 
 fn parse_continue(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     let span = state.current_offset();
     state.consume();
     expect_semicolon(state)?;
-    Ok(Stmt::Continue { span })
+    Ok(Stmt {
+        kind: StmtKind::Continue,
+        span,
+    })
 }
 
 fn parse_return(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
@@ -314,18 +321,23 @@ fn parse_return(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     state.consume();
     if state.check(&TokenKind::Delimiter(Delimiter::Semicolon)) {
         state.consume();
-        Ok(Stmt::Return { value: None, span })
+        Ok(Stmt {
+            kind: StmtKind::Return { value: None },
+            span,
+        })
     } else {
         let return_expr = parse_expr_in(state)?;
-        expect_semicolon(state)?; // 这里依然要分号
-        Ok(Stmt::Return {
-            value: Some(return_expr),
+        expect_semicolon(state)?;
+        Ok(Stmt {
+            kind: StmtKind::Return {
+                value: Some(return_expr),
+            },
             span,
         })
     }
 }
 
-fn expect_block(state: &mut TokenStream<'_>, name: &str) -> Result<Vec<Stmt>, ParseError> {
+pub fn expect_block(state: &mut TokenStream<'_>, name: &str) -> Result<Vec<Stmt>, ParseError> {
     if !state.check(&TokenKind::Delimiter(Delimiter::LBrace)) {
         return Err(ParseError::new(
             state.current_offset(),
@@ -335,9 +347,9 @@ fn expect_block(state: &mut TokenStream<'_>, name: &str) -> Result<Vec<Stmt>, Pa
             ),
         ));
     }
-    let Stmt::Block {
-        stmts: body,
-        span: _,
+    let Stmt {
+        kind: StmtKind::Block { stmts: body, .. },
+        ..
     } = parse_block(state)?
     else {
         return Err(ParseError::new(
@@ -351,7 +363,7 @@ fn expect_block(state: &mut TokenStream<'_>, name: &str) -> Result<Vec<Stmt>, Pa
 mod tests {
     use super::parse_script;
     use crate::ecscript::{
-        ast::{AssignTarget, Expr, ExprKind, InfixOper, Literal, Stmt},
+        ast::{AssignTarget, Expr, ExprKind, InfixOper, Literal, Stmt, StmtKind},
         lexer::tokenize,
     };
 
@@ -401,9 +413,11 @@ mod tests {
     fn parses_let_statement() {
         assert_eq!(
             parse_src("let x = 42;"),
-            vec![Stmt::Let {
-                name: "x".into(),
-                expr: lit_int(42),
+            vec![Stmt {
+                kind: StmtKind::Let {
+                    name: "x".into(),
+                    expr: lit_int(42),
+                },
                 span: 0
             }]
         );
@@ -433,9 +447,11 @@ mod tests {
     fn parses_assign_statement() {
         assert_eq!(
             parse_src("x = 10;"),
-            vec![Stmt::Assign {
-                target: AssignTarget::Name("x".into()),
-                expr: lit_int(10),
+            vec![Stmt {
+                kind: StmtKind::Assign {
+                    target: AssignTarget::Name("x".into()),
+                    expr: lit_int(10),
+                },
                 span: 0
             }]
         );
@@ -445,9 +461,11 @@ mod tests {
     fn parses_assign_with_expression() {
         assert_eq!(
             parse_src("y = 1 + 2;"),
-            vec![Stmt::Assign {
-                target: AssignTarget::Name("y".into()),
-                expr: expr_add(lit_int(1), lit_int(2)),
+            vec![Stmt {
+                kind: StmtKind::Assign {
+                    target: AssignTarget::Name("y".into()),
+                    expr: expr_add(lit_int(1), lit_int(2)),
+                },
                 span: 0,
             }]
         );
@@ -457,11 +475,10 @@ mod tests {
     fn parses_field_assign_statement() {
         let stmts = parse_src("obj.name = 10;");
         assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
-            Stmt::Assign {
+        match &stmts[0].kind {
+            StmtKind::Assign {
                 target: AssignTarget::Field { object, field },
                 expr,
-                ..
             } => {
                 assert_eq!(*object, var("obj"));
                 assert_eq!(field, "name");
@@ -475,11 +492,10 @@ mod tests {
     fn parses_index_assign_statement() {
         let stmts = parse_src("arr[i] = 10;");
         assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
-            Stmt::Assign {
+        match &stmts[0].kind {
+            StmtKind::Assign {
                 target: AssignTarget::Index { object, index },
                 expr,
-                ..
             } => {
                 assert_eq!(*object, var("arr"));
                 assert_eq!(*index, var("i"));
@@ -495,8 +511,8 @@ mod tests {
     fn parses_expr_stmt_literal() {
         assert_eq!(
             parse_src("42;"),
-            vec![Stmt::ExprStmt {
-                expr: lit_int(42),
+            vec![Stmt {
+                kind: StmtKind::ExprStmt { expr: lit_int(42) },
                 span: 0,
             }]
         );
@@ -506,8 +522,8 @@ mod tests {
     fn parses_expr_stmt_variable() {
         assert_eq!(
             parse_src("x;"),
-            vec![Stmt::ExprStmt {
-                expr: var("x"),
+            vec![Stmt {
+                kind: StmtKind::ExprStmt { expr: var("x") },
                 span: 0,
             }]
         );
@@ -517,8 +533,10 @@ mod tests {
     fn parses_expr_stmt_with_identifier_prefix() {
         assert_eq!(
             parse_src("x + 1;"),
-            vec![Stmt::ExprStmt {
-                expr: expr_add(var("x"), lit_int(1)),
+            vec![Stmt {
+                kind: StmtKind::ExprStmt {
+                    expr: expr_add(var("x"), lit_int(1)),
+                },
                 span: 0,
             }]
         );
@@ -550,8 +568,8 @@ mod tests {
     fn parses_empty_block() {
         assert_eq!(
             parse_src("{}"),
-            vec![Stmt::Block {
-                stmts: vec![],
+            vec![Stmt {
+                kind: StmtKind::Block { stmts: vec![] },
                 span: 0,
             }]
         );
@@ -561,11 +579,11 @@ mod tests {
     fn parses_block_with_statements() {
         let stmts = parse_src("{ let x = 1; x = 2; 3; }");
         assert_eq!(stmts.len(), 1);
-        if let Stmt::Block { ref stmts, .. } = stmts[0] {
+        if let StmtKind::Block { stmts, .. } = &stmts[0].kind {
             assert_eq!(stmts.len(), 3);
-            assert!(matches!(stmts[0], Stmt::Let { .. }));
-            assert!(matches!(stmts[1], Stmt::Assign { .. }));
-            assert!(matches!(stmts[2], Stmt::ExprStmt { .. }));
+            assert!(matches!(stmts[0].kind, StmtKind::Let { .. }));
+            assert!(matches!(stmts[1].kind, StmtKind::Assign { .. }));
+            assert!(matches!(stmts[2].kind, StmtKind::ExprStmt { .. }));
         } else {
             panic!("expected block");
         }
@@ -575,14 +593,11 @@ mod tests {
     fn parses_nested_blocks() {
         let stmts = parse_src("{ { 1; } }");
         assert_eq!(stmts.len(), 1);
-        if let Stmt::Block { ref stmts, .. } = stmts[0] {
+        if let StmtKind::Block { stmts, .. } = &stmts[0].kind {
             assert_eq!(stmts.len(), 1);
-            if let Stmt::Block {
-                stmts: ref inner, ..
-            } = stmts[0]
-            {
+            if let StmtKind::Block { stmts: inner, .. } = &stmts[0].kind {
                 assert_eq!(inner.len(), 1);
-                assert!(matches!(inner[0], Stmt::ExprStmt { .. }));
+                assert!(matches!(inner[0].kind, StmtKind::ExprStmt { .. }));
             } else {
                 panic!("expected inner block");
             }
@@ -606,16 +621,16 @@ mod tests {
     fn parses_multiple_statements() {
         let stmts = parse_src("let x = 1; let y = 2;");
         assert_eq!(stmts.len(), 2);
-        assert!(matches!(stmts[0], Stmt::Let { .. }));
-        assert!(matches!(stmts[1], Stmt::Let { .. }));
+        assert!(matches!(stmts[0].kind, StmtKind::Let { .. }));
+        assert!(matches!(stmts[1].kind, StmtKind::Let { .. }));
     }
 
     #[test]
     fn parses_two_assigns() {
         let stmts = parse_src("x = 1; y = 2;");
         assert_eq!(stmts.len(), 2);
-        assert!(matches!(stmts[0], Stmt::Assign { .. }));
-        assert!(matches!(stmts[1], Stmt::Assign { .. }));
+        assert!(matches!(stmts[0].kind, StmtKind::Assign { .. }));
+        assert!(matches!(stmts[1].kind, StmtKind::Assign { .. }));
     }
 
     #[test]
@@ -654,25 +669,25 @@ mod tests {
     #[test]
     fn records_let_statement_span_at_keyword() {
         let stmts = parse_src("let x = 42;");
-        assert_eq!(stmts[0].span(), 3);
+        assert_eq!(stmts[0].span, 3);
     }
 
     #[test]
     fn records_assign_statement_span_at_identifier() {
         let stmts = parse_src("x = 42;");
-        assert_eq!(stmts[0].span(), 1);
+        assert_eq!(stmts[0].span, 1);
     }
 
     #[test]
     fn records_expr_statement_span_at_expression_start() {
         let stmts = parse_src("-1 + 2;");
-        assert_eq!(stmts[0].span(), 1);
+        assert_eq!(stmts[0].span, 1);
     }
 
     #[test]
     fn records_block_statement_span_at_left_brace() {
         let stmts = parse_src("{ 1; }");
-        assert_eq!(stmts[0].span(), 1);
+        assert_eq!(stmts[0].span, 1);
     }
 
     #[test]
@@ -686,13 +701,15 @@ mod tests {
     fn parses_if_without_else() {
         assert_eq!(
             parse_src("if true { 1; }"),
-            vec![Stmt::If {
-                cond: lit_bool(true),
-                then_body: vec![Stmt::ExprStmt {
-                    expr: lit_int(1),
-                    span: 0,
-                }],
-                else_body: vec![],
+            vec![Stmt {
+                kind: StmtKind::If {
+                    cond: lit_bool(true),
+                    then_body: vec![Stmt {
+                        kind: StmtKind::ExprStmt { expr: lit_int(1) },
+                        span: 0,
+                    }],
+                    else_body: vec![],
+                },
                 span: 0,
             }]
         );
@@ -702,16 +719,18 @@ mod tests {
     fn parses_if_else() {
         assert_eq!(
             parse_src("if true { 1; } else { 2; }"),
-            vec![Stmt::If {
-                cond: lit_bool(true),
-                then_body: vec![Stmt::ExprStmt {
-                    expr: lit_int(1),
-                    span: 0,
-                }],
-                else_body: vec![Stmt::ExprStmt {
-                    expr: lit_int(2),
-                    span: 0,
-                }],
+            vec![Stmt {
+                kind: StmtKind::If {
+                    cond: lit_bool(true),
+                    then_body: vec![Stmt {
+                        kind: StmtKind::ExprStmt { expr: lit_int(1) },
+                        span: 0,
+                    }],
+                    else_body: vec![Stmt {
+                        kind: StmtKind::ExprStmt { expr: lit_int(2) },
+                        span: 0,
+                    }],
+                },
                 span: 0,
             }]
         );
@@ -727,93 +746,93 @@ mod tests {
     fn parses_while_loop() {
         let stmts = parse_src("while true { 1; }");
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(stmts[0], Stmt::While { .. }));
+        assert!(matches!(stmts[0].kind, StmtKind::While { .. }));
     }
 
     #[test]
     fn parses_for_range() {
         let stmts = parse_src("for i in 0..10 { 1; }");
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(stmts[0], Stmt::ForRange { .. }));
+        assert!(matches!(stmts[0].kind, StmtKind::ForRange { .. }));
     }
 
     #[test]
     fn parses_for_inclusive_range() {
         let stmts = parse_src("for i in 0..=5 { 1; }");
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(stmts[0], Stmt::ForRange { .. }));
+        assert!(matches!(stmts[0].kind, StmtKind::ForRange { .. }));
     }
 
     #[test]
     fn parses_for_in_array() {
         let stmts = parse_src("for v in a { 1; }");
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(stmts[0], Stmt::ForIn { .. }));
+        assert!(matches!(stmts[0].kind, StmtKind::ForIn { .. }));
     }
 
     #[test]
     fn records_if_statement_span_at_keyword() {
         let stmts = parse_src("if true { 1; }");
-        assert_eq!(stmts[0].span(), 2);
+        assert_eq!(stmts[0].span, 2);
     }
 
     #[test]
     fn records_while_statement_span_at_keyword() {
         let stmts = parse_src("while true { 1; }");
-        assert_eq!(stmts[0].span(), 5);
+        assert_eq!(stmts[0].span, 5);
     }
 
     #[test]
     fn records_for_statement_span_at_keyword() {
         let stmts = parse_src("for i in 0..3 { 1; }");
-        assert_eq!(stmts[0].span(), 3);
+        assert_eq!(stmts[0].span, 3);
     }
 
     #[test]
     fn records_func_statement_span_at_keyword() {
         let stmts = parse_src("func f() { return; }");
-        assert_eq!(stmts[0].span(), 4);
+        assert_eq!(stmts[0].span, 4);
     }
 
     #[test]
     fn records_break_statement_span_at_keyword() {
         let stmts = parse_src("break;");
-        assert_eq!(stmts[0].span(), 5);
+        assert_eq!(stmts[0].span, 5);
     }
 
     #[test]
     fn records_continue_statement_span_at_keyword() {
         let stmts = parse_src("continue;");
-        assert_eq!(stmts[0].span(), 8);
+        assert_eq!(stmts[0].span, 8);
     }
 
     #[test]
     fn parses_break() {
         let stmts = parse_src("break;");
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(stmts[0], Stmt::Break { .. }));
+        assert!(matches!(stmts[0].kind, StmtKind::Break));
     }
 
     #[test]
     fn parses_continue() {
         let stmts = parse_src("continue;");
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(stmts[0], Stmt::Continue { .. }));
+        assert!(matches!(stmts[0].kind, StmtKind::Continue));
     }
 
     #[test]
     fn parses_func_declare_with_params_and_return() {
         let stmts = parse_src("func add(a, b) { return a + b; }");
         assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
-            Stmt::FuncDeclare {
+        match &stmts[0].kind {
+            StmtKind::FuncDeclare {
                 name, params, body, ..
             } => {
                 assert_eq!(name, "add");
                 assert_eq!(params, &vec!["a".to_string(), "b".to_string()]);
                 assert_eq!(body.len(), 1);
-                match &body[0] {
-                    Stmt::Return {
+                match &body[0].kind {
+                    StmtKind::Return {
                         value: Some(expr), ..
                     } => {
                         assert_eq!(*expr, expr_add(var("a"), var("b")));
@@ -829,14 +848,14 @@ mod tests {
     fn parses_func_declare_with_empty_params() {
         let stmts = parse_src("func ping() { return; }");
         assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
-            Stmt::FuncDeclare {
+        match &stmts[0].kind {
+            StmtKind::FuncDeclare {
                 name, params, body, ..
             } => {
                 assert_eq!(name, "ping");
                 assert!(params.is_empty());
                 assert_eq!(body.len(), 1);
-                assert!(matches!(body[0], Stmt::Return { value: None, .. }));
+                assert!(matches!(body[0].kind, StmtKind::Return { value: None, .. }));
             }
             other => panic!("expected function declaration, got {:?}", other),
         }
@@ -846,8 +865,8 @@ mod tests {
     fn parses_return_with_value() {
         let stmts = parse_src("return 1 + 2;");
         assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
-            Stmt::Return {
+        match &stmts[0].kind {
+            StmtKind::Return {
                 value: Some(expr), ..
             } => {
                 assert_eq!(*expr, expr_add(lit_int(1), lit_int(2)));
@@ -860,7 +879,7 @@ mod tests {
     fn parses_return_without_value() {
         let stmts = parse_src("return;");
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(stmts[0], Stmt::Return { value: None, .. }));
+        assert!(matches!(stmts[0].kind, StmtKind::Return { value: None }));
     }
 
     #[test]

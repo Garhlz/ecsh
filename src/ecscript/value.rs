@@ -82,5 +82,12 @@ pub struct Function {
     pub name: Option<String>, // 后续支持匿名函数
     pub params: Vec<String>,
     pub stmts: Vec<Stmt>,
-    // pub captures
+    pub captures: HashMap<String, Slot>,
+}
+
+pub type Slot = Rc<RefCell<Value>>;
+
+pub enum Binding {
+    Direct(Value),
+    Shared(Slot), // 变量被提升到堆上
 }

@@ -1,8 +1,7 @@
-# ecscript 当前实现手册（stage 5：基础函数）
+# ecscript 当前实现手册（stage 5 完成）
 
 本文描述 ecscript **当前已经实现** 的语法与语义。  
-这一版已经从 stage 4 的“控制流”继续推进到 **stage 5 的第一步**：在 `if / else`、`while`、`for in`、`break`、`continue` 之外，已经打通了**命名函数、普通函数调用和 `return`**。  
-不过**闭包、匿名函数、函数字面量**还没有开始实现。
+这一版已打通完整的函数系统：**命名函数、匿名函数、闭包捕获和 `return`**。
 
 ---
 
@@ -13,31 +12,36 @@
 - expression lexer / Pratt parser / evaluator
 - script / stmt parser
 - `let`、赋值、表达式语句、block
-- 词法作用域与父环境查找
+- 词法作用域与父环境查找（Slot/Binding 模型）
 - 数组 / 对象字面量
 - 字段访问、索引访问
 - 字段赋值、索引赋值
 - 全局 builtin：`len` / `push` / `pop` / `insert` / `remove` / `keys` / `values` / `to_json`
 - `if / else if / else`
 - `while`
-- `for in`：
-  - 遍历数组
-  - 遍历对象 key
-  - 遍历区间 `a..b` / `a..=b`
+- `for in`：遍历数组 / 对象 key / 区间
 - `break` / `continue`
-- 命名函数声明：`func name(args) { ... }`
-- 普通函数调用：`f(x, y)`
+- `func name(args) { ... }` — 命名函数声明
+- `(args) => expr` / `(args) => { stmts }` — 匿名函数（lambda/func literal）
+- 普通函数调用：`f(x, y)`、`obj.method()`
 - `return expr;` / `return;`
+- **强闭包**：自由变量自动提升为 heap slot，闭包共享可变绑定
 - 基于字节偏移的 parse/runtime 错误定位
 
 当前未实现：
 
-- 闭包捕获
-- 匿名函数 / 函数字面量
 - 注释
 - shell 集成后的正式脚本入口
 - block value / 尾表达式返回值
 - 模块系统
+
+### 已知设计边界（非 bug）
+
+1. **`if` 是语句，不是表达式。** `let f = if x > 0 { ... } else { ... };` 不能解析。用 `if` 语句在块内赋值替代。
+
+2. **闭包捕获只传一层。** `func a() { let x=1; return () => () => x; }` 的最内层 lambda 找不到 `x`——中间层必须显式引用 `x` 才能向下传递捕获。
+
+3. **自由变量 vs builtin 同名。** 如果 lambda 内部要调用 builtin `push`，而外层有同名的局部变量（如 `let push = ...`），则 builtin 可能被遮蔽。避免给闭包变量起 builtin 同名。
 
 ---
 
@@ -171,7 +175,10 @@ primary         = "nil"
                 | identifier
                 | array_literal
                 | object_literal
+                | lambda_expr
                 | "(" expr ")"
+
+lambda_expr     = "(" param_list? ")" "=>" (expr | block)
 
 array_literal   = "[" (expr ("," expr)* ","?)? "]"
 object_literal  = "{" (object_entry ("," object_entry)* ","?)? "}"
@@ -199,6 +206,18 @@ for i in 0..=10 { ... }
 ```
 
 其中 `0..10` / `0..=10` 会在 parser 阶段直接产出 `Range` AST。
+
+### 3.3 Lambda 语法
+
+`(params) => expr` 或 `(params) => { stmts }`：
+
+```ecs
+let add = (a, b) => a + b;
+let inc = (x) => { return x + 1; };
+let no_args = () => 42;
+```
+
+括号内参数可选。`=>` 后可跟单表达式（不需要 `return`）或 block。
 
 ---
 
@@ -321,6 +340,7 @@ pub enum ExprKind {
     Field(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
     Range(RangeExpr),
+    FuncLiteral { params: Vec<String>, body: Vec<Stmt>, expr_body: Option<Expr> },
 }
 
 pub struct RangeExpr {
@@ -354,9 +374,42 @@ pub enum Value {
 说明：
 
 - `Array` / `Object` 是共享、可变容器
-- 数组元素类型不要求统一
-- `Function` 当前是**命名函数值**
-- builtin 也是普通运行时值，因此可以被遮蔽
+- `Function` 支持命名函数和匿名 lambda，闭包捕获自由变量
+- builtin 也是普通运行时值，可被遮蔽
+
+### 7.1 闭包模型：Slot / Binding / 自由变量提升
+
+```rust
+pub type Slot = Rc<RefCell<Value>>;
+
+pub enum Binding {
+    Direct(Value),    // 普通局部变量
+    Shared(Slot),     // 被闭包捕获后提升到堆上
+}
+
+pub struct Function {
+    pub name: Option<String>,
+    pub params: Vec<String>,
+    pub stmts: Vec<Stmt>,
+    pub captures: HashMap<String, Slot>,  // 只持有被捕获的变量
+}
+```
+
+创建闭包时：
+
+1. 遍历函数体 AST 收集自由变量（不在 params 和局部 `let` 中的标识符）
+2. 通过 `env.capture_upvalue(name)` 沿环境链查找该变量
+3. 如果是普通值（Direct），将其提升为 heap slot（Shared）并返回
+4. 如果已被其他闭包提升过（Shared），直接 clone `Slot` 的 Rc
+5. 捕获集合只存 Slot，不持有整个环境
+
+调用时环境链：
+
+```
+local env (params + locals)
+  → captures env (自由变量 slot)
+    → root env (全局变量 + builtin)
+```
 
 ---
 
@@ -379,11 +432,12 @@ let len = 1;
 
 会遮蔽内置 `len`。
 
-当前函数调用采用一个**无闭包阶段的过渡语义**：
+当前函数调用采用词法作用域下的闭包环境链：
 
 - 调用函数时会创建新的 call frame
 - call frame 里放参数、函数内局部变量、以及函数自己的名字
-- 这个 call frame 的父环境是 **global/root**
+- call frame 的父环境是 **captures env**
+- captures env 的父环境是 **global/root**
 - **不是调用点环境**
 
 也就是说：
@@ -398,7 +452,7 @@ func f() { return x; }
 }
 ```
 
-这样可以先避免“动态作用域”行为；等闭包实现后，再把 root-only 模型升级成 captures + global/root。
+这样可以避免“动态作用域”行为，同时让闭包继续访问创建时捕获到的局部变量，以及 root 中的全局/builtin。
 
 ---
 
@@ -644,11 +698,11 @@ func add(a, b) {
 - 已经支持 `while`
 - 已经支持 `for in` 遍历数组、对象 key 和区间
 - 已经支持 `break` / `continue`
-- 已经支持命名函数声明、普通函数调用和 `return`
+- 已经支持命名函数、匿名函数、闭包捕获和 `return`
 - `for in obj` 当前遍历的是 **排序后的 key**
 - `for in array` 当前使用 **迭代快照**，循环体修改原数组不会影响本轮迭代序列
-- 当前函数调用帧只继承 **global/root**，不继承调用者局部变量
-- 闭包、匿名函数、函数字面量还没开始
+- 当前函数调用链是 **local → captures → global/root**，不继承调用者局部变量
+- 闭包只捕获自由变量，不会复制整个外层环境
 
 ---
 
@@ -656,9 +710,9 @@ func add(a, b) {
 
 从当前实现继续往下做，比较自然的顺序通常是：
 
-- 闭包与 slot/cell 捕获
-- 匿名函数 / `func(...) { ... }`
-- 对象字段里的函数值
+- 多层闭包自动透传捕获（让 `() => () => x` 直接成立）
 - block value / 尾表达式
+- 模块系统
 - shell 集成
 - 更完整的 span / diagnostics 系统
+- 字节码 VM / 后端演化

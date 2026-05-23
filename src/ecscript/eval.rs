@@ -1,12 +1,12 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use crate::ecscript::{
-    ast::{Expr, ExprKind, InfixOper, Literal, PrefixOper, RangeExpr, Stmt},
+    ast::{AssignTarget, Expr, ExprKind, InfixOper, Literal, PrefixOper, RangeExpr, StmtKind},
     builtin::run_builtin,
     env::Environment,
     error::{EvalResult, RuntimeError, RuntimeErrorKind},
-    func::call_function,
-    value::{Function, Value},
+    func::{call_function, free_vars},
+    value::{Binding, Function, Value},
 };
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecFlow {
@@ -16,11 +16,13 @@ pub enum ExecFlow {
     Return { value: Option<Value>, span: usize },
 }
 
-pub fn eval_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<ExecFlow> {
+pub fn eval_script(
+    stmts: &[crate::ecscript::ast::Stmt],
+    env: &Environment<'_>,
+) -> EvalResult<ExecFlow> {
     for stmt in stmts {
         match eval_stmt(stmt, env)? {
             ExecFlow::Normal => continue,
-            // 最外层控制层接收到normal之外的执行流都有问题
             ExecFlow::Break(span) => {
                 return Err(RuntimeError::new(
                     span,
@@ -35,7 +37,6 @@ pub fn eval_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<ExecFlow
                     "continue outside loop",
                 ));
             }
-            // return 执行流是被函数调用块消费掉的，其他地方只能结束并且向上透传
             ExecFlow::Return { span, .. } => {
                 return Err(RuntimeError::new(
                     span,
@@ -50,66 +51,63 @@ pub fn eval_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<ExecFlow
 
 /// 求值单条语句。
 ///
-///
 /// 有能力改变控制流的语句自己返回，否则用全局的Normal
 /// 循环语句消费break/continue，其他都只是透传
-/// 写完之后已多次重构
-pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, RuntimeError> {
-    match stmt {
-        Stmt::Let { name, expr, span } => {
+pub fn eval_stmt(
+    stmt: &crate::ecscript::ast::Stmt,
+    env: &Environment<'_>,
+    // captures: Option<Rc<Function>>,
+) -> Result<ExecFlow, RuntimeError> {
+    let span = stmt.span;
+    match &stmt.kind {
+        StmtKind::Let { name, expr } => {
             let value = eval_expr(expr, env)?;
-            env.insert(name.clone(), value, *span)?;
+            env.insert(name.clone(), Binding::Direct(value), span)?;
         }
-        Stmt::Assign { target, expr, span } => {
+        StmtKind::Assign { target, expr } => {
             let value = eval_expr(expr, env)?;
-            env.set(target, value, *span)?
+            assign_target(target, value, env, span)?
         }
-        Stmt::ExprStmt { expr, .. } => {
+        StmtKind::ExprStmt { expr } => {
             eval_expr(expr, env)?;
         }
-        Stmt::Block { stmts, .. } => return eval_block(stmts, env),
-        Stmt::If {
+        StmtKind::Block { stmts } => return eval_block(stmts, env),
+        StmtKind::If {
             cond,
             then_body,
             else_body,
-            span,
         } => {
-            let cond_var = expect_bool(eval_expr(cond, env)?, *span, "if condition")?;
+            let cond_var = expect_bool(eval_expr(cond, env)?, span, "if condition")?;
             if cond_var {
                 return eval_block(then_body, env);
             } else {
                 return eval_block(else_body, env);
             }
         }
-        Stmt::While { cond, body, span } => loop {
-            let cond_var = expect_bool(eval_expr(cond, env)?, *span, "while condition")?;
+        StmtKind::While { cond, body } => loop {
+            let cond_var = expect_bool(eval_expr(cond, env)?, span, "while condition")?;
             if !cond_var {
                 break;
             }
             match eval_block(body, env)? {
-                // 捕捉透传上来的控制流，控制外层循环的状态
                 ExecFlow::Break(_) => break,
                 ExecFlow::Continue(_) => continue,
                 ExecFlow::Normal => {}
                 whole @ ExecFlow::Return { .. } => return Ok(whole),
             }
         },
-        Stmt::ForIn {
+        StmtKind::ForIn {
             var,
             iterable,
             body,
-            span,
         } => {
             let coll = eval_expr(iterable, env)?;
-            // 支持对数组和对象（键）的遍历
             match coll {
                 Value::Array(arr) => {
                     let items: Vec<Value> = arr.borrow().clone();
-                    // 先拍平迭代快照，避免循环体再次借用同一个 RefCell 时触发运行时借用冲突。
                     for value in items {
                         let new_env = Environment::new_child(env);
-                        new_env.insert(var.clone(), value, *span)?;
-                        // 依然捕获消费eval_block透传上来的控制流
+                        new_env.insert(var.clone(), Binding::Direct(value), span)?;
                         match eval_block(body, &new_env)? {
                             ExecFlow::Break(_) => break,
                             ExecFlow::Continue(_) => continue,
@@ -120,10 +118,10 @@ pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, Runtime
                 }
                 Value::Object(obj) => {
                     let mut keys: Vec<String> = obj.borrow().keys().cloned().collect();
-                    keys.sort(); // 排序之后稳定遍历
+                    keys.sort();
                     for key in keys {
                         let new_env = Environment::new_child(env);
-                        new_env.insert(var.clone(), Value::String(key), *span)?;
+                        new_env.insert(var.clone(), Binding::Direct(Value::String(key)), span)?;
                         match eval_block(body, &new_env)? {
                             ExecFlow::Break(_) => break,
                             ExecFlow::Continue(_) => continue,
@@ -134,7 +132,7 @@ pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, Runtime
                 }
                 other => {
                     return Err(RuntimeError::new(
-                        *span,
+                        span,
                         RuntimeErrorKind::TypeMismatch,
                         format!(
                             "for-in iterable must be Array or Object, got {}",
@@ -144,20 +142,14 @@ pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, Runtime
                 }
             }
         }
-        Stmt::ForRange {
-            var,
-            range,
-            body,
-            span,
-        } => {
+        StmtKind::ForRange { var, range, body } => {
             let RangeExpr {
                 start,
                 end,
                 inclusive,
             } = range;
-            let start = expect_int(eval_expr(start, env)?, *span, "for range start")?;
-            let end = expect_int(eval_expr(end, env)?, *span, "for range end")?;
-            // `start..end` 和 `start..=end` 的具体迭代器类型不同，这里先统一擦成 trait object。
+            let start = expect_int(eval_expr(start, env)?, span, "for range start")?;
+            let end = expect_int(eval_expr(end, env)?, span, "for range end")?;
             let iterator: Box<dyn Iterator<Item = i64>> = if *inclusive {
                 Box::new(start..=end)
             } else {
@@ -165,7 +157,7 @@ pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, Runtime
             };
             for i in iterator {
                 let new_env = Environment::new_child(env);
-                new_env.insert(var.clone(), Value::Int(i), *span)?;
+                new_env.insert(var.clone(), Binding::Direct(Value::Int(i)), span)?;
                 match eval_block(body, &new_env)? {
                     ExecFlow::Break(_) => break,
                     ExecFlow::Continue(_) => continue,
@@ -174,47 +166,56 @@ pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, Runtime
                 }
             }
         }
-        Stmt::FuncDeclare {
-            name,
-            params,
-            body,
-            span,
-        } => {
+        StmtKind::FuncDeclare { name, params, body } => {
+            let mut captures = HashMap::new();
+
+            // 解析ast收集自由变量
+            let free_set = free_vars(Some(name), params, body)?;
+
+            // 提升自由变量
+            for name in free_set {
+                if let Some(slot) = env.capture_upvalue(&name, span) {
+                    captures.insert(name, slot);
+                }
+            }
+
             let func = Function {
                 name: Some(name.clone()),
                 params: params.clone(),
                 stmts: body.clone(),
+                captures,
             };
+
             let func_val = Value::Function(Rc::new(func));
-            // TODO 这里先简化为直接往环境中插入 函数这个值
-            env.insert(name.clone(), func_val, *span)?;
+
+            env.insert(name.clone(), Binding::Direct(func_val), span)?;
         }
 
-        Stmt::Break { span } => {
-            return Ok(ExecFlow::Break(*span));
+        StmtKind::Break => {
+            return Ok(ExecFlow::Break(span));
         }
-        Stmt::Continue { span } => {
-            return Ok(ExecFlow::Continue(*span));
+        StmtKind::Continue => {
+            return Ok(ExecFlow::Continue(span));
         }
-        Stmt::Return { value, span } => {
+        StmtKind::Return { value } => {
             if let Some(return_expr) = value {
                 let return_value = eval_expr(return_expr, env)?;
                 return Ok(ExecFlow::Return {
                     value: Some(return_value),
-                    span: *span,
+                    span,
                 });
             } else {
-                return Ok(ExecFlow::Return {
-                    value: None,
-                    span: *span,
-                });
+                return Ok(ExecFlow::Return { value: None, span });
             }
         }
     }
     Ok(ExecFlow::Normal)
 }
 
-fn eval_block(stmts: &[Stmt], env: &Environment<'_>) -> Result<ExecFlow, RuntimeError> {
+fn eval_block(
+    stmts: &[crate::ecscript::ast::Stmt],
+    env: &Environment<'_>,
+) -> Result<ExecFlow, RuntimeError> {
     let new_env = Environment::new_child(env);
     for stmt in stmts {
         match eval_stmt(stmt, &new_env)? {
@@ -244,6 +245,83 @@ fn expect_int(value: Value, span: usize, context: &str) -> EvalResult<i64> {
             RuntimeErrorKind::TypeMismatch,
             format!("{context} must be Int, got {}", other.type_name()),
         )),
+    }
+}
+
+/// 执行赋值操作。
+///
+/// 将 eval_expr 逻辑留在 eval 层，env 只负责变量名的作用域查找，
+/// 避免环境层反向依赖求值层。
+fn assign_target(
+    target: &AssignTarget,
+    value: Value,
+    env: &Environment<'_>,
+    span: usize,
+) -> EvalResult<()> {
+    match target {
+        AssignTarget::Name(name) => env.set(name, value, span),
+        AssignTarget::Field { object, field } => {
+            let base_val = eval_expr(object, env)?;
+            let Value::Object(obj) = base_val else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "cannot assign field '{}' on {}",
+                        field,
+                        base_val.type_name()
+                    ),
+                ));
+            };
+            obj.borrow_mut().insert(field.clone(), value);
+            Ok(())
+        }
+        AssignTarget::Index { object, index } => {
+            let base_val = eval_expr(object, env)?;
+            let index_val = eval_expr(index, env)?;
+
+            match (base_val, index_val) {
+                (Value::Array(arr), Value::Int(i)) => {
+                    let idx = crate::ecscript::value::validate_array_index(
+                        i,
+                        arr.borrow().len(),
+                        false,
+                        span,
+                    )?;
+                    arr.borrow_mut()[idx] = value;
+                    Ok(())
+                }
+                (Value::Object(obj), Value::String(k)) => {
+                    obj.borrow_mut().insert(k, value);
+                    Ok(())
+                }
+                (Value::Array(_), other) => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "array assignment index must be Int, got {}",
+                        other.type_name()
+                    ),
+                )),
+                (Value::Object(_), other) => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "object assignment index must be String, got {}",
+                        other.type_name()
+                    ),
+                )),
+                (other, index) => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "cannot assign through index on {} with {}",
+                        other.type_name(),
+                        index.type_name()
+                    ),
+                )),
+            }
+        }
     }
 }
 
@@ -289,7 +367,6 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
         ExprKind::Infix(left, oper, right) => {
             let left_val = eval_expr(left, env)?;
             match oper {
-                // 这里加入了逻辑运算的短路设定
                 InfixOper::And => eval_and_short_circuit(left_val, right, env, span),
                 InfixOper::Or => eval_or_short_circuit(left_val, right, env, span),
                 _ => {
@@ -440,7 +517,6 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
             let start = expect_int(eval_expr(start, env)?, span, "range start")?;
             let end = expect_int(eval_expr(end, env)?, span, "range end")?;
 
-            // 转为数组
             if *inclusive {
                 let vec: Vec<Value> = (start..=end).map(|val| Value::Int(val)).collect();
                 Ok(Value::Array(Rc::new(RefCell::new(vec))))
@@ -449,9 +525,94 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
                 Ok(Value::Array(Rc::new(RefCell::new(vec))))
             }
         }
+        ExprKind::FuncLiteral { params, body } => {
+            let mut captures = HashMap::new();
+
+            // 解析ast收集自由变量
+            let free_set = free_vars(None, params, body)?;
+
+            // 提升自由变量
+            for name in free_set {
+                if let Some(slot) = env.capture_upvalue(&name, span) {
+                    captures.insert(name, slot);
+                }
+            }
+
+            let func = Function {
+                name: None,
+                params: params.clone(),
+                stmts: body.clone(),
+                captures,
+            };
+
+            Ok(Value::Function(Rc::new(func)))
+        }
     }
 }
 
+// ── 算术运算 ──────────────────────────────────────────────────────────
+
+/// 为纯数值算术运算符生成求值函数。
+///
+/// 适用于 `-` `*` 等只有 Int/Float 语义、无额外特殊逻辑的运算符。
+///
+/// 不适用于：
+///   - `+`（还有字符串拼接语义，需手写额外分支）
+///   - `/`（需要除零检查，需手写前置守卫）
+///   - `%`（只接受 Int×Int，不接受 Float，需手写）
+///
+/// # 用法
+///
+/// ```ignore
+/// // 生成 fn eval_sub(left: Value, right: Value, span: usize) -> EvalResult<Value>
+/// impl_arith!(eval_sub, -, "subtract");
+///
+/// // 生成 fn eval_mul(left: Value, right: Value, span: usize) -> EvalResult<Value>
+/// impl_arith!(eval_mul, *, "multiply");
+/// ```
+///
+/// # 展开结果
+///
+/// 以 `impl_arith!(eval_sub, -, "subtract")` 为例，展开后等价于：
+///
+/// ```ignore
+/// fn eval_sub(left: Value, right: Value, span: usize) -> EvalResult<Value> {
+///     match (&left, &right) {
+///         (Value::Int(a), Value::Int(b))   => Ok(Value::Int(a - b)),
+///         (Value::Int(a), Value::Float(b))  => Ok(Value::Float(*a as f64 - b)),
+///         (Value::Float(a), Value::Int(b))  => Ok(Value::Float(a - *b as f64)),
+///         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
+///         _ => Err(RuntimeError::new(span, RuntimeErrorKind::TypeMismatch,
+///             format!("cannot subtract {} and {}", left.type_name(), right.type_name()))),
+///     }
+/// }
+/// ```
+///
+/// 自动处理 Int×Int → Int 以及 Int/Float 混合 → Float 的类型提升。
+macro_rules! impl_arith {
+    ($name:ident, $op:tt, $desc:literal) => {
+        fn $name(left: Value, right: Value, span: usize) -> EvalResult<Value> {
+            match (&left, &right) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a $op b)),
+                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 $op b)),
+                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a $op *b as f64)),
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a $op b)),
+                _ => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("cannot {} {} and {}", $desc, left.type_name(), right.type_name()),
+                )),
+            }
+        }
+    };
+}
+
+// eval_sub 和 eval_mul 没有特殊逻辑，直接由宏生成
+impl_arith!(eval_sub, -, "subtract");
+impl_arith!(eval_mul, *, "multiply");
+
+/// eval_add 有字符串拼接的额外语义，不能直接用 impl_arith! 生成。
+/// 先尝试数值运算，如果类型不匹配再检查 String 拼接。
 fn eval_add(left: Value, right: Value, span: usize) -> EvalResult<Value> {
     match (&left, &right) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
@@ -467,42 +628,7 @@ fn eval_add(left: Value, right: Value, span: usize) -> EvalResult<Value> {
     }
 }
 
-fn eval_sub(left: Value, right: Value, span: usize) -> EvalResult<Value> {
-    match (&left, &right) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 - b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - *b as f64)),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
-        _ => Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!(
-                "cannot subtract {} and {}",
-                left.type_name(),
-                right.type_name()
-            ),
-        )),
-    }
-}
-
-fn eval_mul(left: Value, right: Value, span: usize) -> EvalResult<Value> {
-    match (&left, &right) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 * b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * *b as f64)),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-        _ => Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!(
-                "cannot multiply {} and {}",
-                left.type_name(),
-                right.type_name()
-            ),
-        )),
-    }
-}
-
+/// eval_div 需要除零检查，不能直接用 impl_arith! 生成。
 fn eval_div(left: Value, right: Value, span: usize) -> EvalResult<Value> {
     match (&left, &right) {
         (_, Value::Int(0) | Value::Float(0.0)) => Err(RuntimeError::new(
@@ -526,6 +652,7 @@ fn eval_div(left: Value, right: Value, span: usize) -> EvalResult<Value> {
     }
 }
 
+/// eval_mod 只接受 Int×Int，且需要除零检查。
 fn eval_mod(left: Value, right: Value, span: usize) -> EvalResult<Value> {
     match (&left, &right) {
         (_, Value::Int(0)) => Err(RuntimeError::new(
@@ -546,6 +673,66 @@ fn eval_mod(left: Value, right: Value, span: usize) -> EvalResult<Value> {
     }
 }
 
+// ── 比较运算 ──────────────────────────────────────────────────────────
+
+/// 为有序比较运算符生成求值函数。
+///
+/// 适用于 `<` `>` `<=` `>=`，它们只接受数值类型（Int/Float），返回 Bool。
+/// 四个函数的结构完全相同，仅运算符不同。
+///
+/// 不适用于：
+///   - `==` / `!=`（还接受 Nil/Bool/String 的比较，需手写）
+///
+/// # 用法
+///
+/// ```ignore
+/// // 生成 fn eval_lt(left: Value, right: Value, span: usize) -> EvalResult<Value>
+/// impl_ord_cmp!(eval_lt, <, "compare");
+///
+/// // 生成 fn eval_ge(left: Value, right: Value, span: usize) -> EvalResult<Value>
+/// impl_ord_cmp!(eval_ge, >=, "compare");
+/// ```
+///
+/// # 展开结果
+///
+/// 以 `impl_ord_cmp!(eval_lt, <, "compare")` 为例，展开后等价于：
+///
+/// ```ignore
+/// fn eval_lt(left: Value, right: Value, span: usize) -> EvalResult<Value> {
+///     match (&left, &right) {
+///         (Value::Int(a), Value::Int(b))    => Ok(Value::Bool(a < b)),
+///         (Value::Int(a), Value::Float(b))  => Ok(Value::Bool((*a as f64) < *b)),
+///         (Value::Float(a), Value::Int(b))  => Ok(Value::Bool(*a < (*b as f64))),
+///         (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
+///         _ => Err(RuntimeError::new(span, RuntimeErrorKind::TypeMismatch,
+///             format!("cannot compare {} and {}", left.type_name(), right.type_name()))),
+///     }
+/// }
+/// ```
+macro_rules! impl_ord_cmp {
+    ($name:ident, $op:tt, $desc:literal) => {
+        fn $name(left: Value, right: Value, span: usize) -> EvalResult<Value> {
+            match (&left, &right) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a $op b)),
+                (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) $op *b)),
+                (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a $op (*b as f64))),
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a $op b)),
+                _ => Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("cannot {} {} and {}", $desc, left.type_name(), right.type_name()),
+                )),
+            }
+        }
+    };
+}
+
+impl_ord_cmp!(eval_lt, <, "compare");
+impl_ord_cmp!(eval_gt, >, "compare");
+impl_ord_cmp!(eval_le, <=, "compare");
+impl_ord_cmp!(eval_ge, >=, "compare");
+
+/// eval_eq 和 eval_ne 接受 Nil/Bool/String/数值 的比较，不能直接用 impl_ord_cmp!。
 fn eval_eq(left: Value, right: Value, span: usize) -> EvalResult<Value> {
     match (&left, &right) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a == b)),
@@ -588,77 +775,7 @@ fn eval_ne(left: Value, right: Value, span: usize) -> EvalResult<Value> {
     }
 }
 
-fn eval_lt(left: Value, right: Value, span: usize) -> EvalResult<Value> {
-    match (&left, &right) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) < *b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a < (*b as f64))),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
-        _ => Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!(
-                "cannot compare {} and {}",
-                left.type_name(),
-                right.type_name()
-            ),
-        )),
-    }
-}
-
-fn eval_gt(left: Value, right: Value, span: usize) -> EvalResult<Value> {
-    match (&left, &right) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a > b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) > *b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a > (*b as f64))),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a > b)),
-        _ => Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!(
-                "cannot compare {} and {}",
-                left.type_name(),
-                right.type_name()
-            ),
-        )),
-    }
-}
-
-fn eval_le(left: Value, right: Value, span: usize) -> EvalResult<Value> {
-    match (&left, &right) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) <= *b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a <= (*b as f64))),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a <= b)),
-        _ => Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!(
-                "cannot compare {} and {}",
-                left.type_name(),
-                right.type_name()
-            ),
-        )),
-    }
-}
-
-fn eval_ge(left: Value, right: Value, span: usize) -> EvalResult<Value> {
-    match (&left, &right) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) >= *b)),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a >= (*b as f64))),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
-        _ => Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!(
-                "cannot compare {} and {}",
-                left.type_name(),
-                right.type_name()
-            ),
-        )),
-    }
-}
+// ── 逻辑运算 ──────────────────────────────────────────────────────────
 
 fn eval_and_short_circuit(
     left: Value,
@@ -730,7 +847,7 @@ mod tests {
         error::{RuntimeError, RuntimeErrorKind},
         lexer::tokenize,
         pratt::parse_expr,
-        value::Value,
+        value::{Binding, Value},
     };
 
     /// tokenize → parse → eval 一步到位
@@ -742,7 +859,8 @@ mod tests {
 
     fn env_with(name: &str, val: Value) -> Environment<'_> {
         let env = Environment::new();
-        env.insert(name.to_string(), val, 0).unwrap();
+        env.insert(name.to_string(), Binding::Direct(val), 0)
+            .unwrap();
         env
     }
 
@@ -842,7 +960,6 @@ mod tests {
     fn eval_undefined_variable_has_span() {
         let env = Environment::new();
         let err = eval_src("y", &env).unwrap_err();
-        // "y" 只有 1 个字节，end offset 是 1
         assert_eq!(err.offset, 1);
     }
 
@@ -1130,14 +1247,14 @@ mod tests {
     #[test]
     fn eval_complex_arithmetic() {
         let env = Environment::new();
-        // 1 + 2 * 3 - 4 / 2  = 1 + 6 - 2 = 5
         assert_eq!(eval_src("1 + 2 * 3 - 4 / 2", &env), Ok(Value::Int(5)));
     }
 
     #[test]
     fn eval_with_variables() {
         let env = env_with("a", Value::Int(3));
-        env.insert("b".to_string(), Value::Int(4), 0).unwrap();
+        env.insert("b".to_string(), Binding::Direct(Value::Int(4)), 0)
+            .unwrap();
         assert_eq!(eval_src("a + b", &env), Ok(Value::Int(7)));
         assert_eq!(eval_src("a * b", &env), Ok(Value::Int(12)));
     }
@@ -1145,7 +1262,6 @@ mod tests {
     #[test]
     fn eval_nested_logical() {
         let env = Environment::new();
-        // (true || false) && !false  = true && true = true
         assert_eq!(
             eval_src("(true || false) && !false", &env),
             Ok(Value::Bool(true))
@@ -1244,7 +1360,7 @@ mod tests {
 mod stmt_tests {
     use super::{ExecFlow, eval_expr, eval_script};
     use crate::ecscript::{
-        ast::{AssignTarget, Expr, ExprKind, Literal, Stmt},
+        ast::{AssignTarget, Expr, ExprKind, Literal, Stmt, StmtKind},
         env::Environment,
         error::{RuntimeError, RuntimeErrorKind},
         lexer::tokenize,
@@ -1318,9 +1434,11 @@ mod stmt_tests {
     #[test]
     fn eval_assign_requires_existing_variable() {
         let env = Environment::new();
-        let stmts = vec![Stmt::Assign {
-            target: AssignTarget::Name("x".into()),
-            expr: lit_int(5),
+        let stmts = vec![Stmt {
+            kind: StmtKind::Assign {
+                target: AssignTarget::Name("x".into()),
+                expr: lit_int(5),
+            },
             span: 0,
         }];
         let err = eval_script(&stmts, &env).unwrap_err();
@@ -1353,7 +1471,6 @@ mod stmt_tests {
     fn eval_block_reads_outer_variables() {
         let env = Environment::new();
         eval_script_src("let x = 10;", &env).unwrap();
-        // x is visible from inside the block (via parent chain)
         let env_child = Environment::new_child(&env);
         let tokens = tokenize("x").unwrap();
         let expr = parse_expr(&tokens).unwrap();
@@ -1371,7 +1488,6 @@ mod stmt_tests {
     fn eval_block_let_shadows_outer() {
         let env = Environment::new();
         eval_script_src("let x = 1; { let x = 2; }", &env).unwrap();
-        // outer x unchanged after block
         assert_eq!(env.get("x", 0), Ok(Value::Int(1)));
     }
 
@@ -1397,7 +1513,6 @@ mod stmt_tests {
         let env = Environment::new();
         let err = eval_script_src("let x = 1; y; x = 2;", &env).unwrap_err();
         assert_eq!(err.kind, RuntimeErrorKind::UndefinedVariable);
-        // let x = 1 executed, but "x = 2" did not (stopped at unknown variable y)
         assert_eq!(env.get("x", 0), Ok(Value::Int(1)));
     }
 
@@ -1600,14 +1715,14 @@ mod stmt_tests {
     fn eval_for_range_exclusive() {
         let env = Environment::new();
         eval_script_src("let s = 0; for i in 0..3 { s = s + i; }", &env).unwrap();
-        assert_eq!(env.get("s", 0), Ok(Value::Int(3))); // 0 + 1 + 2
+        assert_eq!(env.get("s", 0), Ok(Value::Int(3)));
     }
 
     #[test]
     fn eval_for_range_inclusive() {
         let env = Environment::new();
         eval_script_src("let s = 0; for i in 0..=3 { s = s + i; }", &env).unwrap();
-        assert_eq!(env.get("s", 0), Ok(Value::Int(6))); // 0 + 1 + 2 + 3
+        assert_eq!(env.get("s", 0), Ok(Value::Int(6)));
     }
 
     #[test]
@@ -1688,7 +1803,7 @@ mod stmt_tests {
             &env,
         )
         .unwrap();
-        assert_eq!(env.get("s", 0), Ok(Value::Int(3))); // 0 + 1 + 2
+        assert_eq!(env.get("s", 0), Ok(Value::Int(3)));
     }
 
     #[test]
@@ -1699,7 +1814,7 @@ mod stmt_tests {
             &env,
         )
         .unwrap();
-        assert_eq!(env.get("s", 0), Ok(Value::Int(8))); // 0 + 1 + 3 + 4
+        assert_eq!(env.get("s", 0), Ok(Value::Int(8)));
     }
 
     #[test]
@@ -1780,5 +1895,322 @@ mod stmt_tests {
         let err = eval_script_src("return 1;", &env).unwrap_err();
         assert_eq!(err.kind, RuntimeErrorKind::ReturnOutsideFunction);
         assert_eq!(err.message, "return outside function");
+    }
+
+    #[test]
+    fn eval_lambda_expression_body_returns_value() {
+        let env = Environment::new();
+        eval_script_src("let f = (x) => x + 1; let y = f(2);", &env).unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_lambda_block_body_returns_value() {
+        let env = Environment::new();
+        eval_script_src(
+            "let f = (a, b) => { return a + b; }; let y = f(1, 2);",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_lambda_without_return_becomes_nil() {
+        let env = Environment::new();
+        eval_script_src("let f = () => {}; let y = f();", &env).unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Nil));
+    }
+
+    #[test]
+    fn eval_lambda_uses_global_not_caller_local_scope() {
+        let env = Environment::new();
+        eval_script_src(
+            "let x = 1; let y = 0; let f = () => x; { let x = 2; y = f(); }",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(1)));
+    }
+
+    #[test]
+    fn smoke_lambda_can_be_called_immediately() {
+        let env = Environment::new();
+        eval_script_src("let y = ((x) => x + 1)(2);", &env).unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn smoke_lambda_can_live_in_object_field_and_be_called() {
+        let env = Environment::new();
+        eval_script_src("let ops = {inc: (x) => x + 1}; let y = ops.inc(4);", &env).unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(5)));
+    }
+
+    #[test]
+    fn smoke_named_function_can_return_lambda_value() {
+        let env = Environment::new();
+        eval_script_src(
+            "func make_inc() { return (x) => x + 1; } let inc = make_inc(); let y = inc(5);",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(6)));
+    }
+
+    #[test]
+    fn smoke_lambda_supports_higher_order_calls() {
+        let env = Environment::new();
+        eval_script_src(
+            "let twice = (f, x) => f(f(x)); let inc = (x) => x + 1; let y = twice(inc, 3);",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(5)));
+    }
+
+    #[test]
+    fn smoke_lambda_block_body_can_run_control_flow() {
+        let env = Environment::new();
+        eval_script_src(
+            "let sum_to = (n) => { let s = 0; for i in 0..=n { s = s + i; } return s; }; let y = sum_to(3);",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(6)));
+    }
+
+    #[test]
+    fn eval_lambda_closure_prefers_captured_local_over_global() {
+        let env = Environment::new();
+        eval_script_src(
+            "let x = 100; let f = 0; { let x = 1; f = () => x; } let y = f();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(1)));
+    }
+
+    #[test]
+    fn eval_lambda_closure_writes_back_captured_local_across_calls() {
+        let env = Environment::new();
+        eval_script_src(
+            "func make_counter() { let x = 0; return () => { x = x + 1; return x; }; } let counter = make_counter(); let a = counter(); let b = counter();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("a", 0), Ok(Value::Int(1)));
+        assert_eq!(env.get("b", 0), Ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn eval_sibling_closures_share_same_captured_slot() {
+        let env = Environment::new();
+        eval_script_src(
+            "func make_pair() { let x = 0; let inc = () => { x = x + 1; return x; }; let get = () => x; return {inc: inc, get: get}; } let pair = make_pair(); let a = pair.inc(); let b = pair.inc(); let c = pair.get();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("a", 0), Ok(Value::Int(1)));
+        assert_eq!(env.get("b", 0), Ok(Value::Int(2)));
+        assert_eq!(env.get("c", 0), Ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn eval_inner_named_function_can_escape_with_capture() {
+        let env = Environment::new();
+        eval_script_src(
+            "func outer() { let x = 7; func inner() { return x; } return inner; } let f = outer(); let y = f();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(7)));
+    }
+
+    #[test]
+    fn eval_lambda_reads_global_late_from_root() {
+        let env = Environment::new();
+        eval_script_src("let x = 1; let f = () => x; x = 2; let y = f();", &env).unwrap();
+        assert_eq!(env.get("y", 0), Ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn eval_recursive_factorial() {
+        let env = Environment::new();
+        eval_script_src(
+            "func fact(n) { if n <= 1 { return 1; } return n * fact(n - 1); } let r = fact(5);",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("r", 0), Ok(Value::Int(120)));
+    }
+
+    #[test]
+    fn eval_make_counter_closure() {
+        let env = Environment::new();
+        eval_script_src(
+            "func make_counter() { let x = 0; return () => { x = x + 1; return x; }; } let c1 = make_counter(); let c2 = make_counter(); let a = c1(); let b = c1(); let d = c2();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("a", 0), Ok(Value::Int(1)));
+        assert_eq!(env.get("b", 0), Ok(Value::Int(2)));
+        assert_eq!(env.get("d", 0), Ok(Value::Int(1)));
+    }
+
+    // ── 闭包边界 / 刁钻场景 ─────────────────────────────────
+
+    #[test]
+    fn eval_closure_captures_mutable_container() {
+        let env = Environment::new();
+        eval_script_src(
+            "let arr = [1, 2]; let add_to_arr = (x) => { push(arr, x); }; add_to_arr(3); add_to_arr(4);",
+            &env,
+        )
+        .unwrap();
+        let Value::Array(a) = env.get("arr", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            *a.borrow(),
+            vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)]
+        );
+    }
+
+    #[test]
+    fn eval_closure_inside_loop_all_closures_share_slot() {
+        let env = Environment::new();
+        eval_script_src(
+            "let a = []; let x = 0; while x < 3 { x = x + 1; let f = (n) => x + n; push(a, f(0)); }",
+            &env,
+        )
+        .unwrap();
+        let Value::Array(arr) = env.get("a", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            *arr.borrow(),
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+        );
+    }
+
+    #[test]
+    fn eval_nested_closure_three_levels() {
+        let env = Environment::new();
+        eval_script_src(
+            "let x = 1; func outer() { let y = 2; return () => x + y; } let f = outer(); let r = f();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("r", 0), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_closure_returns_closure_chain() {
+        let env = Environment::new();
+        eval_script_src(
+            "func a() { let x = 1; return () => x + 1; } let b = a(); let r = b();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("r", 0), Ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn eval_closure_shadowing_inner_let_does_not_capture() {
+        let env = Environment::new();
+        eval_script_src(
+            "let x = 10; let f = () => { let x = 99; return x; }; let r = f();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("r", 0), Ok(Value::Int(99)));
+        assert_eq!(env.get("x", 0), Ok(Value::Int(10)));
+    }
+
+    #[test]
+    fn eval_closure_writeback_through_multiple_closures() {
+        let env = Environment::new();
+        eval_script_src(
+            "let x = 0; let inc = () => { x = x + 1; }; let add2 = (n) => { x = x + n; }; inc(); inc(); add2(5);",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("x", 0), Ok(Value::Int(7)));
+    }
+
+    #[test]
+    fn eval_closure_captures_for_loop_variable_correctly() {
+        let env = Environment::new();
+        eval_script_src(
+            "let fns = []; for i in 0..3 { let f = () => i; push(fns, f); } let r0 = fns[0](); let r1 = fns[1](); let r2 = fns[2]();",
+            &env,
+        )
+        .unwrap();
+        // Each closure captures the per-iteration i (because `let i` is in the for body scope)
+        assert_eq!(env.get("r0", 0), Ok(Value::Int(0)));
+        assert_eq!(env.get("r1", 0), Ok(Value::Int(1)));
+        assert_eq!(env.get("r2", 0), Ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn eval_closure_captured_from_outer_named_function() {
+        let env = Environment::new();
+        eval_script_src(
+            "func outer(n) { return () => n + 1; } let f = outer(5); let r = f();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("r", 0), Ok(Value::Int(6)));
+    }
+
+    #[test]
+    fn eval_closure_captures_from_while_body() {
+        let env = Environment::new();
+        eval_script_src(
+            "let x = 1; let f = () => 0; while x < 3 { f = () => x; x = x + 1; } let r = f();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("r", 0), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_closure_assigned_to_object_field_and_called() {
+        let env = Environment::new();
+        eval_script_src(
+            "let obj = {x: 0}; obj.inc = () => { obj.x = obj.x + 1; }; obj.inc(); obj.inc();",
+            &env,
+        )
+        .unwrap();
+        let Value::Object(o) = env.get("obj", 0).unwrap() else {
+            panic!("expected object");
+        };
+        assert_eq!(o.borrow().get("x").cloned(), Some(Value::Int(2)));
+    }
+
+    #[test]
+    fn eval_closure_captures_only_needed_variables_not_all() {
+        let env = Environment::new();
+        eval_script_src(
+            "let a = 1; let b = 2; let c = 3; let f = () => a + c; let r = f();",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("r", 0), Ok(Value::Int(4)));
+        // b is not captured — make sure changes to b still visible as global
+        eval_script_src("b = 99;", &env).unwrap();
+        assert_eq!(env.get("b", 0), Ok(Value::Int(99)));
+    }
+
+    #[test]
+    fn eval_anonymous_recursive_lambda_via_object() {
+        let env = Environment::new();
+        eval_script_src(
+            "let fact_obj = {}; fact_obj.fact = (n) => { if n <= 1 { return 1; } return n * fact_obj.fact(n - 1); }; let r = fact_obj.fact(5);",
+            &env,
+        )
+        .unwrap();
+        assert_eq!(env.get("r", 0), Ok(Value::Int(120)));
     }
 }
