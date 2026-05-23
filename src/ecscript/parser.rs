@@ -1,9 +1,15 @@
 use crate::ecscript::{
-    ast::{Stmt, StmtKind, expr_to_assign_target},
+    ast::{CompoundAssignOp, Stmt, StmtKind, expr_to_assign_target},
     error::ParseError,
     lexer::{Delimiter, Token, TokenKind},
     pratt::{TokenStream, parse_expr_in},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignmentKind {
+    Simple,
+    Compound(CompoundAssignOp),
+}
 
 pub fn parse_script(tokens: &[Token]) -> Result<Vec<Stmt>, ParseError> {
     let mut state = TokenStream::new(tokens);
@@ -38,7 +44,7 @@ fn parse_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
 fn parse_assignment_or_expr_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     let span = state.current_offset();
     let left_expr = parse_expr_in(state)?;
-    if state.check(&TokenKind::Delimiter(Delimiter::Eq)) {
+    if let Some(assignment_kind) = assignment_kind(&state.peek().kind) {
         let target = expr_to_assign_target(&left_expr).ok_or_else(|| {
             ParseError::new(
                 left_expr.span,
@@ -51,19 +57,47 @@ fn parse_assignment_or_expr_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, Pa
 
         expect_semicolon(state)?;
 
-        Ok(Stmt {
-            kind: StmtKind::Assign {
+        let kind = match assignment_kind {
+            AssignmentKind::Simple => StmtKind::Assign {
                 target,
                 expr: right_value,
             },
-            span,
-        })
+            AssignmentKind::Compound(op) => StmtKind::CompoundAssign {
+                target,
+                op,
+                expr: right_value,
+            },
+        };
+
+        Ok(Stmt { kind, span })
     } else {
         expect_semicolon(state)?;
         Ok(Stmt {
             kind: StmtKind::ExprStmt { expr: left_expr },
             span,
         })
+    }
+}
+
+fn assignment_kind(token_kind: &TokenKind) -> Option<AssignmentKind> {
+    match token_kind {
+        TokenKind::Delimiter(Delimiter::Eq) => Some(AssignmentKind::Simple),
+        TokenKind::Delimiter(Delimiter::PlusEq) => {
+            Some(AssignmentKind::Compound(CompoundAssignOp::Add))
+        }
+        TokenKind::Delimiter(Delimiter::MinusEq) => {
+            Some(AssignmentKind::Compound(CompoundAssignOp::Sub))
+        }
+        TokenKind::Delimiter(Delimiter::StarEq) => {
+            Some(AssignmentKind::Compound(CompoundAssignOp::Mul))
+        }
+        TokenKind::Delimiter(Delimiter::SlashEq) => {
+            Some(AssignmentKind::Compound(CompoundAssignOp::Div))
+        }
+        TokenKind::Delimiter(Delimiter::PercentEq) => {
+            Some(AssignmentKind::Compound(CompoundAssignOp::Mod))
+        }
+        _ => None,
     }
 }
 
@@ -129,13 +163,16 @@ fn parse_block(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
 
 fn expect_semicolon(state: &mut TokenStream<'_>) -> Result<(), ParseError> {
     if !state.check(&TokenKind::Delimiter(Delimiter::Semicolon)) {
-        return Err(ParseError::new(
-            state.current_offset(),
+        let next = &state.peek().kind;
+        let message = if next.can_start_expr() {
             format!(
-                "expected ';' after statement, found {}",
-                state.peek().kind.describe()
-            ),
-        ));
+                "expected operator or ';' after expression, found {}",
+                next.describe()
+            )
+        } else {
+            format!("expected ';' after statement, found {}", next.describe())
+        };
+        return Err(ParseError::new(state.current_offset(), message));
     }
     state.consume();
     Ok(())
@@ -363,7 +400,7 @@ pub fn expect_block(state: &mut TokenStream<'_>, name: &str) -> Result<Vec<Stmt>
 mod tests {
     use super::parse_script;
     use crate::ecscript::{
-        ast::{AssignTarget, Expr, ExprKind, InfixOper, Literal, Stmt, StmtKind},
+        ast::{AssignTarget, CompoundAssignOp, Expr, ExprKind, InfixOper, Literal, Stmt, StmtKind},
         lexer::tokenize,
     };
 
@@ -502,6 +539,59 @@ mod tests {
                 assert_eq!(*expr, lit_int(10));
             }
             other => panic!("expected index assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_compound_assign_statement() {
+        assert_eq!(
+            parse_src("x += 10;"),
+            vec![Stmt {
+                kind: StmtKind::CompoundAssign {
+                    target: AssignTarget::Name("x".into()),
+                    op: CompoundAssignOp::Add,
+                    expr: lit_int(10),
+                },
+                span: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_field_compound_assign_statement() {
+        let stmts = parse_src("obj.name *= 10;");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0].kind {
+            StmtKind::CompoundAssign {
+                target: AssignTarget::Field { object, field },
+                op,
+                expr,
+            } => {
+                assert_eq!(*object, var("obj"));
+                assert_eq!(field, "name");
+                assert_eq!(*op, CompoundAssignOp::Mul);
+                assert_eq!(*expr, lit_int(10));
+            }
+            other => panic!("expected field compound assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_index_compound_assign_statement() {
+        let stmts = parse_src("arr[i] %= 10;");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0].kind {
+            StmtKind::CompoundAssign {
+                target: AssignTarget::Index { object, index },
+                op,
+                expr,
+            } => {
+                assert_eq!(*object, var("arr"));
+                assert_eq!(*index, var("i"));
+                assert_eq!(*op, CompoundAssignOp::Mod);
+                assert_eq!(*expr, lit_int(10));
+            }
+            other => panic!("expected index compound assign, got {:?}", other),
         }
     }
 
@@ -648,8 +738,31 @@ mod tests {
     }
 
     #[test]
+    fn reports_adjacent_keyword_after_number_expression() {
+        assert_parse_error(
+            "42 true;",
+            7,
+            "expected operator or ';' after expression, found keyword 'true'",
+        );
+    }
+
+    #[test]
+    fn reports_adjacent_string_after_number_expression() {
+        assert_parse_error(
+            "42\"hi\";",
+            6,
+            "expected operator or ';' after expression, found string literal",
+        );
+    }
+
+    #[test]
     fn reports_assign_missing_rhs() {
         assert_parse_error("x = ;", 5, "expected expression, found ';'");
+    }
+
+    #[test]
+    fn reports_compound_assign_missing_rhs() {
+        assert_parse_error("x += ;", 6, "expected expression, found ';'");
     }
 
     #[test]
@@ -667,6 +780,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_postfix_after_numeric_literal_without_requiring_whitespace() {
+        let stmts = parse_src("1[0]; 1.foo; 1(2);");
+        assert_eq!(stmts.len(), 3);
+        assert!(matches!(stmts[0].kind, StmtKind::ExprStmt { .. }));
+        assert!(matches!(stmts[1].kind, StmtKind::ExprStmt { .. }));
+        assert!(matches!(stmts[2].kind, StmtKind::ExprStmt { .. }));
+    }
+
+    #[test]
     fn records_let_statement_span_at_keyword() {
         let stmts = parse_src("let x = 42;");
         assert_eq!(stmts[0].span, 3);
@@ -675,6 +797,12 @@ mod tests {
     #[test]
     fn records_assign_statement_span_at_identifier() {
         let stmts = parse_src("x = 42;");
+        assert_eq!(stmts[0].span, 1);
+    }
+
+    #[test]
+    fn records_compound_assign_statement_span_at_identifier() {
+        let stmts = parse_src("x += 42;");
         assert_eq!(stmts[0].span, 1);
     }
 

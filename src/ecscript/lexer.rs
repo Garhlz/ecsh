@@ -124,6 +124,11 @@ pub enum Delimiter {
     DotDot,    // ..
     DotDotEq,  // ..=
     Eq,        // =
+    PlusEq,    // +=
+    MinusEq,   // -=
+    StarEq,    // *=
+    SlashEq,   // /=
+    PercentEq, // %=
     Colon,     // :
     FatArrow,  // =>
 }
@@ -143,6 +148,11 @@ impl Delimiter {
             Delimiter::DotDot => "..",
             Delimiter::DotDotEq => "..=",
             Delimiter::Eq => "=",
+            Delimiter::PlusEq => "+=",
+            Delimiter::MinusEq => "-=",
+            Delimiter::StarEq => "*=",
+            Delimiter::SlashEq => "/=",
+            Delimiter::PercentEq => "%=",
             Delimiter::Colon => ":",
             Delimiter::FatArrow => "=>",
         }
@@ -172,6 +182,23 @@ impl TokenKind {
             TokenKind::Break => "keyword 'break'".to_string(),
             TokenKind::Func => "keyword 'func'".to_string(),
             TokenKind::Return => "keyword 'return'".to_string(),
+        }
+    }
+
+    pub fn can_start_expr(&self) -> bool {
+        match self {
+            TokenKind::Int(_)
+            | TokenKind::Float(_)
+            | TokenKind::String(_)
+            | TokenKind::True
+            | TokenKind::False
+            | TokenKind::Nil
+            | TokenKind::Identifier(_) => true,
+            TokenKind::Operator(operator) => operator.prefix_info().is_some(),
+            TokenKind::Delimiter(Delimiter::LParen | Delimiter::LBracket | Delimiter::LBrace) => {
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -222,7 +249,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                         _ => break,
                     }
                 }
-                // TODO 会不会有123ab 1.23ab这种错误被我忽视？但是123*这种情况又不算错
+                ensure_number_terminated(&mut chars, offset)?;
                 // 遇到非数字或者字符串结束
                 let number_text = std::mem::take(&mut buf);
                 // 夺取所有权并且置空
@@ -236,6 +263,36 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                         kind: TokenKind::Float(number_text.parse().unwrap()),
                         end: offset,
                     })
+                }
+            }
+
+            // raw string: r"..."
+            'r' if chars.peek() == Some(&'"') => {
+                offset += ch.len_utf8();
+                let _ = chars.next();
+                offset += '"'.len_utf8();
+
+                let mut is_close = false;
+                while let Some(next_ch) = chars.next() {
+                    offset += next_ch.len_utf8();
+                    if next_ch == '"' {
+                        is_close = true;
+                        break;
+                    }
+                    buf.push(next_ch);
+                }
+
+                let string_text = std::mem::take(&mut buf);
+                if is_close {
+                    tokens.push(Token {
+                        kind: TokenKind::String(string_text),
+                        end: offset,
+                    })
+                } else {
+                    return Err(ParseError::new(
+                        offset,
+                        "unterminated raw string literal".to_string(),
+                    ));
                 }
             }
 
@@ -435,7 +492,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                         offset += next_ch.len_utf8();
                         buf.push(next_ch);
                     }
-                    // TODO 会不会有.123abc这种错误被我忽视？
+                    ensure_number_terminated(&mut chars, offset)?;
                     let number_text = std::mem::take(&mut buf);
                     tokens.push(Token {
                         kind: TokenKind::Float(number_text.parse().unwrap()),
@@ -472,38 +529,80 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             // oper
             '+' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Operator(Operator::Plus),
-                    end: offset,
-                })
+                let kind = if chars.next_if_eq(&'=').is_some() {
+                    offset += '='.len_utf8();
+                    TokenKind::Delimiter(Delimiter::PlusEq)
+                } else {
+                    TokenKind::Operator(Operator::Plus)
+                };
+                tokens.push(Token { kind, end: offset })
             }
             '-' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Operator(Operator::Minus),
-                    end: offset,
-                })
+                let kind = if chars.next_if_eq(&'=').is_some() {
+                    offset += '='.len_utf8();
+                    TokenKind::Delimiter(Delimiter::MinusEq)
+                } else {
+                    TokenKind::Operator(Operator::Minus)
+                };
+                tokens.push(Token { kind, end: offset })
             }
             '*' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Operator(Operator::Star),
-                    end: offset,
-                })
+                let kind = if chars.next_if_eq(&'=').is_some() {
+                    offset += '='.len_utf8();
+                    TokenKind::Delimiter(Delimiter::StarEq)
+                } else {
+                    TokenKind::Operator(Operator::Star)
+                };
+                tokens.push(Token { kind, end: offset })
             }
             '/' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Operator(Operator::Slash),
-                    end: offset,
-                })
+                // 单行注释
+                if chars.next_if_eq(&'/').is_some() {
+                    while let Some(nxt) = chars.next() {
+                        offset += nxt.len_utf8();
+                        if nxt == '\n' {
+                            break;
+                        }
+                    }
+                    // 多行注释
+                } else if chars.next_if_eq(&'*').is_some() {
+                    let mut is_close = false;
+                    while let Some(nxt) = chars.next() {
+                        offset += nxt.len_utf8();
+                        if nxt == '*' && chars.next_if_eq(&'/').is_some() {
+                            offset += '/'.len_utf8();
+                            is_close = true;
+                            break;
+                        }
+                    }
+                    if !is_close {
+                        return Err(ParseError::new(offset, "unterminated block comment"));
+                    }
+                } else if chars.next_if_eq(&'=').is_some() {
+                    offset += '='.len_utf8();
+                    tokens.push(Token {
+                        kind: TokenKind::Delimiter(Delimiter::SlashEq),
+                        end: offset,
+                    })
+                } else {
+                    tokens.push(Token {
+                        kind: TokenKind::Operator(Operator::Slash),
+                        end: offset,
+                    })
+                }
             }
             '%' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Operator(Operator::Percent),
-                    end: offset,
-                })
+                let kind = if chars.next_if_eq(&'=').is_some() {
+                    offset += '='.len_utf8();
+                    TokenKind::Delimiter(Delimiter::PercentEq)
+                } else {
+                    TokenKind::Operator(Operator::Percent)
+                };
+                tokens.push(Token { kind, end: offset })
             }
             ':' => {
                 offset += ch.len_utf8();
@@ -588,6 +687,24 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
     Ok(tokens)
 }
 
+fn ensure_number_terminated(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    offset: usize,
+) -> Result<(), ParseError> {
+    if let Some(next_ch) = chars.peek().copied() {
+        if next_ch.is_ascii_alphabetic() || next_ch == '_' {
+            return Err(ParseError::new(
+                offset,
+                format!(
+                    "invalid numeric literal; expected separator after number, found '{}'",
+                    next_ch
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Delimiter, Operator, TokenKind, tokenize};
@@ -659,9 +776,30 @@ mod tests {
     }
 
     #[test]
+    fn raw_string_keeps_backslashes_literal() {
+        assert_kinds(
+            "r\"c:\\tmp\\ecs\\test.txt\"",
+            vec![string("c:\\tmp\\ecs\\test.txt"), TokenKind::EOF],
+        );
+    }
+
+    #[test]
+    fn raw_string_does_not_unescape_sequences() {
+        assert_kinds(r#"r"\n\t\\""#, vec![string(r#"\n\t\\"#), TokenKind::EOF]);
+    }
+
+    #[test]
+    fn raw_string_prefix_does_not_break_identifiers() {
+        assert_kinds(
+            "raw r foo",
+            vec![ident("raw"), ident("r"), ident("foo"), TokenKind::EOF],
+        );
+    }
+
+    #[test]
     fn eq_eq_lexes_as_equality_operator() {
         assert_kinds(
-            "== != <= >= && || ! =",
+            "== != <= >= && || ! = += -= *= /= %=",
             vec![
                 op(Operator::EqEq),
                 op(Operator::NotEq),
@@ -671,6 +809,11 @@ mod tests {
                 op(Operator::OrOr),
                 op(Operator::Bang),
                 delimiter(Delimiter::Eq),
+                delimiter(Delimiter::PlusEq),
+                delimiter(Delimiter::MinusEq),
+                delimiter(Delimiter::StarEq),
+                delimiter(Delimiter::SlashEq),
+                delimiter(Delimiter::PercentEq),
                 TokenKind::EOF,
             ],
         );
@@ -695,8 +838,40 @@ mod tests {
     }
 
     #[test]
+    fn reports_invalid_integer_suffix() {
+        assert_lex_error(
+            "123ab",
+            3,
+            "invalid numeric literal; expected separator after number, found 'a'",
+        );
+    }
+
+    #[test]
+    fn reports_invalid_float_suffix() {
+        assert_lex_error(
+            "1.23ab",
+            4,
+            "invalid numeric literal; expected separator after number, found 'a'",
+        );
+    }
+
+    #[test]
+    fn reports_invalid_leading_dot_float_suffix() {
+        assert_lex_error(
+            ".123abc",
+            4,
+            "invalid numeric literal; expected separator after number, found 'a'",
+        );
+    }
+
+    #[test]
     fn reports_unterminated_string() {
         assert_lex_error("\"abc", 4, "unterminated string literal");
+    }
+
+    #[test]
+    fn reports_unterminated_raw_string() {
+        assert_lex_error("r\"abc", 5, "unterminated raw string literal");
     }
 
     #[test]
