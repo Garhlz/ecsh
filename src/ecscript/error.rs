@@ -157,6 +157,7 @@ pub enum RuntimeErrorKind {
     BreakOutsideLoop,
     ContinueOutsideLoop,
     ReturnOutsideFunction,
+    ParseInExpr,
 }
 
 /// 运行时错误。

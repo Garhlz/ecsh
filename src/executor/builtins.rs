@@ -200,7 +200,8 @@ fn parse_job_spec(command: &Command, builtin_name: &str) -> Result<usize, String
     }
 
     let arg = &command.args[0];
-    let Some(job_id) = arg.strip_prefix('%') else {
+    let arg_str = arg.as_lit_str().unwrap_or("");
+    let Some(job_id) = arg_str.strip_prefix('%') else {
         return Err(format!("{}: usage: {} %N", builtin_name, builtin_name));
     };
 
@@ -214,13 +215,20 @@ fn parse_job_spec(command: &Command, builtin_name: &str) -> Result<usize, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Redirection;
+    use crate::types::{Redirection, ShellWord, WordFragment};
 
     /// 构造一个只含程序名和参数的 Command，用于测试 parse_job_spec。
     fn cmd(program: &str, args: &[&str]) -> Command {
         Command {
-            program: program.to_string(),
-            args: args.iter().map(|a| a.to_string()).collect(),
+            program: ShellWord {
+                fragments: vec![WordFragment::Lit(program.to_string())],
+            },
+            args: args
+                .iter()
+                .map(|a| ShellWord {
+                    fragments: vec![WordFragment::Lit(a.to_string())],
+                })
+                .collect(),
             redirection: Redirection::default(),
         }
     }

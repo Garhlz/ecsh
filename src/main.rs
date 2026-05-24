@@ -8,9 +8,8 @@
 //!   5. run_parsed_line       — 根据 AST 类型分派执行
 
 use ecsh::diagnostics::print_error;
-use ecsh::executor::{
-    init_shell_job_control, reap_background_jobs, run_command, run_pipeline, run_special_builtin,
-};
+use ecsh::ecscript::env::Environment;
+use ecsh::executor::{init_shell_job_control, reap_background_jobs, run_command, run_pipeline};
 use ecsh::input::{InputLine, ShellInput};
 use ecsh::parser::parse_line;
 use ecsh::prompt::build_prompt;
@@ -33,6 +32,7 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
         jobs: Vec::new(),
         next_job_id: 1,
         current_fg_pgid: None,
+        script_env: Environment::new(),
     };
     // 交互模式下初始化 job control（设进程组、抢终端、忽略信号）。
     init_shell_job_control(&mut state)?;
@@ -103,13 +103,8 @@ fn run_parsed_line(
     state: &mut ShellState,
 ) -> Result<CommandFlow, Box<dyn std::error::Error>> {
     match &parsed.line {
-        // ── 单条命令：非后台时先检查是否是特殊 builtin ──
+        // ── 单条命令：交给 executor 统一做展开 / builtin / external 分派 ──
         ParsedLine::Command(command) => {
-            if !parsed.background {
-                if let Some(flow) = run_special_builtin(command, state)? {
-                    return Ok(flow);
-                }
-            }
             run_command(command, state, parsed.background, &parsed.command_line)
         }
 

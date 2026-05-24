@@ -119,7 +119,7 @@ enum WordFragment {
     Lit(String),                        // 纯文本字面量
     Var(String),                        // $VAR  → 执行时查作用域→fallback env
     EnvVar(String),                     // ${VAR} → 执行时只查 env
-    Cmd(String),                        // $(cmd) → 执行时 fork 子 shell
+    Cmd(String),                        // $(cmd) → 执行时通过 /bin/sh -c 做命令替换
     Expr { src: String, spread: bool }, // $[expr] / $[...arr]
 }
 ```
@@ -774,49 +774,26 @@ echo $[to_json(data)] | jq .name
 - [x] 计数器和累加逻辑不再大量重复 `x = x + 1`
 - [ ] 简短函数和 lambda 不再被 `return` / 分号样板代码淹没
 
-### 阶段 6：ShellWord 与四种嵌入语法
+### 阶段 6：ShellWord 与四种嵌入语法（已完成）
 
-**目标**：把脚本值安全地桥接到现有 shell 执行器，但暂时还不改顶层分派。
+**目标**：把脚本值安全地桥接到现有 shell 执行器。
 
-**建议改动的现有模块**
-- [ ] `src/types.rs`：`Command.args: Vec<ShellWord>` 或同等结构
-- [ ] `src/lexer.rs`：shell word 不再直接产出 `String`
-- [ ] `src/parser.rs`：接受新的 `ShellWord`
-- [ ] `src/executor/`：新增 `expand_shell_word` / `expand_argv`
+**已完成**
+- [x] `src/types.rs`：`ShellWord` / `WordFragment` 数据模型，`Command` 改用 `ShellWord`
+- [x] `src/lexer.rs`：`handle_dollar` 产出 `Var`/`EnvVar`/`Cmd`/`Expr` fragment，
+      不再在 lex 阶段展开，引号/深度计数/转义联合判定已覆盖
+- [x] `src/parser.rs`：`Token::Word(ShellWord)` 通路
+- [x] `src/executor/expand.rs`：`expand_argv` / `expand_shell_word` / `expand_cmd`
+      （`/bin/sh -c` + stdout capture），四种语法展开逻辑已实现
+- [x] `libc` 依赖已添加
+- [x] `ShellState.script_env: Environment<'static>` 全局根环境已接入
+- [x] 所有现有测试适配为新数据模型，lexer 测试验证 fragment 产出
 
-**本阶段要做的事**
-- [ ] **ShellWord 重构**：将现有 `Token::Word(String)` 替换为 `ShellWord { fragments: Vec<WordFragment> }`
-- [ ] `WordFragment::{Lit, Var, EnvVar, Cmd, Expr}`
-- [ ] `$VAR`：执行时查脚本作用域，失败再 fallback env
-- [ ] `${VAR}`：执行时只查 env
-- [ ] `$[expr]`：执行时调用脚本 evaluator；仅标量值允许隐式字符串化
-- [ ] `$[expr]` 遇到 `Array/Object` 时抛 `RuntimeError`，提示使用 `to_json(expr)` 或 `$[...arr]`
-- [ ] `$[...arr]`：执行时展开成多个 argv
-- [ ] `$(cmd)`：执行时 fork 子 shell，捕获 stdout
-
-**词法规则**
-- [ ] `$VAR` 按最长标识符扫描
-- [ ] `${VAR}` 读到匹配 `}`
-- [ ] `$[expr]` 使用方括号深度计数，支持 `$[arr[0]]`
-- [ ] `$(cmd)` 使用括号深度 + 引号状态 + 转义联合判定
-
-**调用参数展开**
-- [ ] 在脚本函数调用 grammar 中加入 `...expr`
-- [ ] `run("echo", ...args)` 与 `$[...args]` 共享同一套展开实现
-
-**重要规则**
-- [ ] shell 命令模式下，字段访问/索引/任意脚本表达式必须写成 `$[...]`
-- [ ] `echo result.stderr` 是字面量；`echo $[result.stderr]` 才是字段读取
-
-**测试重点**
-- [ ] `$HOME` / `${HOME}` 差异
-- [ ] `$[x + 1]` 与 `$[...arr]`
-- [ ] 嵌套 `$[arr[0]]`
-- [ ] 嵌套 `$(echo $(date))`
-- [ ] 单引号/双引号中的展开差异
-
-**完成标准**
-- [ ] 不修改现有 shell 执行模型的前提下，四种嵌入语法都能展开为正确 argv
+**后续可继续做**
+- [ ] 调用参数展开 `...expr` grammar
+- [x] `launch.rs` 前的执行路径已统一接入运行时展开（包含 builtin / external / pipeline / redirection）
+- [x] $[...arr] spread 的端到端验证
+- [x] 执行时展开的完整测试（含 builtin 参数、动态命令头、redirection、$(cmd)）
 
 ### 阶段 7：顶层集成与文件执行
 
@@ -902,7 +879,7 @@ echo $[to_json(data)] | jq .name
 |------|--------|------|------|
 | `$VAR` | 脚本作用域优先 → fallback `std::env::var` | 字符串，单参数 | `echo $HOME` |
 | `${VAR}` | **仅** `std::env::var`（不查脚本作用域） | 字符串，单参数 | `echo ${HOME}/work` |
-| `$(cmd)` | 执行 shell 命令 | 捕捉 stdout，单参数 | `echo $(date)` |
+| `$(cmd)` | 执行 shell 命令 | 通过 `/bin/sh -c` 捕捉 stdout，单参数 | `echo $(date)` |
 | `$[expr]` | 脚本表达式求值 | 标量值转字符串；`Array/Object` 报错 | `echo $[x + 1]` |
 | `$[to_json(expr)]` | 脚本表达式求值并序列化为 JSON | JSON 字符串，单参数 | `echo $[to_json(obj)]` |
 | `$[...arr]` | 脚本表达式求值 + 展开 | 数组拆散为多个参数 | `echo $[...a]` |
