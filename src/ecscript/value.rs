@@ -1,6 +1,6 @@
 use crate::ecscript::ast::Stmt;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -71,10 +71,29 @@ pub enum Builtin {
     Keys,
     Values,
     ToJson,
+    Print,
+    Println,
     Push,
     Pop,
     Insert,
     Remove,
+}
+
+impl Builtin {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Builtin::Len => "len",
+            Builtin::Keys => "keys",
+            Builtin::Values => "values",
+            Builtin::ToJson => "to_json",
+            Builtin::Print => "print",
+            Builtin::Println => "println",
+            Builtin::Push => "push",
+            Builtin::Pop => "pop",
+            Builtin::Insert => "insert",
+            Builtin::Remove => "remove",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,4 +109,112 @@ pub type Slot = Rc<RefCell<Value>>;
 pub enum Binding {
     Direct(Value),
     Shared(Slot), // 变量被提升到堆上
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum VisitKey {
+    Array(*const RefCell<Vec<Value>>),
+    Object(*const RefCell<HashMap<String, Value>>),
+}
+
+pub fn repr_value(value: &Value) -> String {
+    let mut visiting = HashSet::new();
+    repr_value_inner(value, &mut visiting)
+}
+
+pub fn display_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        _ => repr_value(value),
+    }
+}
+
+fn repr_value_inner(value: &Value, visiting: &mut HashSet<VisitKey>) -> String {
+    match value {
+        Value::Nil => "nil".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Int(value) => value.to_string(),
+        Value::Float(value) => value.to_string(),
+        Value::String(value) => format!("{:?}", value),
+        Value::Array(values) => {
+            let visit_key = VisitKey::Array(Rc::as_ptr(values));
+            if !visiting.insert(visit_key) {
+                return "[...]".to_string();
+            }
+
+            let rendered = {
+                let borrowed = values.borrow();
+                borrowed
+                    .iter()
+                    .map(|item| repr_value_inner(item, visiting))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+
+            visiting.remove(&visit_key);
+            format!("[{}]", rendered)
+        }
+        Value::Object(values) => {
+            let visit_key = VisitKey::Object(Rc::as_ptr(values));
+            if !visiting.insert(visit_key) {
+                return "{...}".to_string();
+            }
+
+            let rendered = {
+                let borrowed = values.borrow();
+                let mut entries: Vec<_> = borrowed.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                entries
+                    .into_iter()
+                    .map(|(key, value)| format!("{}: {}", key, repr_value_inner(value, visiting)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+
+            visiting.remove(&visit_key);
+            format!("{{{}}}", rendered)
+        }
+        Value::Function(function) => match &function.name {
+            Some(name) => format!("<func {}>", name),
+            None => "<lambda>".to_string(),
+        },
+        Value::Builtin(builtin) => format!("<builtin {}>", builtin.name()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Builtin, Value, display_value, repr_value};
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+    #[test]
+    fn repr_quotes_strings() {
+        assert_eq!(
+            repr_value(&Value::String("hi\nthere".into())),
+            "\"hi\\nthere\""
+        );
+    }
+
+    #[test]
+    fn display_leaves_top_level_string_unquoted() {
+        assert_eq!(display_value(&Value::String("hello".into())), "hello");
+    }
+
+    #[test]
+    fn repr_sorts_object_keys() {
+        let obj = Rc::new(RefCell::new(HashMap::from([
+            ("b".to_string(), Value::Int(2)),
+            ("a".to_string(), Value::Int(1)),
+        ])));
+
+        assert_eq!(repr_value(&Value::Object(obj)), "{a: 1, b: 2}");
+    }
+
+    #[test]
+    fn repr_formats_builtin_name() {
+        assert_eq!(
+            repr_value(&Value::Builtin(Builtin::Println)),
+            "<builtin println>"
+        );
+    }
 }

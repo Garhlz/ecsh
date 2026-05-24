@@ -147,7 +147,7 @@ fn parse_block(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
             break;
         }
         if matches!(state.peek().kind, TokenKind::EOF) {
-            return Err(ParseError::new(
+            return Err(ParseError::incomplete(
                 state.current_offset(),
                 "unterminated block, expected '}' before end of input".to_string(),
             ));
@@ -376,7 +376,13 @@ fn parse_return(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
 
 pub fn expect_block(state: &mut TokenStream<'_>, name: &str) -> Result<Vec<Stmt>, ParseError> {
     if !state.check(&TokenKind::Delimiter(Delimiter::LBrace)) {
-        return Err(ParseError::new(
+        let incomplete = matches!(state.peek().kind, TokenKind::EOF);
+        let mk = if incomplete {
+            ParseError::incomplete
+        } else {
+            ParseError::new
+        };
+        return Err(mk(
             state.current_offset(),
             format!(
                 "expected '{{' after {name}, found {}",

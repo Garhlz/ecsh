@@ -1,7 +1,7 @@
-# ecscript 当前实现手册（stage 5.5 进行中）
+# ecscript 当前实现手册（stage 5.5）
 
 本文描述 ecscript **当前已经实现** 的语法与语义。  
-这一版已经打通完整的函数系统，并补上了一批 stage 5.5 易用性特性：**注释、复合赋值、原始字符串，以及带源码行的错误格式化 API**。
+这一版在完整函数系统之上，补全了 **注释、复合赋值、原始字符串、独立 REPL、源码行错误展示** 等易用性特性。
 
 ---
 
@@ -17,7 +17,7 @@
 - 数组 / 对象字面量
 - 字段访问、索引访问
 - 字段赋值、索引赋值
-- 全局 builtin：`len` / `push` / `pop` / `insert` / `remove` / `keys` / `values` / `to_json`
+- 全局 builtin：`len` / `print` / `println` / `push` / `pop` / `insert` / `remove` / `keys` / `values` / `to_json`
 - `if / else if / else`
 - `while`
 - `for in`：遍历数组 / 对象 key / 区间
@@ -27,9 +27,11 @@
 - 普通函数调用：`f(x, y)`、`obj.method()`
 - `return expr;` / `return;`
 - 原始字符串：`r"..."`
+- 输出 builtin：`print(...)` / `println(...)`
 - **强闭包**：自由变量自动提升为 heap slot，闭包共享可变绑定
 - 基于字节偏移的 parse/runtime 错误定位
 - `ParseError::format_with_source(src)` / `RuntimeError::format_with_source(src)` 的源码定位格式化
+- 独立 `ecscript` 解释器入口：REPL / 文件执行 / `-e` / stdin
 
 当前未实现：
 
@@ -47,6 +49,36 @@
 3. **自由变量 vs builtin 同名。** 如果 lambda 内部要调用 builtin `push`，而外层有同名的局部变量（如 `let push = ...`），则 builtin 可能被遮蔽。避免给闭包变量起 builtin 同名。
 
 4. **带源码行的错误展示目前还是显式 API。** 错误对象内部仍只保存 byte offset；如果调用方想拿到 `line:column + 源码行 + ^` 的格式，需要显式调用 `format_with_source(src)`。
+
+---
+
+## 1.1 运行入口
+
+当前已经可以直接运行独立解释器：
+
+```bash
+cargo run --bin ecscript --
+cargo run --bin ecscript -- script.ecs
+cargo run --bin ecscript -- -e 'println(1 + 2);'
+echo 'println("hi");' | cargo run --bin ecscript --
+```
+
+行为约定：
+
+- 无参数且 stdin 是终端：进入 REPL
+- 无参数但 stdin 被 pipe：读取整段 stdin 作为脚本执行
+- `ecscript <file.ecs>`：执行文件
+- `ecscript -e 'code'`：执行一段源码字符串
+
+REPL 中：
+
+- 主提示符是 `>>> `，续行提示符是 `... `，体验更接近 Python REPL
+- 直接输入单个表达式（不带分号）会求值并打印结果；若结果是 `nil` 则不回显
+- 未闭合的 block / 括号 / 数组 / 对象 / 字符串 / 注释会自动续行
+- 语句仍然沿用原本脚本语法；例如 `let x = 1;`
+- `:quit` / `:q` 退出，`:help` / `:h` 显示帮助，`:clear` 清屏
+- 历史命令持久化到 `~/.local/share/ecscript/history`
+- Ctrl-C 清空当前输入缓冲区，Ctrl-D 退出
 
 ---
 
@@ -548,6 +580,8 @@ func f() { return x; }
 | 名字 | 语义 | 备注 |
 |------|------|------|
 | `len(x)` | 返回长度 | 支持 `Array` / `Object` / `String` |
+| `print(v...)` | 输出一个或多个值 | 参数之间用空格分隔，不自动换行 |
+| `println(v...)` | 输出一个或多个值并换行 | 参数之间用空格分隔 |
 | `push(arr, v...)` | 向数组尾部追加一个或多个值 | 返回 `nil` |
 | `pop(arr)` | 弹出尾元素 | 空数组返回 `nil` |
 | `insert(arr, i, v)` | 在位置 `i` 插入 | `i == len` 合法 |
@@ -704,6 +738,7 @@ func add(a, b) {
 | `NotCallable` | 调用了不可调用值 |
 | `ArityMismatch` | builtin 或用户函数参数个数不对 |
 | `CircularReference` | `to_json` 检测到循环引用 |
+| `IoError` | builtin 在 stdout/stderr 等 IO 上失败 |
 | `BreakOutsideLoop` | 循环外使用 `break` |
 | `ContinueOutsideLoop` | 循环外使用 `continue` |
 | `ReturnOutsideFunction` | 函数外使用 `return` |
@@ -763,6 +798,8 @@ ecscript parse error at 3:17: expected ')'
 - 已经支持 `//` / `/* */` 注释
 - 已经支持原始字符串 `r"..."`
 - 已经支持复合赋值 `+= -= *= /= %=`
+- 已经支持独立 `ecscript` 入口（REPL / file / `-e` / stdin）
+- 已经支持 `print(...)` / `println(...)`
 - `for in obj` 当前遍历的是 **排序后的 key**
 - `for in array` 当前使用 **迭代快照**，循环体修改原数组不会影响本轮迭代序列
 - 当前函数调用链是 **local → captures → global/root**，不继承调用者局部变量

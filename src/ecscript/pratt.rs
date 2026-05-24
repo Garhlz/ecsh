@@ -3,6 +3,18 @@ use crate::ecscript::error::ParseError;
 use crate::ecscript::ast::{Expr, ExprKind, Literal, RangeExpr, Stmt, StmtKind};
 use crate::ecscript::lexer::{Delimiter, Token, TokenKind};
 use crate::ecscript::parser::expect_block;
+
+/// Choose `ParseError::incomplete` when we hit EOF expecting more tokens,
+/// otherwise `ParseError::new`.
+fn parse_error(state: &TokenStream<'_>, message: impl Into<String>) -> ParseError {
+    let offset = state.current_offset();
+    let msg = message.into();
+    if matches!(state.peek().kind, TokenKind::EOF) {
+        ParseError::incomplete(offset, msg)
+    } else {
+        ParseError::new(offset, msg)
+    }
+}
 pub struct TokenStream<'a> {
     tokens: &'a [Token],
     pos: usize,
@@ -196,8 +208,8 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                 if state.check(&TokenKind::Delimiter(Delimiter::RParen)) {
                     state.consume();
                 } else {
-                    return Err(ParseError::new(
-                        state.current_offset(),
+                    return Err(parse_error(
+                        state,
                         format!("expected ')', found {}", state.peek().kind.describe()),
                     ));
                 }
@@ -231,10 +243,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     };
                     break;
                 } else {
-                    return Err(ParseError::new(
-                        state.current_offset(),
-                        "expected ',' or ']'",
-                    ));
+                    return Err(parse_error(state, "expected ',' or ']'"));
                 }
             }
         }
@@ -298,17 +307,14 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     };
                     break;
                 } else {
-                    return Err(ParseError::new(
-                        state.current_offset(),
-                        "expected ',' or '}'",
-                    ));
+                    return Err(parse_error(state, "expected ',' or '}'"));
                 }
             }
         }
 
         _ => {
-            return Err(ParseError::new(
-                state.current_offset(),
+            return Err(parse_error(
+                state,
                 format!(
                     "expected expression, found {}",
                     state.peek().kind.describe()
@@ -374,7 +380,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                 if state.check(&TokenKind::Delimiter(Delimiter::RBracket)) {
                     state.consume();
                 } else {
-                    return Err(ParseError::new(state.current_offset(), "expected ']'"));
+                    return Err(parse_error(state, "expected ']'"));
                 }
 
                 left = Expr {
@@ -405,10 +411,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     } else if state.check(&TokenKind::Delimiter(Delimiter::Comma)) {
                         state.consume();
                     } else {
-                        return Err(ParseError::new(
-                            state.current_offset(),
-                            "expected ',' or ')'",
-                        ));
+                        return Err(parse_error(state, "expected ',' or ')'"));
                     }
                 }
                 left = Expr {
