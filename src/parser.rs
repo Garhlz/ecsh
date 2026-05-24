@@ -10,11 +10,11 @@
 
 use crate::lexer::tokenize;
 use crate::types::{
-    Command, OutputRedirection, ParsedJob, ParsedLine, Pipeline, Redirection, ShellState, Token,
+    Command, OutputRedirection, ParsedJob, ParsedLine, Pipeline, Redirection, ShellState,
+    ShellWord, Token,
 };
 
-/// 对外入口：将用户输入的一行文本解析为 ParsedJob。
-///
+/// 对外入口，将用户输入的一行文本解析为 ParsedJob。
 /// 流程：tokenize → parse_input → ParsedJob
 /// 返回的 ParsedJob 包含语法结构、前后台标志和命令原文。
 pub fn parse_line(line: &str, state: &ShellState) -> Result<ParsedJob, String> {
@@ -22,12 +22,11 @@ pub fn parse_line(line: &str, state: &ShellState) -> Result<ParsedJob, String> {
     parse_input(line, &tokens)
 }
 
-/// 解析整行 token 序列，处理 `&` 后台标志并生成 ParsedJob。
+/// 解析整行 token 序列，主要是处理 `&` 后台标志并生成 ParsedJob。
 ///
-/// 规则：
-///   - 行尾 `&` → 整条命令/管道在后台运行
-///   - 教学版限制：`&` 必须在行尾，且只支持单命令或管道
-///   - 不支持 `true && echo ok &` 这类复合控制流后台运行
+/// 行尾 `&` → 整条命令/管道在后台运行
+/// 限制：`&` 必须在行尾，且只支持单命令或管道
+/// 不支持 `true && echo ok &` 这类复合控制流后台运行
 fn parse_input(line: &str, tokens: &[Token]) -> Result<ParsedJob, String> {
     let command_line = line.trim().to_string();
 
@@ -68,7 +67,7 @@ fn parse_input(line: &str, tokens: &[Token]) -> Result<ParsedJob, String> {
 
 /// 递归下降解析 token 序列：按优先级从低到高找分割点。
 ///
-/// 算法：对每种运算符，用 rposition 从右向左找到分割点（保证左结合），
+/// 对每种运算符，用 rposition 从右向左找到分割点（保证左结合），
 /// 递归处理左右两边，构建二元 AST 节点。
 /// 越先处理的操作符优先级越低（因为在 AST 中是上层节点）。
 fn parse_tokens(tokens: &[Token]) -> Result<ParsedLine, String> {
@@ -168,8 +167,7 @@ fn parse_tokens_to_command(tokens: &[Token]) -> Result<Command, String> {
     let Some(Token::Word(program)) = words.next() else {
         return Err("command must start with a word".to_string());
     };
-    let program = program.to_string();
-    let mut args = Vec::new();
+    let mut args: Vec<ShellWord> = Vec::new();
     let mut redirection = Redirection::default();
 
     while let Some(tok) = words.next() {
@@ -195,13 +193,13 @@ fn parse_tokens_to_command(tokens: &[Token]) -> Result<Command, String> {
                 }
                 redirection.stdout = Some(OutputRedirection::Append(path));
             }
-            Token::Word(word) => args.push(word.to_string()),
+            Token::Word(word) => args.push(word.clone()),
             _ => return Err("unexpected token in command".to_string()),
         }
     }
 
     Ok(Command {
-        program,
+        program: program.clone(),
         args,
         redirection,
     })
@@ -228,9 +226,9 @@ fn parse_pipeline(tokens: &[Token]) -> Result<Pipeline, String> {
 fn next_redirection_path<'a>(
     words: &mut impl Iterator<Item = &'a Token>,
     operator: &str,
-) -> Result<String, String> {
+) -> Result<ShellWord, String> {
     let Some(Token::Word(path)) = words.next() else {
         return Err(format!("missing filename after {}", operator));
     };
-    Ok(path.to_string())
+    Ok(path.clone())
 }

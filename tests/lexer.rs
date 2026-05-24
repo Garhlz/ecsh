@@ -1,5 +1,5 @@
 use ecsh::lexer::tokenize;
-use ecsh::types::{CommandStatus, ShellState, Token};
+use ecsh::types::{CommandStatus, ShellState, ShellWord, Token, WordFragment};
 
 fn state() -> ShellState {
     ShellState {
@@ -10,6 +10,7 @@ fn state() -> ShellState {
         jobs: Vec::new(),
         next_job_id: 1,
         current_fg_pgid: None,
+        script_env: ecsh::ecscript::env::Environment::new(),
     }
 }
 
@@ -18,8 +19,8 @@ fn tokenizes_plain_words() {
     assert_eq!(
         tokenize("echo hello", &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word("hello".to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("hello")),
         ]
     );
 }
@@ -29,16 +30,16 @@ fn tokenizes_single_and_double_quotes() {
     assert_eq!(
         tokenize(r#"echo "hello world""#, &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word("hello world".to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("hello world")),
         ]
     );
 
     assert_eq!(
         tokenize("echo '$HOME'", &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word("$HOME".to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("$HOME")),
         ]
     );
 }
@@ -48,15 +49,15 @@ fn joins_quoted_fragments_into_one_word() {
     assert_eq!(
         tokenize(r#"echo a"b"c 'd e'"#, &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word("abc".to_string()),
-            Token::Word("d e".to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("abc")),
+            Token::Word(ShellWord::lit("d e")),
         ]
     );
 
     assert_eq!(
         tokenize(r#"echo "" ''"#, &state()).unwrap(),
-        vec![Token::Word("echo".to_string())]
+        vec![Token::Word(ShellWord::lit("echo"))]
     );
 }
 
@@ -65,34 +66,86 @@ fn keeps_operators_literal_inside_quotes() {
     assert_eq!(
         tokenize(r#"echo "a|b && c > d""#, &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word("a|b && c > d".to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("a|b && c > d")),
         ]
     );
 }
 
 #[test]
-fn expands_variables_in_normal_and_double_quoted_words() {
-    let home = std::env::var("HOME").unwrap_or_default();
-
+fn collects_dollar_fragments_without_expanding() {
     assert_eq!(
         tokenize("echo $?", &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word("7".to_string()),
+            Token::Word(ShellWord {
+                fragments: vec![WordFragment::Lit("echo".into())]
+            }),
+            Token::Word(ShellWord {
+                fragments: vec![WordFragment::Var("?".into())]
+            }),
         ]
     );
 
     assert_eq!(
         tokenize(r#"echo "$HOME""#, &state()).unwrap(),
-        vec![Token::Word("echo".to_string()), Token::Word(home.clone())]
+        vec![
+            Token::Word(ShellWord {
+                fragments: vec![WordFragment::Lit("echo".into())]
+            }),
+            Token::Word(ShellWord {
+                fragments: vec![WordFragment::Var("HOME".into())]
+            }),
+        ]
     );
 
     assert_eq!(
         tokenize("echo prefix-${HOME}/x", &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word(format!("prefix-{}/x", home)),
+            Token::Word(ShellWord {
+                fragments: vec![WordFragment::Lit("echo".into())]
+            }),
+            Token::Word(ShellWord {
+                fragments: vec![
+                    WordFragment::Lit("prefix-".into()),
+                    WordFragment::EnvVar("HOME".into()),
+                    WordFragment::Lit("/x".into()),
+                ]
+            }),
+        ]
+    );
+}
+
+#[test]
+fn tokenizes_command_and_expr_fragments_with_preserved_source() {
+    assert_eq!(
+        tokenize(r#"echo $(printf "a\"b") $(printf a\))"#, &state()).unwrap(),
+        vec![
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord {
+                fragments: vec![WordFragment::Cmd(r#"printf "a\"b""#.into())]
+            }),
+            Token::Word(ShellWord {
+                fragments: vec![WordFragment::Cmd(r#"printf a\)"#.into())]
+            }),
+        ]
+    );
+
+    assert_eq!(
+        tokenize(r#"echo $["a\"b"] $[...[1, 2]]"#, &state()).unwrap(),
+        vec![
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord {
+                fragments: vec![WordFragment::Expr {
+                    src: r#""a\"b""#.into(),
+                    spread: false,
+                }]
+            }),
+            Token::Word(ShellWord {
+                fragments: vec![WordFragment::Expr {
+                    src: "[1, 2]".into(),
+                    spread: true,
+                }]
+            }),
         ]
     );
 }
@@ -102,14 +155,14 @@ fn tokenizes_operators_without_spaces() {
     assert_eq!(
         tokenize("cat<in|grep hi>>out", &state()).unwrap(),
         vec![
-            Token::Word("cat".to_string()),
+            Token::Word(ShellWord::lit("cat")),
             Token::RedirectionIn,
-            Token::Word("in".to_string()),
+            Token::Word(ShellWord::lit("in")),
             Token::Pipe,
-            Token::Word("grep".to_string()),
-            Token::Word("hi".to_string()),
+            Token::Word(ShellWord::lit("grep")),
+            Token::Word(ShellWord::lit("hi")),
             Token::RedirectionAppend,
-            Token::Word("out".to_string()),
+            Token::Word(ShellWord::lit("out")),
         ]
     );
 }
@@ -119,13 +172,13 @@ fn tokenizes_logical_operators() {
     assert_eq!(
         tokenize("true&&echo ok||echo fallback", &state()).unwrap(),
         vec![
-            Token::Word("true".to_string()),
+            Token::Word(ShellWord::lit("true")),
             Token::AndIf,
-            Token::Word("echo".to_string()),
-            Token::Word("ok".to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("ok")),
             Token::OrIf,
-            Token::Word("echo".to_string()),
-            Token::Word("fallback".to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("fallback")),
         ]
     );
 }
@@ -135,8 +188,8 @@ fn tokenizes_background_operator() {
     assert_eq!(
         tokenize("sleep 1 &", &state()).unwrap(),
         vec![
-            Token::Word("sleep".to_string()),
-            Token::Word("1".to_string()),
+            Token::Word(ShellWord::lit("sleep")),
+            Token::Word(ShellWord::lit("1")),
             Token::Ampersand,
         ]
     );
@@ -147,20 +200,20 @@ fn tokenizes_sequence_operator() {
     assert_eq!(
         tokenize("echo a;echo b", &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word("a".to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("a")),
             Token::Semicolon,
-            Token::Word("echo".to_string()),
-            Token::Word("b".to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("b")),
         ]
     );
 
     assert_eq!(
         tokenize(r#"echo "a;b" 'c;d'"#, &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word("a;b".to_string()),
-            Token::Word("c;d".to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("a;b")),
+            Token::Word(ShellWord::lit("c;d")),
         ]
     );
 }
@@ -170,31 +223,31 @@ fn tokenizes_backslash_escapes() {
     assert_eq!(
         tokenize(r#"echo hello\ world \| \$HOME \; \" \'"#, &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word("hello world".to_string()),
-            Token::Word("|".to_string()),
-            Token::Word("$HOME".to_string()),
-            Token::Word(";".to_string()),
-            Token::Word("\"".to_string()),
-            Token::Word("'".to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("hello world")),
+            Token::Word(ShellWord::lit("|")),
+            Token::Word(ShellWord::lit("$HOME")),
+            Token::Word(ShellWord::lit(";")),
+            Token::Word(ShellWord::lit("\"")),
+            Token::Word(ShellWord::lit("'")),
         ]
     );
 
     assert_eq!(
         tokenize(r#"echo 'a\ b'"#, &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word(r#"a\ b"#.to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit(r#"a\ b"#)),
         ]
     );
 
     assert_eq!(
         tokenize(r#"echo "price: \$10" "path: C:\\tmp" "a\q""#, &state()).unwrap(),
         vec![
-            Token::Word("echo".to_string()),
-            Token::Word("price: $10".to_string()),
-            Token::Word(r#"path: C:\tmp"#.to_string()),
-            Token::Word(r#"a\q"#.to_string()),
+            Token::Word(ShellWord::lit("echo")),
+            Token::Word(ShellWord::lit("price: $10")),
+            Token::Word(ShellWord::lit(r#"path: C:\tmp"#)),
+            Token::Word(ShellWord::lit(r#"a\q"#)),
         ]
     );
 }

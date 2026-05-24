@@ -6,10 +6,11 @@
 //!   - 把具体的 fork / waitpid / job 管理委托给子模块
 
 mod builtins;
+mod expand;
 mod jobs;
 mod launch;
 
-use crate::builtin::{builtin_kind, is_builtin_allowed_in_pipeline};
+use crate::builtin::{BuiltinKind, builtin_kind, is_builtin_allowed_in_pipeline};
 use crate::diagnostics::print_error;
 use crate::types::{Command, CommandFlow, CommandStatus, Pipeline, ShellResult, ShellState};
 
@@ -28,12 +29,20 @@ pub fn run_command(
     background: bool,
     command_line: &str,
 ) -> ShellResult<CommandFlow> {
-    let print_lifecycle = command.program != "clear";
+    let command = match expand::expand_command(command, state) {
+        Ok(command) => command,
+        Err(err) => {
+            print_error(format!("expand: {}", err));
+            return Ok(CommandFlow::Continue(CommandStatus::failure()));
+        }
+    };
+
+    let print_lifecycle = command.program.as_lit_str() != Some("clear");
     if print_lifecycle {
         println!("{} starting...", &command.program);
     }
 
-    let flow = if builtin_kind(command).is_some() {
+    let flow = if let Some(kind) = builtin_kind(&command) {
         if background {
             // builtin 在后台子进程里执行无意义：
             // cd /tmp & → 子进程 cd 到 /tmp 后退出，shell 的工作目录不变
@@ -44,18 +53,25 @@ pub fn run_command(
             ));
             CommandFlow::Continue(CommandStatus::failure())
         } else {
-            // 直接报错。builtin 不能后台运行，因为它需要修改 shell 状态
-            match builtins::run_builtin_with_redirection(command, state) {
-                Ok(flow) => flow,
-                Err(err) => {
-                    print_error(format!("{}: {}", command.program, err));
-                    CommandFlow::Continue(CommandStatus::failure())
+            match kind {
+                BuiltinKind::Jobs | BuiltinKind::Fg | BuiltinKind::Bg => {
+                    match builtins::run_special_builtin(&command, state)? {
+                        Some(flow) => flow,
+                        None => unreachable!("special builtin should have been handled"),
+                    }
                 }
+                _ => match builtins::run_builtin_with_redirection(&command, state) {
+                    Ok(flow) => flow,
+                    Err(err) => {
+                        print_error(format!("{}: {}", command.program, err));
+                        CommandFlow::Continue(CommandStatus::failure())
+                    }
+                },
             }
         }
     } else {
         // 外部命令：fork → execvp，由 launch_command_job 处理前后台逻辑
-        let status = match launch::launch_command_job(command, state, background, command_line) {
+        let status = match launch::launch_command_job(&command, state, background, command_line) {
             Ok(status) => status,
             Err(err) => {
                 print_error(format!("{}: {}", command.program, err));
@@ -85,25 +101,40 @@ pub fn run_pipeline(
 ) -> ShellResult<CommandStatus> {
     println!("pipeline starting...");
 
-    for command in &pipeline.commands {
-        if let Some(kind) = builtin_kind(command) {
-            if !is_builtin_allowed_in_pipeline(kind) {
-                print_error(format!(
-                    "pipeline: built-in command is not supported in pipelines: {}",
-                    command.program
-                ));
-                return Ok(CommandStatus::failure());
-            }
-        }
-    }
-
     if let Err(err) = validate_pipeline_redirection(pipeline) {
         print_error(format!("pipeline: {}", err));
         println!("pipeline ending.");
         return Ok(CommandStatus::failure());
     }
 
-    let status = launch::launch_pipeline_job(pipeline, state, background, command_line)?;
+    let expanded_pipeline = match pipeline
+        .commands
+        .iter()
+        .map(|command| expand::expand_command(command, state))
+        .collect::<ShellResult<Vec<_>>>()
+    {
+        Ok(commands) => Pipeline { commands },
+        Err(err) => {
+            print_error(format!("pipeline: expand: {}", err));
+            println!("pipeline ending.");
+            return Ok(CommandStatus::failure());
+        }
+    };
+
+    for command in &expanded_pipeline.commands {
+        if let Some(kind) = builtin_kind(command) {
+            if !is_builtin_allowed_in_pipeline(kind) {
+                print_error(format!(
+                    "pipeline: built-in command is not supported in pipelines: {}",
+                    command.program
+                ));
+                println!("pipeline ending.");
+                return Ok(CommandStatus::failure());
+            }
+        }
+    }
+
+    let status = launch::launch_pipeline_job(&expanded_pipeline, state, background, command_line)?;
     println!("pipeline ending.");
     Ok(status)
 }

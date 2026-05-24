@@ -1,7 +1,7 @@
 use ecsh::parser::parse_line;
 use ecsh::types::{
     Command, CommandStatus, OutputRedirection, ParsedJob, ParsedLine, Pipeline, Redirection,
-    ShellState,
+    ShellState, ShellWord,
 };
 
 fn state() -> ShellState {
@@ -13,13 +13,14 @@ fn state() -> ShellState {
         jobs: Vec::new(),
         next_job_id: 1,
         current_fg_pgid: None,
+        script_env: ecsh::ecscript::env::Environment::new(),
     }
 }
 
 fn command(program: &str, args: &[&str]) -> Command {
     Command {
-        program: program.to_string(),
-        args: args.iter().map(|arg| arg.to_string()).collect(),
+        program: ShellWord::lit(program),
+        args: args.iter().map(|&arg| ShellWord::lit(arg)).collect(),
         redirection: Redirection::default(),
     }
 }
@@ -57,11 +58,11 @@ fn parses_command_with_redirection_without_spaces() {
         parse_line("echo hi>out.txt", &state()).unwrap(),
         parsed_job(
             ParsedLine::Command(Command {
-                program: "echo".to_string(),
-                args: vec!["hi".to_string()],
+                program: ShellWord::lit("echo"),
+                args: vec![ShellWord::lit("hi")],
                 redirection: Redirection {
                     stdin: None,
-                    stdout: Some(OutputRedirection::Truncate("out.txt".to_string())),
+                    stdout: Some(OutputRedirection::Truncate(ShellWord::lit("out.txt"))),
                 },
             }),
             "echo hi>out.txt"
@@ -77,10 +78,10 @@ fn parses_pipeline() {
             ParsedLine::Pipeline(Pipeline {
                 commands: vec![
                     Command {
-                        program: "cat".to_string(),
+                        program: ShellWord::lit("cat"),
                         args: vec![],
                         redirection: Redirection {
-                            stdin: Some("in.txt".to_string()),
+                            stdin: Some(ShellWord::lit("in.txt")),
                             stdout: None,
                         },
                     },

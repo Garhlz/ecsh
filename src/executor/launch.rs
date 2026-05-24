@@ -199,6 +199,7 @@ pub(crate) fn launch_pipeline_job(
                             jobs: Vec::new(),
                             next_job_id: 1,
                             current_fg_pgid: None,
+                            script_env: crate::ecscript::env::Environment::new(),
                         };
 
                         let flow = run_builtin(command, &mut child_state)
@@ -259,11 +260,13 @@ pub(crate) fn launch_pipeline_job(
 /// 按 POSIX shell 约定，执行失败返回退出码 127（command not found）。
 fn exec_external_or_exit(command: &Command) -> ! {
     let mut argv = Vec::new();
-    argv.push(command.program.clone());
-    argv.extend(command.args.clone());
+    // 对于简单的字面量 ShellWord，Display 回显出原文；
+    // 对于含 $ 展开的，调用方应在 fork 之前先调 expand_argv 展开。
+    argv.push(command.program.to_string());
+    for arg in &command.args {
+        argv.push(arg.to_string());
+    }
 
-    // Rust String 内部允许 0 字节，但 C 的字符串是 NUL 结尾的。
-    // CString::new 在遇到内部 0 字节时会返回 Err，这里统一当 127 处理。
     let c_argv = match argv
         .iter()
         .map(|arg| std::ffi::CString::new(arg.as_str()))
@@ -276,8 +279,6 @@ fn exec_external_or_exit(command: &Command) -> ! {
         }
     };
 
-    // execvp 成功后当前进程不再是 Rust 程序，而是用户要运行的外部程序。
-    // 因此 execvp 成功时这行代码实际不会执行到（进程已经被替换）。
     match execvp(&c_argv[0], &c_argv) {
         Ok(_) => unreachable!("execvp should not return on success"),
         Err(err) => {

@@ -11,7 +11,7 @@
 //!   - dup2_stdout(fd)→ 让 stdout(1) 指向 fd
 
 use crate::diagnostics::print_error;
-use crate::types::{Command, OutputRedirection, ShellResult};
+use crate::types::{Command, OutputRedirection, ShellResult, ShellWord};
 use nix::fcntl::{OFlag, open};
 use nix::sys::stat::Mode;
 use nix::unistd::{dup, dup2_stdin, dup2_stdout};
@@ -144,7 +144,8 @@ pub fn handle_redirection_or_exit(command: &Command) {
 /// 打开输入重定向文件（`<`）。
 ///
 /// open(path, O_RDONLY)：只读模式打开。文件必须已存在。
-fn open_input_redirection(path: &str) -> ShellResult<OwnedFd> {
+fn open_input_redirection(path: &ShellWord) -> ShellResult<OwnedFd> {
+    let path = redirection_path(path, "<")?;
     open(path, OFlag::O_RDONLY, Mode::empty())
         .map_err(|err| format!("{}: cannot open for input: {}", path, err).into())
 }
@@ -157,16 +158,26 @@ fn open_input_redirection(path: &str) -> ShellResult<OwnedFd> {
 fn open_output_redirection(output_redirection: &OutputRedirection) -> ShellResult<OwnedFd> {
     match output_redirection {
         OutputRedirection::Truncate(path) => open(
-            path.as_str(),
+            redirection_path(path, ">")?,
             OFlag::O_CREAT | OFlag::O_WRONLY | OFlag::O_TRUNC,
             Mode::from_bits_truncate(0o644),
         )
         .map_err(|err| format!("{}: cannot open for output: {}", path, err).into()),
         OutputRedirection::Append(path) => open(
-            path.as_str(),
+            redirection_path(path, ">>")?,
             OFlag::O_CREAT | OFlag::O_WRONLY | OFlag::O_APPEND,
             Mode::from_bits_truncate(0o644),
         )
         .map_err(|err| format!("{}: cannot open for output: {}", path, err).into()),
     }
+}
+
+fn redirection_path<'a>(path: &'a ShellWord, operator: &str) -> ShellResult<&'a str> {
+    path.as_lit_str().ok_or_else(|| {
+        format!(
+            "internal error: {} redirection target should already be expanded to a literal path",
+            operator
+        )
+        .into()
+    })
 }

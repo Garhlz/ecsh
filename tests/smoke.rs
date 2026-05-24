@@ -2,13 +2,22 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn run_ecsh(input: &str) -> String {
+    run_ecsh_with_env(input, &[])
+}
+
+fn run_ecsh_with_env(input: &str, envs: &[(&str, &str)]) -> String {
     let exe = env!("CARGO_BIN_EXE_ecsh");
-    let mut child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn ecsh");
+        .stderr(Stdio::piped());
+
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+
+    let mut child = command.spawn().expect("failed to spawn ecsh");
 
     child
         .stdin
@@ -101,4 +110,51 @@ exit
     );
 
     assert!(output.contains("\n1\n"));
+}
+
+#[test]
+fn smoke_expands_runtime_shell_words() {
+    let output = run_ecsh_with_env(
+        r#"$[...["echo", "from-head"]]
+echo prefix-$HOME
+echo ${HOME}
+echo $[1 + 2]
+echo $[...["a", "b", "c"]]
+echo $(printf cmdsub)
+false
+$["status"]
+exit
+"#,
+        &[("HOME", "/tmp/ecsh-stage6-home")],
+    );
+
+    assert!(output.contains("from-head"));
+    assert!(output.contains("prefix-/tmp/ecsh-stage6-home"));
+    assert!(output.contains("\n/tmp/ecsh-stage6-home\n"));
+    assert!(output.contains("\n3\n"));
+    assert!(output.contains("\na b c\n"));
+    assert!(output.contains("cmdsub"));
+    assert!(output.contains("\n1\n"));
+}
+
+#[test]
+fn smoke_expands_builtin_args_and_redirection_targets() {
+    let out_path = format!(
+        "{}/ecsh-stage6-redirection-out",
+        std::env::temp_dir().display()
+    );
+    let output = run_ecsh_with_env(
+        r#"cd $["/tmp"]
+pwd
+echo hi > $OUT_PATH
+cat < ${OUT_PATH}
+exit
+"#,
+        &[("OUT_PATH", &out_path)],
+    );
+
+    assert!(output.contains("\n/tmp\n"));
+    assert!(output.contains("\nhi\n"));
+
+    let _ = std::fs::remove_file(out_path);
 }

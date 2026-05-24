@@ -6,9 +6,9 @@
 //!   - 执行层：ShellState, CommandStatus, CommandFlow, Redirection
 //!   - 作业层：Job, JobProcess, JobStatus, ProcessState
 
+use crate::ecscript::env::Environment;
 use nix::unistd::Pid;
 use std::os::fd::RawFd;
-
 /// shell 内部统一的 Result 类型。
 pub type ShellResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -17,35 +17,26 @@ pub type ShellResult<T> = Result<T, Box<dyn std::error::Error>>;
 /// 一条完整的命令：程序名 + 参数列表 + 重定向。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command {
-    pub program: String,
-    pub args: Vec<String>,
+    pub program: ShellWord,
+    pub args: Vec<ShellWord>,
     pub redirection: Redirection,
 }
 
-/// Display 实现：将 Command 还原为可读的命令行形式，用于诊断和 `jobs` 输出。
 impl std::fmt::Display for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.program)?;
-
         for arg in &self.args {
             write!(f, " {}", arg)?;
         }
-
         if let Some(stdin) = &self.redirection.stdin {
             write!(f, " < {}", stdin)?;
         }
-
         if let Some(stdout) = &self.redirection.stdout {
             match stdout {
-                OutputRedirection::Truncate(path) => {
-                    write!(f, " > {}", path)?;
-                }
-                OutputRedirection::Append(path) => {
-                    write!(f, " >> {}", path)?;
-                }
+                OutputRedirection::Truncate(path) => write!(f, " > {}", path)?,
+                OutputRedirection::Append(path) => write!(f, " >> {}", path)?,
             }
         }
-
         Ok(())
     }
 }
@@ -119,6 +110,8 @@ pub struct ShellState {
 
     /// 当前正在占用终端前台的进程组（记录用，主要是表达运行时状态）。
     pub current_fg_pgid: Option<Pid>,
+
+    pub script_env: Environment<'static>, // ← 新增：ecscript 全局根环境
 }
 
 /// 命令退出码（即 `$?` 的值）。
@@ -157,7 +150,7 @@ pub enum CommandFlow {
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct Redirection {
     /// `< file`：stdin 从文件读取。
-    pub stdin: Option<String>,
+    pub stdin: Option<ShellWord>,
     /// `> file` 或 `>> file`：stdout 写入文件。
     pub stdout: Option<OutputRedirection>,
 }
@@ -166,9 +159,9 @@ pub struct Redirection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutputRedirection {
     /// `>`：覆盖写入。
-    Truncate(String),
+    Truncate(ShellWord),
     /// `>>`：追加写入。
-    Append(String),
+    Append(ShellWord),
 }
 
 // ── 作业控制 ────────────────────────────────────────────────────────
@@ -233,10 +226,10 @@ pub enum JobStatus {
 // ── 词法分析 ────────────────────────────────────────────────────────
 
 /// 词法分析的输出 Token。
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Token {
     /// 普通词（程序名、参数、文件名等）。
-    Word(String),
+    Word(ShellWord),
     /// `|`
     Pipe,
     /// `&&`
@@ -253,6 +246,57 @@ pub enum Token {
     RedirectionAppend,
     /// `;`
     Semicolon,
+}
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct ShellWord {
+    pub fragments: Vec<WordFragment>,
+}
+
+impl ShellWord {
+    /// 构造一个纯字面量的 ShellWord。
+    pub fn lit(s: impl Into<String>) -> Self {
+        ShellWord {
+            fragments: vec![WordFragment::Lit(s.into())],
+        }
+    }
+
+    /// 如果 ShellWord 恰好只含一个 Lit 片段，返回其字面量文本。
+    pub fn as_lit_str(&self) -> Option<&str> {
+        match self.fragments.as_slice() {
+            [WordFragment::Lit(s)] => Some(s.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ShellWord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for frag in &self.fragments {
+            match frag {
+                WordFragment::Lit(s) => write!(f, "{}", s)?,
+                WordFragment::Var(name) => write!(f, "${}", name)?,
+                WordFragment::EnvVar(name) => write!(f, "${{{}}}", name)?,
+                WordFragment::Cmd(src) => write!(f, "$({})", src)?,
+                WordFragment::Expr { src, spread } => {
+                    if *spread {
+                        write!(f, "$[...{}]", src)?
+                    } else {
+                        write!(f, "$[{}]", src)?
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum WordFragment {
+    Lit(String),
+    Var(String),
+    EnvVar(String),
+    Cmd(String),
+    Expr { src: String, spread: bool },
 }
 
 /// 词法分析器的状态机状态。

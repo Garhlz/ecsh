@@ -7,6 +7,7 @@ description = "Elaine & Cornelia's shell: a learning-oriented Unix-like shell wr
 
 [dependencies]
 dirs-next = "2.0.0"
+libc = "0.2.186"
 nix = { version = "0.31.3", features = ["process", "fs", "term", "hostname", "signal"] }
 rustyline = "18.0.0"
 serde = { version = "1.0", features = ["derive"] }

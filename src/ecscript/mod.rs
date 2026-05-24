@@ -1,14 +1,14 @@
 mod ast;
 mod builtin;
-mod env;
+pub mod env;
 pub mod error;
 mod eval;
 mod func;
 mod io_state;
-mod lexer;
+pub mod lexer;
 mod parser;
 mod pratt;
-mod value;
+pub mod value;
 
 use self::{
     env::Environment,
@@ -93,4 +93,20 @@ pub fn reset_repl_output_state() {
 
 pub fn repl_output_needs_newline() -> bool {
     io_state::output_needs_newline()
+}
+
+/// tokenize → parse → eval 一步到位
+pub fn eval_expr_src(src: &str, env: &Environment<'_>) -> error::EvalResult<Value> {
+    let tokens = lexer::tokenize(src).map_err(|e| {
+        // 把 lexer 的 String error 转成 RuntimeError
+        RuntimeError::new(0, error::RuntimeErrorKind::ParseInExpr, e.message)
+    })?;
+
+    let expr = pratt::parse_expr(&tokens).map_err(|e| {
+        RuntimeError::new(e.offset, error::RuntimeErrorKind::ParseInExpr, e.message)
+    })?;
+
+    let value = eval::eval_expr(&expr, env)?;
+
+    Ok(value)
 }

@@ -38,7 +38,7 @@ pub enum BuiltinKind {
 ///
 /// 所有内置命令名称只在这里维护一份，避免分散在各个 match 语句中。
 pub fn builtin_kind(command: &Command) -> Option<BuiltinKind> {
-    match command.program.as_str() {
+    match command.program.as_lit_str().unwrap_or("") {
         "help" => Some(BuiltinKind::Help),
         "exit" => Some(BuiltinKind::Exit),
         "cd" => Some(BuiltinKind::Cd),
@@ -145,7 +145,7 @@ fn run_cd(command: &Command) -> CommandStatus {
         return CommandStatus::failure();
     }
 
-    let dir = if command.args.is_empty() {
+    let dir: String = if command.args.is_empty() {
         match std::env::var("HOME") {
             Ok(home) => home,
             Err(_) => {
@@ -154,7 +154,7 @@ fn run_cd(command: &Command) -> CommandStatus {
             }
         }
     } else {
-        command.args[0].clone()
+        command.args[0].as_lit_str().unwrap_or("").to_string()
     };
 
     if let Err(err) = std::env::set_current_dir(&dir) {
@@ -201,7 +201,8 @@ fn run_export(command: &Command) -> CommandStatus {
         return CommandStatus::failure();
     }
 
-    let Some((key, value)) = command.args[0].split_once('=') else {
+    let arg = command.args[0].as_lit_str().unwrap_or("");
+    let Some((key, value)) = arg.split_once('=') else {
         print_error("export: usage: export KEY=value");
         return CommandStatus::failure();
     };
@@ -241,7 +242,7 @@ fn run_unset(command: &Command) -> CommandStatus {
         return CommandStatus::failure();
     }
 
-    let key = &command.args[0];
+    let key = command.args[0].as_lit_str().unwrap_or("");
     if !is_valid_env_key(key) {
         print_error(format!("unset: invalid variable name: {}", key));
         return CommandStatus::failure();

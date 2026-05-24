@@ -3,77 +3,59 @@
 //! 状态机有三种模式：Normal（正常）、SingleQuoted（单引号）、DoubleQuoted（双引号）。
 //! 空格和操作符在 Normal 模式下作为 token 边界；引号内所有内容保留为字面量。
 
-use crate::types::{LexerStatus, ShellState, Token};
+use crate::types::{LexerStatus, ShellState, ShellWord, Token, WordFragment};
 
-/// 将一行输入拆分为 Token 向量。
-///
-/// 处理流程：
-///   - 按字符遍历，根据当前 LexerStatus 选择不同的处理规则
-///   - 遇到空格或操作符时，将当前累积的词 flush 为 Token::Word
-///   - `$` 触发变量展开：支持 `$?`、`$NAME`、`${NAME}`
-///   - 引号切换 lexer 状态：`'` 进入 SingleQuoted，`"` 进入 DoubleQuoted
-///   - `\` 转义下一个字符
-///
-/// 返回 Err 的情况：未闭合引号、单独的结尾反斜杠、非法的变量展开语法。
-pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
+/// 将一行输入拆分为 Token Vector。
+pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, String> {
     let mut chars = line.chars().peekable();
     let mut lexer_status = LexerStatus::Normal;
-    let mut acc_word: String = String::new();
-    let mut result = Vec::new();
+
+    let mut lit_buffer: String = String::new(); // 之后会加入到fragments中
+
+    let mut fragments: Vec<WordFragment> = Vec::new(); // 一个Token::Word(fragments)
+
+    let mut tokens = Vec::new();
 
     while let Some(ch) = chars.next() {
         match lexer_status {
             // ── Normal 模式：操作符和空白有特殊意义 ──
             LexerStatus::Normal => match ch {
                 ch if ch.is_whitespace() => {
-                    flush_word(&mut result, &mut acc_word);
+                    flush_word(&mut lit_buffer, &mut fragments, &mut tokens);
                 }
-                '|' => match chars.peek().copied() {
-                    None => {
-                        flush_word(&mut result, &mut acc_word);
-                        result.push(Token::Pipe);
-                    }
-                    Some('|') => {
-                        let _ = chars.next();
-                        flush_word(&mut result, &mut acc_word);
-                        result.push(Token::OrIf);
-                    }
-                    Some(_) => {
-                        flush_word(&mut result, &mut acc_word);
-                        result.push(Token::Pipe);
-                    }
-                },
-                '&' => match chars.peek().copied() {
-                    Some('&') => {
-                        let _ = chars.next();
-                        flush_word(&mut result, &mut acc_word);
-                        result.push(Token::AndIf);
-                    }
-                    _ => {
-                        flush_word(&mut result, &mut acc_word);
-                        result.push(Token::Ampersand);
-                    }
-                },
+
+                '|' => {
+                    flush_word(&mut lit_buffer, &mut fragments, &mut tokens);
+                    let kind = if chars.next_if_eq(&'|').is_some() {
+                        Token::OrIf
+                    } else {
+                        Token::Pipe
+                    };
+                    tokens.push(kind);
+                }
+                '&' => {
+                    flush_word(&mut lit_buffer, &mut fragments, &mut tokens);
+                    let kind = if chars.next_if_eq(&'&').is_some() {
+                        Token::AndIf
+                    } else {
+                        Token::Ampersand
+                    };
+                    tokens.push(kind);
+                }
                 '<' => {
-                    flush_word(&mut result, &mut acc_word);
-                    result.push(Token::RedirectionIn);
+                    flush_word(&mut lit_buffer, &mut fragments, &mut tokens);
+                    tokens.push(Token::RedirectionIn);
                 }
-                '>' => match chars.peek().copied() {
-                    None => {
-                        flush_word(&mut result, &mut acc_word);
-                        result.push(Token::RedirectionTruncate);
-                    }
-                    Some('>') => {
-                        let _ = chars.next();
-                        flush_word(&mut result, &mut acc_word);
-                        result.push(Token::RedirectionAppend);
-                    }
-                    Some(_) => {
-                        flush_word(&mut result, &mut acc_word);
-                        result.push(Token::RedirectionTruncate);
-                    }
-                },
-                '$' => handle_dollar(&mut chars, &mut acc_word, state)?,
+                '>' => {
+                    flush_word(&mut lit_buffer, &mut fragments, &mut tokens);
+                    let kind = if chars.next_if_eq(&'>').is_some() {
+                        Token::RedirectionAppend
+                    } else {
+                        Token::RedirectionTruncate
+                    };
+                    tokens.push(kind);
+                }
+                '$' => handle_dollar(&mut chars, &mut lit_buffer, &mut fragments)?,
                 '\'' => {
                     lexer_status = LexerStatus::SingleQuoted;
                 }
@@ -81,20 +63,19 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
                     lexer_status = LexerStatus::DoubleQuoted;
                 }
                 ';' => {
-                    flush_word(&mut result, &mut acc_word);
-                    result.push(Token::Semicolon);
+                    flush_word(&mut lit_buffer, &mut fragments, &mut tokens);
+                    tokens.push(Token::Semicolon);
                 }
-                '\\' => match chars.peek().copied() {
-                    None => {
+                '\\' => {
+                    // 反斜杠转义应该继续留在当前 word 内部
+                    if let Some(ch) = chars.next() {
+                        lit_buffer.push(ch);
+                    } else {
                         return Err("trailing backslash".to_string());
                     }
-                    Some(ch) => {
-                        let _ = chars.next();
-                        acc_word.push(ch);
-                    }
-                },
+                }
                 _ => {
-                    acc_word.push(ch);
+                    lit_buffer.push(ch);
                 }
             },
 
@@ -103,33 +84,32 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
                 '\'' => {
                     lexer_status = LexerStatus::Normal;
                 }
-                _ => acc_word.push(ch),
+                _ => lit_buffer.push(ch),
             },
 
             // ── 双引号模式：保留空白和操作符字面量，但 $ 和 \" 仍会被处理 ──
             LexerStatus::DoubleQuoted => match ch {
-                '\"' => lexer_status = LexerStatus::Normal,
-                '$' => handle_dollar(&mut chars, &mut acc_word, state)?,
-                '\\' => match chars.peek().copied() {
-                    None => {
+                '"' => lexer_status = LexerStatus::Normal,
+                '$' => handle_dollar(&mut chars, &mut lit_buffer, &mut fragments)?,
+                '\\' => {
+                    if let Some(ch) = chars.next() {
+                        // 目前只能转义这三个字符
+                        if matches!(ch, '"' | '$' | '\\') {
+                            lit_buffer.push(ch);
+                        } else {
+                            lit_buffer.push('\\');
+                            lit_buffer.push(ch);
+                        }
+                    } else {
                         return Err("trailing backslash in double quotes".to_string());
                     }
-                    Some(ch) if matches!(ch, '\"' | '$' | '\\') => {
-                        let _ = chars.next();
-                        acc_word.push(ch);
-                    }
-                    Some(ch) => {
-                        let _ = chars.next();
-                        acc_word.push('\\');
-                        acc_word.push(ch);
-                    }
-                },
-                _ => acc_word.push(ch),
+                }
+                _ => lit_buffer.push(ch),
             },
         }
     }
 
-    // 输入结束但引号未闭合 → 报错。
+    // 输入结束但引号未闭合,报错。
     if let LexerStatus::DoubleQuoted = lexer_status {
         return Err("unterminated double quote".to_string());
     }
@@ -137,120 +117,309 @@ pub fn tokenize(line: &str, state: &ShellState) -> Result<Vec<Token>, String> {
         return Err("unterminated single quote".to_string());
     }
 
-    flush_word(&mut result, &mut acc_word);
-    Ok(result)
+    flush_word(&mut lit_buffer, &mut fragments, &mut tokens);
+    Ok(tokens)
 }
 
-/// 将当前累积的词提交为 Token::Word，并重置 acc_word。
-///
+/// 将当前累积的字面量提交到fragments数组中，并重置buffer。
 /// 使用 `std::mem::take` 把 String 所有权移交给 Token，避免 clone。
-fn flush_word(result: &mut Vec<Token>, acc_word: &mut String) {
-    if !acc_word.is_empty() {
-        result.push(Token::Word(std::mem::take(acc_word)));
+fn flush_buffer(lit_buffer: &mut String, fragments: &mut Vec<WordFragment>) {
+    if !lit_buffer.is_empty() {
+        fragments.push(WordFragment::Lit(std::mem::take(lit_buffer)));
     }
 }
 
-/// 展开变量：`$?` 取上一条命令退出码；`$NAME` 取环境变量值。
-///
-/// 未定义的环境变量展开为空字符串（与 bash/zsh 行为一致）。
-fn expand_variable(name: &str, state: &ShellState) -> String {
-    if name == "?" {
-        state.last_status.code.to_string()
-    } else {
-        std::env::var(name).unwrap_or_default()
+// 同理，提交token
+fn flush_word(lit_buffer: &mut String, fragments: &mut Vec<WordFragment>, tokens: &mut Vec<Token>) {
+    flush_buffer(lit_buffer, fragments);
+    if !fragments.is_empty() {
+        tokens.push(Token::Word(ShellWord {
+            fragments: std::mem::take(fragments),
+        }));
     }
 }
 
-/// 检查字符是否可作为变量名的首字符：[A-Za-z_]。
-fn is_variable_name_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
-}
-
-/// 检查字符是否可作为变量名的非首字符：[A-Za-z0-9_]。
-fn is_variable_name_continue(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
-}
-
-/// 处理 `$` 后面的变量展开语法。
-///
-/// 进入此函数时，外层已经消费了 `$`。
-/// 支持的语法：
-///   - `$?`      → 展开为上一条命令的退出码
-///   - `$NAME`   → 最长匹配变量名，展开为环境变量值
-///   - `${NAME}` → 花括号明确变量名边界，只展开 `${NAME}`，花括号不进入结果
-///   - 其他       → `$` 保留为字面量
-///
-/// 未定义变量展开为空字符串。
 fn handle_dollar(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    acc_word: &mut String,
-    state: &ShellState,
+    lit_buffer: &mut String,
+    fragments: &mut Vec<WordFragment>,
 ) -> Result<(), String> {
+    // 进入之前`$`已经消费掉了
     match chars.peek().copied() {
         None => {
             // 行尾的孤 $，保留字面量。
-            acc_word.push('$');
+            lit_buffer.push('$');
             Ok(())
         }
         Some('?') => {
+            // 视为var
             let _ = chars.next();
-            let expanded_word = expand_variable("?", state);
-            acc_word.push_str(&expanded_word);
+            flush_buffer(lit_buffer, fragments);
+            fragments.push(WordFragment::Var("?".to_string()));
             Ok(())
         }
         Some('{') => {
-            // `${NAME}` 中花括号只是变量名边界，不出现在展开结果中。
+            flush_buffer(lit_buffer, fragments); // 把之前的字面量消费掉
+
+            // 解析为EnvVar,不需要深度计数
             let _ = chars.next();
 
-            match chars.peek().copied() {
+            match chars.next() {
                 Some('}') => Err("empty variable name in braces".to_string()),
-                Some(start) if is_variable_name_start(start) => {
-                    let mut origin_word = String::new();
-                    origin_word.push(start);
-                    let _ = chars.next();
-                    let mut flag = false;
-                    while let Some(successor) = chars.peek().copied() {
-                        if is_variable_name_continue(successor) {
-                            let _ = chars.next();
-                            origin_word.push(successor);
-                        } else if successor == '}' {
-                            let _ = chars.next();
-                            flag = true;
+                Some(start) if start == '_' || start.is_ascii_alphabetic() => {
+                    // 开始循环解析{}中的环境变量
+                    let mut is_close = false;
+
+                    let mut envvar_buffer = String::new();
+                    envvar_buffer.push(start);
+
+                    loop {
+                        if let Some(succ) =
+                            chars.next_if(|ch| *ch == '_' || ch.is_ascii_alphanumeric())
+                        {
+                            envvar_buffer.push(succ);
+                        } else if chars.next_if_eq(&'}').is_some() {
+                            is_close = true;
                             break;
                         } else {
                             break;
                         }
                     }
-                    if !flag {
+
+                    if !is_close {
                         return Err("unterminated ${...} expansion".to_string());
                     }
-                    let expanded_word = expand_variable(&origin_word, state);
-                    acc_word.push_str(expanded_word.as_str());
+
+                    fragments.push(WordFragment::EnvVar(envvar_buffer));
+
                     Ok(())
                 }
                 Some(_) => Err("invalid variable name in braces".to_string()),
                 None => Err("unterminated ${...} expansion".to_string()),
             }
         }
-        Some(start) => {
-            if is_variable_name_start(start) {
+        Some('(') => {
+            // 解析为 Cmd,需要深度计数（处理引号和转义）
+            flush_buffer(lit_buffer, fragments); // 把之前的字面量消费掉
+
+            let _ = chars.next();
+            let mut depth = 1;
+
+            let mut cmd_buffer = String::new();
+
+            enum LoopState {
+                Normal,
+                InDoubleQuote,
+                InSingleQuote,
+            }
+            let mut loop_state = LoopState::Normal;
+
+            loop {
+                match loop_state {
+                    LoopState::Normal => match chars.next() {
+                        Some(')') => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            cmd_buffer.push(')');
+                        }
+                        Some('(') => {
+                            depth += 1;
+                            cmd_buffer.push('(');
+                        }
+                        Some('\\') => {
+                            // 保留原始文本，留给之后的程序处理
+                            cmd_buffer.push('\\');
+                            let Some(nxt) = chars.next() else {
+                                return Err("unterminated $(...) expansion".to_string());
+                            };
+                            cmd_buffer.push(nxt);
+                        }
+                        Some('"') => {
+                            loop_state = LoopState::InDoubleQuote;
+                            cmd_buffer.push('"');
+                        }
+                        Some('\'') => {
+                            loop_state = LoopState::InSingleQuote;
+                            cmd_buffer.push('\'');
+                        }
+                        Some(ch) => {
+                            cmd_buffer.push(ch);
+                        }
+                        None => return Err("unterminated $(...) expansion".to_string()),
+                    },
+                    // 1. 括号不再影响整个dollar表达式
+                    // 2. 处理转义
+                    // 3. 不嵌套处理$，将其视为普通char
+                    LoopState::InDoubleQuote => match chars.next() {
+                        Some('"') => {
+                            loop_state = LoopState::Normal;
+                            cmd_buffer.push('"');
+                        }
+                        Some('\\') => {
+                            cmd_buffer.push('\\');
+                            if let Some(nxt) = chars.next() {
+                                cmd_buffer.push(nxt);
+                            } else {
+                                return Err("unterminated $(...) expansion".to_string());
+                            };
+                        }
+                        Some(ch) => {
+                            cmd_buffer.push(ch);
+                        }
+                        None => return Err("unterminated $(...) expansion".to_string()),
+                    },
+                    LoopState::InSingleQuote => match chars.next() {
+                        Some('\'') => {
+                            loop_state = LoopState::Normal;
+                            cmd_buffer.push('\'');
+                        }
+
+                        Some(ch) => {
+                            cmd_buffer.push(ch);
+                        }
+                        None => return Err("unterminated $(...) expansion".to_string()),
+                    },
+                }
+            }
+
+            fragments.push(WordFragment::Cmd(cmd_buffer));
+
+            Ok(())
+        }
+        Some('[') => {
+            // 解析为 ecscript Expr,需要深度计数（处理引号和转义）
+            flush_buffer(lit_buffer, fragments); // 把之前的字面量消费掉
+
+            let _ = chars.next();
+            let mut depth = 1;
+
+            let mut expr_buffer = String::new();
+
+            let mut is_spread = false;
+            let mut dot_cnt = 0;
+
+            while chars.next_if_eq(&'.').is_some() {
+                dot_cnt += 1;
+            }
+
+            if dot_cnt == 3 {
+                is_spread = true;
+            } else {
+                for _ in 0..dot_cnt {
+                    expr_buffer.push('.');
+                }
+            }
+
+            enum LoopState {
+                Normal,
+                InDoubleQuote,
+                InSingleQuote,
+            }
+            let mut loop_state = LoopState::Normal;
+
+            loop {
+                match loop_state {
+                    LoopState::Normal => match chars.next() {
+                        Some(']') => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            expr_buffer.push(']');
+                        }
+                        Some('[') => {
+                            depth += 1;
+                            expr_buffer.push('[');
+                        }
+                        Some('\\') => {
+                            // 保留原始文本，留给之后的程序处理
+                            expr_buffer.push('\\');
+                            let Some(nxt) = chars.next() else {
+                                return Err("unterminated $[...] expansion".to_string());
+                            };
+                            expr_buffer.push(nxt);
+                        }
+                        Some('"') => {
+                            loop_state = LoopState::InDoubleQuote;
+                            expr_buffer.push('"');
+                        }
+                        Some('\'') => {
+                            loop_state = LoopState::InSingleQuote;
+                            expr_buffer.push('\'');
+                        }
+                        Some(ch) => {
+                            expr_buffer.push(ch);
+                        }
+                        None => return Err("unterminated $[...] expansion".to_string()),
+                    },
+                    // 1. 括号不再影响整个dollar表达式
+                    // 2. 处理转义
+                    // 3. 不嵌套处理$，将其视为普通char
+                    LoopState::InDoubleQuote => match chars.next() {
+                        Some('"') => {
+                            loop_state = LoopState::Normal;
+                            expr_buffer.push('"');
+                        }
+                        Some('\\') => {
+                            expr_buffer.push('\\');
+                            if let Some(nxt) = chars.next() {
+                                expr_buffer.push(nxt);
+                            } else {
+                                return Err("unterminated $[...] expansion".to_string());
+                            };
+                        }
+                        Some(ch) => {
+                            expr_buffer.push(ch);
+                        }
+                        None => return Err("unterminated $[...] expansion".to_string()),
+                    },
+                    LoopState::InSingleQuote => match chars.next() {
+                        Some('\'') => {
+                            loop_state = LoopState::Normal;
+                            expr_buffer.push('\'');
+                        }
+
+                        Some(ch) => {
+                            expr_buffer.push(ch);
+                        }
+                        None => return Err("unterminated $[...] expansion".to_string()),
+                    },
+                }
+            }
+
+            fragments.push(WordFragment::Expr {
+                src: expr_buffer,
+                spread: is_spread,
+            });
+
+            Ok(())
+        }
+        Some(ch) => {
+            if ch == '_' || ch.is_ascii_alphabetic() {
+                // 解析为普通var， 也就是先匹配ecscript本地变量，然后fallback到环境变量
                 // `$NAME` 使用最长匹配：一直读到第一个非变量名字符为止。
-                let mut origin_word = String::new();
-                origin_word.push(start);
+
+                flush_buffer(lit_buffer, fragments); // 先提交之前的字面量部分
+
                 let _ = chars.next();
-                while let Some(successor) = chars.peek().copied() {
-                    if is_variable_name_continue(successor) {
-                        let _ = chars.next();
-                        origin_word.push(successor);
+                let mut var_buffer = String::new();
+                var_buffer.push(ch);
+
+                loop {
+                    if let Some(succ) = chars.next_if(|ch| *ch == '_' || ch.is_ascii_alphanumeric())
+                    {
+                        var_buffer.push(succ);
                     } else {
                         break;
                     }
                 }
-                let expanded_word = expand_variable(&origin_word, state);
-                acc_word.push_str(expanded_word.as_str());
+
+                fragments.push(WordFragment::Var(var_buffer));
             } else {
                 // `$` 后不是当前支持的展开形式，保留字面量 `$`。
-                acc_word.push('$');
+                lit_buffer.push('$');
             }
             Ok(())
         }
