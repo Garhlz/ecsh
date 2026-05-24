@@ -289,7 +289,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                         end: offset,
                     })
                 } else {
-                    return Err(ParseError::new(
+                    return Err(ParseError::incomplete(
                         offset,
                         "unterminated raw string literal".to_string(),
                     ));
@@ -392,7 +392,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                                     }
                                 }
                             } else {
-                                return Err(ParseError::new(
+                                return Err(ParseError::incomplete(
                                     offset,
                                     "unterminated escape at end of string".to_string(),
                                 ));
@@ -414,7 +414,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                         end: offset,
                     })
                 } else {
-                    return Err(ParseError::new(
+                    return Err(ParseError::incomplete(
                         offset,
                         "unterminated string literal".to_string(),
                     ));
@@ -579,7 +579,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                         }
                     }
                     if !is_close {
-                        return Err(ParseError::new(offset, "unterminated block comment"));
+                        return Err(ParseError::incomplete(offset, "unterminated block comment"));
                     }
                 } else if chars.next_if_eq(&'=').is_some() {
                     offset += '='.len_utf8();

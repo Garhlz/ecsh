@@ -821,6 +821,7 @@ echo $[to_json(data)] | jq .name
 ### 阶段 7：顶层集成与文件执行
 
 **目标**：把独立 ecscript 内核真正接到 ecsh 上。
+**当前状态**：在接回 `ecsh` 主入口之前，已经有独立 `ecscript` binary 可用于 REPL、stdin、文件执行和 `-e`。
 
 **建议改动的现有模块**
 - [ ] `src/main.rs`：统一入口分派

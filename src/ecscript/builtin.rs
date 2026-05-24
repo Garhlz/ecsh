@@ -1,10 +1,12 @@
 use crate::ecscript::{
     error::{RuntimeError, RuntimeErrorKind},
-    value::{Builtin, Value},
+    io_state,
+    value::{Builtin, Value, display_value},
 };
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
+    io::{self, Write},
     rc::Rc,
 };
 
@@ -18,6 +20,8 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
         "pop" => Some(Builtin::Pop),
         "insert" => Some(Builtin::Insert),
         "remove" => Some(Builtin::Remove),
+        "print" => Some(Builtin::Print),
+        "println" => Some(Builtin::Println),
         _ => None,
     }
 }
@@ -174,6 +178,16 @@ pub fn run_builtin(builtin: Builtin, args: Vec<Value>, span: usize) -> Result<Va
             let json = to_json_value(&args[0], span)?;
             Ok(Value::String(json.to_string()))
         }
+        Builtin::Print => {
+            let text = format_print_args(&args);
+            write_stdout(&text, false, span)?;
+            Ok(Value::Nil)
+        }
+        Builtin::Println => {
+            let text = format_print_args(&args);
+            write_stdout(&text, true, span)?;
+            Ok(Value::Nil)
+        }
     }
 }
 
@@ -296,9 +310,43 @@ fn checked_array_index(
     crate::ecscript::value::validate_array_index(index, len, allow_end, span)
 }
 
+fn format_print_args(args: &[Value]) -> String {
+    args.iter().map(display_value).collect::<Vec<_>>().join(" ")
+}
+
+fn write_stdout(text: &str, newline: bool, span: usize) -> Result<(), RuntimeError> {
+    let mut stdout = io::stdout().lock();
+    if newline {
+        writeln!(stdout, "{}", text).map_err(|err| {
+            RuntimeError::new(
+                span,
+                RuntimeErrorKind::IoError,
+                format!("stdout write failed: {}", err),
+            )
+        })?;
+    } else {
+        write!(stdout, "{}", text).map_err(|err| {
+            RuntimeError::new(
+                span,
+                RuntimeErrorKind::IoError,
+                format!("stdout write failed: {}", err),
+            )
+        })?;
+        stdout.flush().map_err(|err| {
+            RuntimeError::new(
+                span,
+                RuntimeErrorKind::IoError,
+                format!("stdout flush failed: {}", err),
+            )
+        })?;
+    }
+    io_state::note_output(text, newline);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::run_builtin;
+    use super::{format_print_args, run_builtin};
     use crate::ecscript::{
         error::RuntimeErrorKind,
         value::{Builtin, Value},
@@ -396,5 +444,16 @@ mod tests {
 
         let result = run_builtin(Builtin::ToJson, vec![Value::Object(obj)], 0).unwrap();
         assert_eq!(result, Value::String("{\"a\":1,\"b\":2}".into()));
+    }
+
+    #[test]
+    fn format_print_args_uses_display_style() {
+        let text = format_print_args(&[
+            Value::String("hi".into()),
+            Value::Int(42),
+            Value::Array(Rc::new(RefCell::new(vec![Value::Bool(true)]))),
+        ]);
+
+        assert_eq!(text, "hi 42 [true]");
     }
 }

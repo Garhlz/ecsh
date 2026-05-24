@@ -97,6 +97,8 @@ fn format_with_source(kind: &str, offset: usize, message: &str, src: &str) -> St
 pub struct ParseError {
     pub offset: usize,
     pub message: String,
+    /// true if the parser hit EOF while expecting more tokens — used by REPL to detect incomplete input
+    pub incomplete: bool,
 }
 
 impl ParseError {
@@ -104,6 +106,15 @@ impl ParseError {
         Self {
             offset,
             message: message.into(),
+            incomplete: false,
+        }
+    }
+
+    pub fn incomplete(offset: usize, message: impl Into<String>) -> Self {
+        Self {
+            offset,
+            message: message.into(),
+            incomplete: true,
         }
     }
 
@@ -142,6 +153,7 @@ pub enum RuntimeErrorKind {
     NotCallable,
     ArityMismatch,
     CircularReference,
+    IoError,
     BreakOutsideLoop,
     ContinueOutsideLoop,
     ReturnOutsideFunction,
