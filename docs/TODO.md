@@ -1,4 +1,8 @@
-# ecsh / ecscript 设计与开发路线
+# ecsh / ecscript 设计备忘与演进路线
+
+> 注意：这份文档保留设计推演、阶段拆解和历史思路，内容会比当前实现更长，也可能包含尚未落地的方案。
+> 如果你只想看“项目现在做到哪一步”，请先看 [status.md](/home/elaine/work/projects/ecsh/docs/status.md)；
+> 如果你想看 `ecscript` 当前已经实现的语法与语义，请看 [ecscript-manual.md](/home/elaine/work/projects/ecsh/docs/ecscript-manual.md)。
 
 ## 一、语言设计总览
 
@@ -321,7 +325,7 @@ type ParseResult<T> = Result<T, ParseError>;
 type EvalResult<T> = Result<T, RuntimeError>;
 ```
 
-建议把控制流和错误分开表示：
+控制流与错误的推荐分层：
 
 ```rust
 enum ExecFlow {
@@ -337,7 +341,7 @@ enum ExecFlow {
 - `break` / `continue` / `return` **不是错误**，单独走 `ExecFlow`
 - 真正的语言错误（未定义变量、类型不匹配等）才走 `RuntimeError`
 
-#### RuntimeError 建议结构
+#### RuntimeError 结构
 
 不要只用裸字符串，至少保留错误种类和可选位置信息：
 
@@ -611,7 +615,7 @@ echo $[to_json(data)] | jq .name
 **目标**：补上脚本的抽象能力，并为对象函数字段、返回函数值和状态闭包做好铺垫。
 **当前状态**：已完成。命名函数、匿名函数、`return`、强闭包捕获、对象字段中的函数值调用都已经落地；当前保留的已知边界是“闭包捕获只自动传一层”，多跳透传仍是后续增强项。
 
-**建议新增/扩展**
+**新增/扩展项**
 - [x] `Value::Function(Rc<Function>)`
 - [x] `Stmt::FuncDeclare`
 - [x] `Stmt::Return`
@@ -731,16 +735,16 @@ echo $[to_json(data)] | jq .name
 - [x] 复合赋值：`+= -= *= /= %=`
 - [ ] 函数 / lambda 的尾表达式返回值
 
-**关于尾表达式返回值的建议边界**
+**尾表达式返回值的阶段边界**
 
-- [ ] 若要做，建议**只先做函数 / lambda 体的隐式尾返回**
+- [ ] 若要做，可先只支持函数 / lambda 体的隐式尾返回
 - [ ] 暂时**不要**把普通 block 全部升级为有值表达式
 - [ ] 例如先支持：
   - [ ] `func add(a, b) { a + b }`
   - [ ] `let inc = (x) => { x + 1 }`
 - [ ] 这样能提升函数书写体验，但不会过早引入“block value”整套语义
 
-**P2：值得做，但建议继续后放**
+**P2：可继续后放**
 
 - [ ] 双引号字符串插值（如 `"hello ${name}"` 或等价设计）
 - [ ] 更完整的字符串字面量族（多行字符串、更丰富的 raw string 定界等）
@@ -757,7 +761,7 @@ echo $[to_json(data)] | jq .name
 - [ ] `try/catch`：当前语言仍然适合保持“运行时错误终止执行”的简单模型
 - [ ] 模式匹配 / class / 原型链：都不是当前投入产出比最高的方向
 
-**我建议的实际推进顺序**
+**推荐推进顺序**
 
 1. [x] 注释
 2. [x] 行列号诊断
@@ -800,7 +804,7 @@ echo $[to_json(data)] | jq .name
 **目标**：把独立 ecscript 内核真正接到 ecsh 上。
 **当前状态**：在接回 `ecsh` 主入口之前，已经有独立 `ecscript` binary 可用于 REPL、stdin、文件执行和 `-e`。
 
-**建议改动的现有模块**
+**涉及的现有模块**
 - [ ] `src/main.rs`：统一入口分派
 - [ ] `src/input.rs`：续行读取与 `... ` prompt
 - [ ] `src/parser.rs` 或新增 glue 模块：顶层关键字分派
@@ -825,24 +829,62 @@ echo $[to_json(data)] | jq .name
 
 ---
 
-## 七、既有 Shell 功能待办
+### 阶段 7.5：Shell 诊断与交互收口（已完成）
+
+**目标**：在进入顶层脚本集成前，先把 shell 侧的错误模型、续行行为和交互细节收成一套稳定接口。
+
+**已完成**
+
+- [x] Shell `lexer.rs` 的 `tokenize()` 和 `handle_dollar()` 改为返回 `ParseError`
+      （携带 offset 和 incomplete 标志），不再用裸 `String`
+- [x] Shell `parser.rs` 的 `parse_line()` 及所有子函数改为返回 `ParseError`
+- [x] 未闭合引号/`${}`/`$()`/`$[]` 统一标记为 `ParseError::incomplete`
+- [x] shell 主循环已根据 `incomplete` 继续读续行输入
+- [x] 续行提示符 `... ` 已接入
+- [x] 历史记录改为按完整命令写入，而不是按续行片段写入
+- [x] lexer/parser 测试已适配为比对 `ParseError.message`
+- [x] smoke 已覆盖跨行双引号、跨行 `$[...]` 和 EOF 下的不完整输入报错
+- [x] smoke 已覆盖跨行 `$(...)`
+- [x] shell parse 错误输出已升级为 `line:column + 源码行 + caret`
+- [x] 跨行 `${...}` 的续行 / EOF 边界测试已补齐
+- [x] 续行中的 Ctrl-C 单元测试已补齐
+- [x] shell parse 错误格式化已收束到独立模块
+
+**可继续演进的整理项**
+
+- [ ] shell 侧后续若出现新的运行时诊断类型，可继续沿同一接口扩展
+- [ ] shell 与 `ecscript` 的错误格式若需要完全统一，仍可继续抽公共辅助层
+
+**7.5 可选扩展**
+
+这些能力仍然属于 shell 交互层或使用体验层，可以作为 7.5 的后续扩展继续推进：
 
 ### 高优先
-- [ ] **Tab 补全** — 新增 `src/completion.rs`，实现 rustyline `Completer` trait
-- [ ] **alias / unalias 命令** — alias 展开在 parser 阶段（tokenize 后查表替换）
-- [ ] **配置文件 ~/.ecshrc** — 启动时走文件级 parser + ecscript evaluator 执行（与 `ecsh foo.ecs` 共用同一入口，非逐行 shell 模式）
+- [x] **Tab 补全** — `src/completion.rs` 已接入 rustyline，支持命令名与文件路径补全
+- [x] **alias / unalias 命令** — alias 已在 parser 阶段做顶层首词展开，内置命令已接入
+- [x] **信号处理增强** — `trap EXIT|INT` 已接入；前台 job 的默认信号恢复逻辑保持原有实现
 
 ### 中优先
-- [ ] **here-doc (`<<`)** — lexer 新增 here-doc 状态，执行时用 pipe 或临时文件
-- [ ] **通配符展开 (globbing)** — 新增 `src/expansion.rs`，`*` `?` `[...]` 三种模式
-- [ ] **信号处理增强** — `trap` 命令、边界情况（前台管道信号传播）
+- [x] **更多内置命令** — `type`、`which`、`history` 已接入
+- [ ] **更多内置命令** — `read`、`shift`
 
-### 低优先
-- [ ] **管道增强** — `|&` 同时重定向 stderr、`!` 取反退出码
-- [ ] **更多内置命令** — `type`、`which`、`read`、`shift`、`source`/`.`（走与 `ecsh foo.ecs` 相同的文件级 parser + evaluator，非逐行 shell 模式）、`history`
-- [ ] **subshell `()`** — fork 子 shell 执行括号内命令
+### 阶段 8：Shell 语义补完
 
----
+**目标**：在顶层脚本集成与 7.5 收口完成后，继续补上传统 shell 语义缺口。
+
+**输入与展开**
+
+- [ ] here-doc
+- [ ] 通配符展开 (globbing)
+
+**执行模型**
+
+- [ ] subshell `()`
+
+**作业控制与执行语义**
+
+- [ ] 更完整 job control 语义
+- [ ] 管道增强：`|&` 同时重定向 stderr、`!` 取反退出码
 
 ## 八、技术债
 
