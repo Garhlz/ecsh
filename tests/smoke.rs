@@ -3,12 +3,12 @@ use std::process::{Command, Output, Stdio};
 
 fn run_ecsh(input: &str) -> String {
     let output = run_ecsh_output_with_env(input, &[]);
-    String::from_utf8_lossy(&output.stdout).into_owned()
+    visible_output(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn run_ecsh_with_env(input: &str, envs: &[(&str, &str)]) -> String {
     let output = run_ecsh_output_with_env(input, envs);
-    String::from_utf8_lossy(&output.stdout).into_owned()
+    visible_output(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn run_ecsh_output(input: &str) -> Output {
@@ -46,6 +46,31 @@ fn run_ecsh_output_with_env(input: &str, envs: &[(&str, &str)]) -> Output {
     output
 }
 
+fn visible_output(raw: &str) -> String {
+    raw.lines()
+        .filter_map(|line| {
+            if line.starts_with("[ecsh] ") {
+                None
+            } else {
+                let mut rest = line;
+                loop {
+                    if let Some(stripped) = rest.strip_prefix("$ ") {
+                        rest = stripped;
+                        continue;
+                    }
+                    if let Some(stripped) = rest.strip_prefix("... ") {
+                        rest = stripped;
+                        continue;
+                    }
+                    break;
+                }
+                Some(rest)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn smoke_executes_conditionals_and_quotes() {
     let output = run_ecsh(
@@ -75,7 +100,7 @@ exit
     );
 
     assert!(output.contains("hi"));
-    assert!(output.contains("\n1\n"));
+    assert!(output.lines().any(|line| line == "1"));
 
     let _ = std::fs::remove_file("/tmp/ecsh_smoke_out");
 }
@@ -89,10 +114,10 @@ exit; echo no
 "#,
     );
 
-    assert!(output.contains("\na\n"));
-    assert!(output.contains("\nb\n"));
+    assert!(output.lines().any(|line| line == "a"));
+    assert!(output.lines().any(|line| line == "b"));
     assert!(output.contains("still"));
-    assert!(!output.contains("\nno\n"));
+    assert!(!output.lines().any(|line| line == "no"));
 }
 
 #[test]
@@ -118,7 +143,7 @@ exit
 "#,
     );
 
-    assert!(output.contains("\n1\n"));
+    assert!(output.lines().any(|line| line == "1"));
 }
 
 #[test]
@@ -139,11 +164,11 @@ exit
 
     assert!(output.contains("from-head"));
     assert!(output.contains("prefix-/tmp/ecsh-stage6-home"));
-    assert!(output.contains("\n/tmp/ecsh-stage6-home\n"));
-    assert!(output.contains("\n3\n"));
-    assert!(output.contains("\na b c\n"));
+    assert!(output.lines().any(|line| line == "/tmp/ecsh-stage6-home"));
+    assert!(output.lines().any(|line| line == "3"));
+    assert!(output.lines().any(|line| line == "a b c"));
     assert!(output.contains("cmdsub"));
-    assert!(output.contains("\n1\n"));
+    assert!(output.lines().any(|line| line == "1"));
 }
 
 #[test]
@@ -162,8 +187,8 @@ exit
         &[("OUT_PATH", &out_path)],
     );
 
-    assert!(output.contains("\n/tmp\n"));
-    assert!(output.contains("\nhi\n"));
+    assert!(output.lines().any(|line| line == "/tmp"));
+    assert!(output.lines().any(|line| line == "hi"));
 
     let _ = std::fs::remove_file(out_path);
 }
@@ -179,7 +204,7 @@ fn smoke_continues_multiline_double_quoted_input() {
 fn smoke_continues_multiline_expr_expansion() {
     let output = run_ecsh("echo $[1 +\n2]\nexit\n");
 
-    assert!(output.contains("\n3\n"));
+    assert!(output.lines().any(|line| line == "3"));
 }
 
 #[test]
@@ -204,7 +229,7 @@ fn smoke_supports_alias_and_unalias() {
     let output = run_ecsh("alias ll='echo alias-ok'\nll\nunalias ll\nstatus\nexit\n");
 
     assert!(output.contains("alias-ok"));
-    assert!(output.contains("\n0\n"));
+    assert!(output.lines().any(|line| line == "0"));
 }
 
 #[test]

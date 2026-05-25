@@ -888,9 +888,9 @@ echo $[to_json(data)] | jq .name
 
 ## 八、技术债
 
-- [ ] 去掉 `run_command` 里的 "starting... / ending." 调试输出
-- [ ] `main.rs` 里 `run_parsed_line` 的 clone 开销
-- [ ] parser 的 `ParsedLine` 从 Box 改成 Rc 或 arena
+- [x] 去掉 `run_command` 里的 "starting... / ending." 调试输出
+- [x] `main.rs` 里 `run_parsed_line` 的 clone 开销
+- [x] parser 的 `ParsedLine` 从 Box 改成 Rc 或 arena
 
 ---
 

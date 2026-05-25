@@ -118,6 +118,8 @@ pub fn run_builtin(command: &Command, state: &mut ShellState) -> Option<CommandF
     }
 }
 
+// ── 基础 builtin ───────────────────────────────────────────────────
+
 /// `help` 命令：打印所有内置命令的简单说明。
 pub fn print_help() {
     print_help_title();
@@ -269,7 +271,7 @@ fn is_valid_env_key(key: &str) -> bool {
 /// 先校验变量名合法性再调用 `std::env::remove_var`，避免非法变量名导致 panic。
 fn run_unset(command: &Command) -> CommandStatus {
     if command.args.len() != 1 {
-        print_error("unset: usage: unset KEY");
+        print_usage("unset", "unset KEY");
         return CommandStatus::failure();
     }
 
@@ -283,6 +285,14 @@ fn run_unset(command: &Command) -> CommandStatus {
     CommandStatus::success()
 }
 
+// ── shell 交互 builtin ─────────────────────────────────────────────
+
+/// `alias` 命令：定义、查看或列出别名。
+///
+/// 支持三种模式：
+/// - `alias`
+/// - `alias name=value`
+/// - `alias name`
 fn run_alias(command: &Command, state: &mut ShellState) -> CommandStatus {
     if command.args.is_empty() {
         let mut entries: Vec<_> = state.aliases.iter().collect();
@@ -296,12 +306,14 @@ fn run_alias(command: &Command, state: &mut ShellState) -> CommandStatus {
     for arg in &command.args {
         let arg = arg.as_lit_str().unwrap_or("");
         if let Some((name, value)) = arg.split_once('=') {
+            // 赋值形式直接写入 alias 表。
             if name.is_empty() {
                 print_error("alias: empty alias name");
                 return CommandStatus::failure();
             }
             state.aliases.insert(name.to_string(), value.to_string());
         } else if let Some(value) = state.aliases.get(arg) {
+            // 非赋值形式表示查询已有 alias。
             println!("alias {}='{}'", arg, value);
         } else {
             print_error(format!("alias: no such alias: {}", arg));
@@ -312,9 +324,10 @@ fn run_alias(command: &Command, state: &mut ShellState) -> CommandStatus {
     CommandStatus::success()
 }
 
+/// `unalias` 命令：删除一个或多个别名。
 fn run_unalias(command: &Command, state: &mut ShellState) -> CommandStatus {
     if command.args.is_empty() {
-        print_error("unalias: usage: unalias NAME ...");
+        print_usage("unalias", "unalias NAME ...");
         return CommandStatus::failure();
     }
 
@@ -329,6 +342,9 @@ fn run_unalias(command: &Command, state: &mut ShellState) -> CommandStatus {
     CommandStatus::success()
 }
 
+/// `trap` 命令：查看、注册或删除 trap。
+///
+/// 当前只支持 `EXIT` 和 `INT`。
 fn run_trap(command: &Command, state: &mut ShellState) -> CommandStatus {
     if command.args.is_empty() {
         let mut entries: Vec<_> = state.traps.iter().collect();
@@ -339,6 +355,7 @@ fn run_trap(command: &Command, state: &mut ShellState) -> CommandStatus {
         return CommandStatus::success();
     }
 
+    // `trap - SIGNAL` 表示删除已有 trap。
     if command.args.len() == 2 && command.args[0].as_lit_str() == Some("-") {
         let Some(signal) = normalize_trap_name(command.args[1].as_lit_str().unwrap_or("")) else {
             print_error("trap: only EXIT and INT are supported");
@@ -349,10 +366,11 @@ fn run_trap(command: &Command, state: &mut ShellState) -> CommandStatus {
     }
 
     if command.args.len() != 2 {
-        print_error("trap: usage: trap 'command' EXIT|INT");
+        print_usage("trap", "trap 'command' EXIT|INT");
         return CommandStatus::failure();
     }
 
+    // 普通注册形式：`trap 'command' SIGNAL`。
     let handler = command.args[0].as_lit_str().unwrap_or("");
     let Some(signal) = normalize_trap_name(command.args[1].as_lit_str().unwrap_or("")) else {
         print_error("trap: only EXIT and INT are supported");
@@ -362,6 +380,7 @@ fn run_trap(command: &Command, state: &mut ShellState) -> CommandStatus {
     CommandStatus::success()
 }
 
+/// 归一化 trap 名称，把外部输入折叠到内部键名。
 fn normalize_trap_name(name: &str) -> Option<&'static str> {
     match name {
         "EXIT" => Some("EXIT"),
@@ -370,9 +389,10 @@ fn normalize_trap_name(name: &str) -> Option<&'static str> {
     }
 }
 
+/// `type` 命令：解释一个名字在 shell 中会解析成什么。
 fn run_type(command: &Command, state: &mut ShellState) -> CommandStatus {
     if command.args.is_empty() {
-        print_error("type: usage: type NAME ...");
+        print_usage("type", "type NAME ...");
         return CommandStatus::failure();
     }
 
@@ -399,9 +419,10 @@ fn run_type(command: &Command, state: &mut ShellState) -> CommandStatus {
     }
 }
 
+/// `which` 命令：输出命令名最终解析到的路径或 shell 类型。
 fn run_which(command: &Command, state: &mut ShellState) -> CommandStatus {
     if command.args.is_empty() {
-        print_error("which: usage: which NAME ...");
+        print_usage("which", "which NAME ...");
         return CommandStatus::failure();
     }
 
@@ -426,9 +447,10 @@ fn run_which(command: &Command, state: &mut ShellState) -> CommandStatus {
     }
 }
 
+/// `history` 命令：打印当前 shell 会话的命令历史。
 fn run_history(command: &Command, state: &mut ShellState) -> CommandStatus {
     if !command.args.is_empty() {
-        print_error("history: usage: history");
+        print_usage("history", "history");
         return CommandStatus::failure();
     }
 
@@ -438,12 +460,14 @@ fn run_history(command: &Command, state: &mut ShellState) -> CommandStatus {
     CommandStatus::success()
 }
 
+/// `type` / `which` 的内部统一解析结果。
 enum CommandDescription<'a> {
     Alias(&'a str),
     Builtin,
     External(PathBuf),
 }
 
+/// 按 alias → builtin → PATH 的顺序解析一个命令名。
 fn describe_command<'a>(name: &'a str, state: &'a ShellState) -> Option<CommandDescription<'a>> {
     if let Some(alias) = state.aliases.get(name) {
         return Some(CommandDescription::Alias(alias.as_str()));
@@ -454,6 +478,7 @@ fn describe_command<'a>(name: &'a str, state: &'a ShellState) -> Option<CommandD
     resolve_external_command(name).map(CommandDescription::External)
 }
 
+/// 按 shell 的常见规则在 PATH 中定位外部命令。
 fn resolve_external_command(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         let path = PathBuf::from(name);
@@ -470,6 +495,7 @@ fn resolve_external_command(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// 判断一个路径是否指向可执行普通文件。
 fn is_executable_file(path: &Path) -> bool {
     path.is_file()
         && path
@@ -499,4 +525,9 @@ fn run_clear() -> CommandStatus {
 fn run_status(state: &mut ShellState) -> CommandStatus {
     println!("{}", state.last_status.code);
     CommandStatus::success()
+}
+
+/// 打印统一格式的 usage 错误。
+fn print_usage(name: &str, usage: &str) {
+    print_error(format!("{}: usage: {}", name, usage));
 }
