@@ -1,11 +1,21 @@
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 fn run_ecsh(input: &str) -> String {
-    run_ecsh_with_env(input, &[])
+    let output = run_ecsh_output_with_env(input, &[]);
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn run_ecsh_with_env(input: &str, envs: &[(&str, &str)]) -> String {
+    let output = run_ecsh_output_with_env(input, envs);
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn run_ecsh_output(input: &str) -> Output {
+    run_ecsh_output_with_env(input, &[])
+}
+
+fn run_ecsh_output_with_env(input: &str, envs: &[(&str, &str)]) -> Output {
     let exe = env!("CARGO_BIN_EXE_ecsh");
     let mut command = Command::new(exe);
     command
@@ -33,8 +43,7 @@ fn run_ecsh_with_env(input: &str, envs: &[(&str, &str)]) -> String {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-
-    String::from_utf8_lossy(&output.stdout).into_owned()
+    output
 }
 
 #[test]
@@ -157,4 +166,67 @@ exit
     assert!(output.contains("\nhi\n"));
 
     let _ = std::fs::remove_file(out_path);
+}
+
+#[test]
+fn smoke_continues_multiline_double_quoted_input() {
+    let output = run_ecsh("echo \"hello\nworld\"\nexit\n");
+
+    assert!(output.contains("hello\nworld"));
+}
+
+#[test]
+fn smoke_continues_multiline_expr_expansion() {
+    let output = run_ecsh("echo $[1 +\n2]\nexit\n");
+
+    assert!(output.contains("\n3\n"));
+}
+
+#[test]
+fn smoke_reports_incomplete_input_at_eof() {
+    let output = run_ecsh_output("echo \"unterminated");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(stderr.contains("shell parse error at 1:19"));
+    assert!(stderr.contains("unterminated double quote"));
+    assert!(stderr.contains("echo \"unterminated"));
+}
+
+#[test]
+fn smoke_continues_multiline_command_substitution() {
+    let output = run_ecsh("echo $(printf hel\nprintf lo)\nexit\n");
+
+    assert!(output.contains("hello"));
+}
+
+#[test]
+fn smoke_supports_alias_and_unalias() {
+    let output = run_ecsh("alias ll='echo alias-ok'\nll\nunalias ll\nstatus\nexit\n");
+
+    assert!(output.contains("alias-ok"));
+    assert!(output.contains("\n0\n"));
+}
+
+#[test]
+fn smoke_runs_exit_trap() {
+    let output = run_ecsh("trap 'echo bye-from-trap' EXIT\nexit\n");
+
+    assert!(output.contains("bye-from-trap"));
+}
+
+#[test]
+fn smoke_supports_type_which_and_history() {
+    let output = run_ecsh(
+        "alias ll='echo alias-ok'\n\
+         type ll help sh\n\
+         which ll help sh\n\
+         history\n\
+         exit\n",
+    );
+
+    assert!(output.contains("ll is aliased to `echo alias-ok`"));
+    assert!(output.contains("help is a shell builtin"));
+    assert!(output.contains("alias ll='echo alias-ok'"));
+    assert!(output.contains("help: shell builtin"));
+    assert!(output.contains("type ll help sh"));
 }

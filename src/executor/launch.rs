@@ -34,6 +34,7 @@ use crate::types::{
     ShellResult, ShellState,
 };
 use nix::unistd::{ForkResult, Pid, dup2_stdin, dup2_stdout, execvp, fork, getpid, pipe};
+use std::collections::HashMap;
 use std::process;
 
 /// 启动一条外部命令（可能是在前台，也可能是后台）。
@@ -200,6 +201,9 @@ pub(crate) fn launch_pipeline_job(
                             next_job_id: 1,
                             current_fg_pgid: None,
                             script_env: crate::ecscript::env::Environment::new(),
+                            aliases: HashMap::new(),
+                            traps: HashMap::new(),
+                            command_history: Vec::new(),
                         };
 
                         let flow = run_builtin(command, &mut child_state)

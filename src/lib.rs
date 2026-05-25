@@ -1,4 +1,5 @@
 pub mod builtin;
+pub mod completion;
 pub mod diagnostics;
 pub mod ecscript;
 pub mod executor;
@@ -7,5 +8,6 @@ pub mod lexer;
 pub mod parser;
 pub mod prompt;
 pub mod redirection;
+pub mod shell_error;
 pub mod signals;
 pub mod types;

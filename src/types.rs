@@ -8,6 +8,7 @@
 
 use crate::ecscript::env::Environment;
 use nix::unistd::Pid;
+use std::collections::HashMap;
 use std::os::fd::RawFd;
 /// shell 内部统一的 Result 类型。
 pub type ShellResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -112,6 +113,9 @@ pub struct ShellState {
     pub current_fg_pgid: Option<Pid>,
 
     pub script_env: Environment<'static>, // ← 新增：ecscript 全局根环境
+    pub aliases: HashMap<String, String>,
+    pub traps: HashMap<String, String>,
+    pub command_history: Vec<String>,
 }
 
 /// 命令退出码（即 `$?` 的值）。
