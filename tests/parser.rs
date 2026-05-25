@@ -3,6 +3,7 @@ use ecsh::types::{
     Command, CommandStatus, OutputRedirection, ParsedJob, ParsedLine, Pipeline, Redirection,
     ShellState, ShellWord,
 };
+use std::collections::HashMap;
 
 fn state() -> ShellState {
     ShellState {
@@ -14,6 +15,9 @@ fn state() -> ShellState {
         next_job_id: 1,
         current_fg_pgid: None,
         script_env: ecsh::ecscript::env::Environment::new(),
+        aliases: HashMap::new(),
+        traps: HashMap::new(),
+        command_history: Vec::new(),
     }
 }
 
@@ -225,39 +229,57 @@ fn parses_background_command_and_pipeline() {
 #[test]
 fn reports_parser_errors() {
     assert_eq!(
-        parse_line("echo hi |", &state()).unwrap_err(),
+        parse_line("echo hi |", &state()).unwrap_err().message,
         "empty command in pipeline"
     );
     assert_eq!(
-        parse_line("true &&", &state()).unwrap_err(),
+        parse_line("true &&", &state()).unwrap_err().message,
         "missing command after &&"
     );
     assert_eq!(
-        parse_line("echo >", &state()).unwrap_err(),
+        parse_line("echo >", &state()).unwrap_err().message,
         "missing filename after >"
     );
     assert_eq!(
-        parse_line("echo hi > a > b", &state()).unwrap_err(),
+        parse_line("echo hi > a > b", &state()).unwrap_err().message,
         "duplicate stdout redirection"
     );
     assert_eq!(
-        parse_line("; echo hi", &state()).unwrap_err(),
+        parse_line("; echo hi", &state()).unwrap_err().message,
         "missing command before ;"
     );
     assert_eq!(
-        parse_line("echo hi;", &state()).unwrap_err(),
+        parse_line("echo hi;", &state()).unwrap_err().message,
         "missing command after ;"
     );
     assert_eq!(
-        parse_line("sleep 1 & echo later", &state()).unwrap_err(),
+        parse_line("sleep 1 & echo later", &state())
+            .unwrap_err()
+            .message,
         "background '&' is only supported at the end of a command"
     );
     assert_eq!(
-        parse_line("true && echo ok &", &state()).unwrap_err(),
+        parse_line("true && echo ok &", &state())
+            .unwrap_err()
+            .message,
         "background execution is only supported for a single command or pipeline"
     );
     assert_eq!(
-        parse_line("&", &state()).unwrap_err(),
+        parse_line("&", &state()).unwrap_err().message,
         "missing command before &"
+    );
+}
+
+#[test]
+fn expands_top_level_alias_before_parsing() {
+    let mut state = state();
+    state.aliases.insert("ll".into(), "ls -l".into());
+
+    assert_eq!(
+        parse_line("ll /tmp", &state).unwrap(),
+        parsed_job(
+            ParsedLine::Command(command("ls", &["-l", "/tmp"])),
+            "ll /tmp",
+        )
     );
 }

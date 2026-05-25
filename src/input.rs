@@ -7,9 +7,10 @@
 //! 历史文件存储在 ~/.ecsh_history。
 
 use crate::builtin::print_help;
+use crate::completion::{EcshEditor, new_editor};
 use nix::unistd::isatty;
-use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -17,10 +18,15 @@ use std::path::PathBuf;
 /// 非交互模式：纯管道读取，不加任何终端处理。
 pub enum ShellInput {
     Interactive {
-        editor: DefaultEditor,
+        editor: EcshEditor,
         history_path: Option<PathBuf>,
     },
     Plain,
+    Scripted {
+        lines: VecDeque<InputLine>,
+        prompts: Vec<String>,
+        history: Vec<String>,
+    },
 }
 
 /// 读入一行的结果：
@@ -43,7 +49,7 @@ impl ShellInput {
             return Ok(ShellInput::Plain);
         }
 
-        let mut editor = DefaultEditor::new()?;
+        let mut editor = new_editor()?;
         let history_path = history_path();
 
         if let Some(path) = &history_path {
@@ -65,12 +71,7 @@ impl ShellInput {
     pub fn read_line(&mut self, prompt: &str) -> Result<InputLine, Box<dyn std::error::Error>> {
         match self {
             ShellInput::Interactive { editor, .. } => match editor.readline(prompt) {
-                Ok(line) => {
-                    if !line.trim().is_empty() {
-                        let _ = editor.add_history_entry(line.as_str());
-                    }
-                    Ok(InputLine::Line(line))
-                }
+                Ok(line) => Ok(InputLine::Line(line)),
                 Err(ReadlineError::Interrupted) => Ok(InputLine::Interrupted),
                 Err(ReadlineError::Eof) => Ok(InputLine::Eof),
                 Err(err) => Err(Box::new(err)),
@@ -87,7 +88,26 @@ impl ShellInput {
                     Ok(InputLine::Line(line))
                 }
             }
+            ShellInput::Scripted { lines, prompts, .. } => {
+                prompts.push(prompt.to_string());
+                Ok(lines.pop_front().unwrap_or(InputLine::Eof))
+            }
         }
+    }
+
+    /// 只在交互模式下写入历史；续行输入会在主循环拼成完整命令后统一写入。
+    pub fn add_history_entry(&mut self, entry: &str) {
+        if entry.trim().is_empty() {
+            return;
+        }
+
+        let ShellInput::Interactive { editor, .. } = self else {
+            if let ShellInput::Scripted { history, .. } = self {
+                history.push(entry.to_string());
+            }
+            return;
+        };
+        let _ = editor.add_history_entry(entry);
     }
 
     /// shell 退出前保存历史文件。
@@ -120,6 +140,28 @@ impl ShellInput {
     /// 判断当前是否是交互模式（tty）。
     pub fn is_interactive(&self) -> bool {
         matches!(self, ShellInput::Interactive { .. })
+    }
+
+    pub fn scripted(lines: impl IntoIterator<Item = InputLine>) -> Self {
+        Self::Scripted {
+            lines: lines.into_iter().collect(),
+            prompts: Vec::new(),
+            history: Vec::new(),
+        }
+    }
+
+    pub fn recorded_prompts(&self) -> &[String] {
+        let ShellInput::Scripted { prompts, .. } = self else {
+            panic!("recorded_prompts is only available for scripted input");
+        };
+        prompts
+    }
+
+    pub fn recorded_history(&self) -> &[String] {
+        let ShellInput::Scripted { history, .. } = self else {
+            panic!("recorded_history is only available for scripted input");
+        };
+        history
     }
 }
 

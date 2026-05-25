@@ -2,21 +2,23 @@
 //!
 //! 状态机有三种模式：Normal（正常）、SingleQuoted（单引号）、DoubleQuoted（双引号）。
 //! 空格和操作符在 Normal 模式下作为 token 边界；引号内所有内容保留为字面量。
+//! 错误统一通过 `ParseError` 返回，携带字节偏移和续行感知标志。
 
+use crate::ecscript::error::ParseError;
 use crate::types::{LexerStatus, ShellState, ShellWord, Token, WordFragment};
 
-/// 将一行输入拆分为 Token Vector。
-pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, String> {
+/// 将一行输入拆分为 Token 序列，错误携带字节偏移。
+pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseError> {
     let mut chars = line.chars().peekable();
     let mut lexer_status = LexerStatus::Normal;
 
-    let mut lit_buffer: String = String::new(); // 之后会加入到fragments中
-
-    let mut fragments: Vec<WordFragment> = Vec::new(); // 一个Token::Word(fragments)
-
+    let mut lit_buffer: String = String::new();
+    let mut fragments: Vec<WordFragment> = Vec::new();
     let mut tokens = Vec::new();
+    let mut offset: usize = 0;
 
     while let Some(ch) = chars.next() {
+        offset += ch.len_utf8();
         match lexer_status {
             // ── Normal 模式：操作符和空白有特殊意义 ──
             LexerStatus::Normal => match ch {
@@ -55,7 +57,7 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, String> {
                     };
                     tokens.push(kind);
                 }
-                '$' => handle_dollar(&mut chars, &mut lit_buffer, &mut fragments)?,
+                '$' => handle_dollar(&mut chars, &mut lit_buffer, &mut fragments, &mut offset)?,
                 '\'' => {
                     lexer_status = LexerStatus::SingleQuoted;
                 }
@@ -67,11 +69,11 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, String> {
                     tokens.push(Token::Semicolon);
                 }
                 '\\' => {
-                    // 反斜杠转义应该继续留在当前 word 内部
                     if let Some(ch) = chars.next() {
+                        offset += ch.len_utf8();
                         lit_buffer.push(ch);
                     } else {
-                        return Err("trailing backslash".to_string());
+                        return Err(ParseError::new(offset, "trailing backslash"));
                     }
                 }
                 _ => {
@@ -90,7 +92,7 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, String> {
             // ── 双引号模式：保留空白和操作符字面量，但 $ 和 \" 仍会被处理 ──
             LexerStatus::DoubleQuoted => match ch {
                 '"' => lexer_status = LexerStatus::Normal,
-                '$' => handle_dollar(&mut chars, &mut lit_buffer, &mut fragments)?,
+                '$' => handle_dollar(&mut chars, &mut lit_buffer, &mut fragments, &mut offset)?,
                 '\\' => {
                     if let Some(ch) = chars.next() {
                         // 目前只能转义这三个字符
@@ -101,7 +103,10 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, String> {
                             lit_buffer.push(ch);
                         }
                     } else {
-                        return Err("trailing backslash in double quotes".to_string());
+                        return Err(ParseError::new(
+                            offset,
+                            "trailing backslash in double quotes",
+                        ));
                     }
                 }
                 _ => lit_buffer.push(ch),
@@ -111,10 +116,10 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, String> {
 
     // 输入结束但引号未闭合,报错。
     if let LexerStatus::DoubleQuoted = lexer_status {
-        return Err("unterminated double quote".to_string());
+        return Err(ParseError::incomplete(offset, "unterminated double quote"));
     }
     if let LexerStatus::SingleQuoted = lexer_status {
-        return Err("unterminated single quote".to_string());
+        return Err(ParseError::incomplete(offset, "unterminated single quote"));
     }
 
     flush_word(&mut lit_buffer, &mut fragments, &mut tokens);
@@ -143,7 +148,8 @@ fn handle_dollar(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     lit_buffer: &mut String,
     fragments: &mut Vec<WordFragment>,
-) -> Result<(), String> {
+    offset: &mut usize,
+) -> Result<(), ParseError> {
     // 进入之前`$`已经消费掉了
     match chars.peek().copied() {
         None => {
@@ -165,7 +171,7 @@ fn handle_dollar(
             let _ = chars.next();
 
             match chars.next() {
-                Some('}') => Err("empty variable name in braces".to_string()),
+                Some('}') => Err(ParseError::new(*offset, "empty variable name in braces")),
                 Some(start) if start == '_' || start.is_ascii_alphabetic() => {
                     // 开始循环解析{}中的环境变量
                     let mut is_close = false;
@@ -187,15 +193,21 @@ fn handle_dollar(
                     }
 
                     if !is_close {
-                        return Err("unterminated ${...} expansion".to_string());
+                        return Err(ParseError::incomplete(
+                            *offset,
+                            "unterminated ${...} expansion",
+                        ));
                     }
 
                     fragments.push(WordFragment::EnvVar(envvar_buffer));
 
                     Ok(())
                 }
-                Some(_) => Err("invalid variable name in braces".to_string()),
-                None => Err("unterminated ${...} expansion".to_string()),
+                Some(_) => Err(ParseError::new(*offset, "invalid variable name in braces")),
+                None => Err(ParseError::incomplete(
+                    *offset,
+                    "unterminated ${...} expansion",
+                )),
             }
         }
         Some('(') => {
@@ -232,7 +244,10 @@ fn handle_dollar(
                             // 保留原始文本，留给之后的程序处理
                             cmd_buffer.push('\\');
                             let Some(nxt) = chars.next() else {
-                                return Err("unterminated $(...) expansion".to_string());
+                                return Err(ParseError::incomplete(
+                                    *offset,
+                                    "unterminated $(...) expansion",
+                                ));
                             };
                             cmd_buffer.push(nxt);
                         }
@@ -247,7 +262,12 @@ fn handle_dollar(
                         Some(ch) => {
                             cmd_buffer.push(ch);
                         }
-                        None => return Err("unterminated $(...) expansion".to_string()),
+                        None => {
+                            return Err(ParseError::incomplete(
+                                *offset,
+                                "unterminated $(...) expansion",
+                            ));
+                        }
                     },
                     // 1. 括号不再影响整个dollar表达式
                     // 2. 处理转义
@@ -262,13 +282,21 @@ fn handle_dollar(
                             if let Some(nxt) = chars.next() {
                                 cmd_buffer.push(nxt);
                             } else {
-                                return Err("unterminated $(...) expansion".to_string());
+                                return Err(ParseError::incomplete(
+                                    *offset,
+                                    "unterminated $(...) expansion",
+                                ));
                             };
                         }
                         Some(ch) => {
                             cmd_buffer.push(ch);
                         }
-                        None => return Err("unterminated $(...) expansion".to_string()),
+                        None => {
+                            return Err(ParseError::incomplete(
+                                *offset,
+                                "unterminated $(...) expansion",
+                            ));
+                        }
                     },
                     LoopState::InSingleQuote => match chars.next() {
                         Some('\'') => {
@@ -279,7 +307,12 @@ fn handle_dollar(
                         Some(ch) => {
                             cmd_buffer.push(ch);
                         }
-                        None => return Err("unterminated $(...) expansion".to_string()),
+                        None => {
+                            return Err(ParseError::incomplete(
+                                *offset,
+                                "unterminated $(...) expansion",
+                            ));
+                        }
                     },
                 }
             }
@@ -337,7 +370,10 @@ fn handle_dollar(
                             // 保留原始文本，留给之后的程序处理
                             expr_buffer.push('\\');
                             let Some(nxt) = chars.next() else {
-                                return Err("unterminated $[...] expansion".to_string());
+                                return Err(ParseError::incomplete(
+                                    *offset,
+                                    "unterminated $[...] expansion",
+                                ));
                             };
                             expr_buffer.push(nxt);
                         }
@@ -352,7 +388,12 @@ fn handle_dollar(
                         Some(ch) => {
                             expr_buffer.push(ch);
                         }
-                        None => return Err("unterminated $[...] expansion".to_string()),
+                        None => {
+                            return Err(ParseError::incomplete(
+                                *offset,
+                                "unterminated $[...] expansion",
+                            ));
+                        }
                     },
                     // 1. 括号不再影响整个dollar表达式
                     // 2. 处理转义
@@ -367,13 +408,21 @@ fn handle_dollar(
                             if let Some(nxt) = chars.next() {
                                 expr_buffer.push(nxt);
                             } else {
-                                return Err("unterminated $[...] expansion".to_string());
+                                return Err(ParseError::incomplete(
+                                    *offset,
+                                    "unterminated $[...] expansion",
+                                ));
                             };
                         }
                         Some(ch) => {
                             expr_buffer.push(ch);
                         }
-                        None => return Err("unterminated $[...] expansion".to_string()),
+                        None => {
+                            return Err(ParseError::incomplete(
+                                *offset,
+                                "unterminated $[...] expansion",
+                            ));
+                        }
                     },
                     LoopState::InSingleQuote => match chars.next() {
                         Some('\'') => {
@@ -384,7 +433,12 @@ fn handle_dollar(
                         Some(ch) => {
                             expr_buffer.push(ch);
                         }
-                        None => return Err("unterminated $[...] expansion".to_string()),
+                        None => {
+                            return Err(ParseError::incomplete(
+                                *offset,
+                                "unterminated $[...] expansion",
+                            ));
+                        }
                     },
                 }
             }

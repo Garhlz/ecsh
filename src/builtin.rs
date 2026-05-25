@@ -9,6 +9,8 @@ use crate::types::Command;
 use crate::types::{CommandFlow, CommandStatus, ShellState};
 use nix::unistd::isatty;
 use std::io::{self, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_HOT_PINK: &str = "\x1b[1;38;5;201m";
@@ -32,6 +34,12 @@ pub enum BuiltinKind {
     Jobs,
     Fg,
     Bg,
+    Alias,
+    Unalias,
+    Trap,
+    Type,
+    Which,
+    History,
 }
 
 /// 将命令名映射到 BuiltinKind。
@@ -51,9 +59,20 @@ pub fn builtin_kind(command: &Command) -> Option<BuiltinKind> {
         "jobs" => Some(BuiltinKind::Jobs),
         "fg" => Some(BuiltinKind::Fg),
         "bg" => Some(BuiltinKind::Bg),
+        "alias" => Some(BuiltinKind::Alias),
+        "unalias" => Some(BuiltinKind::Unalias),
+        "trap" => Some(BuiltinKind::Trap),
+        "type" => Some(BuiltinKind::Type),
+        "which" => Some(BuiltinKind::Which),
+        "history" => Some(BuiltinKind::History),
         _ => None,
     }
 }
+
+pub const BUILTIN_NAMES: &[&str] = &[
+    "help", "exit", "cd", "pwd", "env", "export", "unset", "clear", "status", "jobs", "fg", "bg",
+    "alias", "unalias", "trap", "type", "which", "history",
+];
 
 /// 判断某个内置命令是否可以出现在管道中。
 ///
@@ -87,6 +106,12 @@ pub fn run_builtin(command: &Command, state: &mut ShellState) -> Option<CommandF
         BuiltinKind::Unset => Some(CommandFlow::Continue(run_unset(command))),
         BuiltinKind::Clear => Some(CommandFlow::Continue(run_clear())),
         BuiltinKind::Status => Some(CommandFlow::Continue(run_status(state))),
+        BuiltinKind::Alias => Some(CommandFlow::Continue(run_alias(command, state))),
+        BuiltinKind::Unalias => Some(CommandFlow::Continue(run_unalias(command, state))),
+        BuiltinKind::Trap => Some(CommandFlow::Continue(run_trap(command, state))),
+        BuiltinKind::Type => Some(CommandFlow::Continue(run_type(command, state))),
+        BuiltinKind::Which => Some(CommandFlow::Continue(run_which(command, state))),
+        BuiltinKind::History => Some(CommandFlow::Continue(run_history(command, state))),
         // jobs / fg / bg 需要访问作业表和前台等待逻辑，
         // 由 executor 层统一处理，避免 builtin 模块反向依赖 executor。
         BuiltinKind::Jobs | BuiltinKind::Fg | BuiltinKind::Bg => None,
@@ -109,6 +134,12 @@ pub fn print_help() {
     println!("  jobs - list background and stopped jobs");
     println!("  fg %N - move job N to the foreground");
     println!("  bg %N - resume job N in the background");
+    println!("  alias [NAME='VALUE'] - define or show aliases");
+    println!("  unalias NAME ... - remove aliases");
+    println!("  trap [CMD SIGNAL] - register EXIT/INT trap");
+    println!("  type NAME ... - describe how each command name resolves");
+    println!("  which NAME ... - print resolved command path or shell resolution");
+    println!("  history - show command history");
 }
 
 /// 打印 help 标题行。每个词用不同颜色，重定向到文件时自动去掉颜色。
@@ -250,6 +281,201 @@ fn run_unset(command: &Command) -> CommandStatus {
 
     unsafe { std::env::remove_var(key) };
     CommandStatus::success()
+}
+
+fn run_alias(command: &Command, state: &mut ShellState) -> CommandStatus {
+    if command.args.is_empty() {
+        let mut entries: Vec<_> = state.aliases.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, value) in entries {
+            println!("alias {}='{}'", name, value);
+        }
+        return CommandStatus::success();
+    }
+
+    for arg in &command.args {
+        let arg = arg.as_lit_str().unwrap_or("");
+        if let Some((name, value)) = arg.split_once('=') {
+            if name.is_empty() {
+                print_error("alias: empty alias name");
+                return CommandStatus::failure();
+            }
+            state.aliases.insert(name.to_string(), value.to_string());
+        } else if let Some(value) = state.aliases.get(arg) {
+            println!("alias {}='{}'", arg, value);
+        } else {
+            print_error(format!("alias: no such alias: {}", arg));
+            return CommandStatus::failure();
+        }
+    }
+
+    CommandStatus::success()
+}
+
+fn run_unalias(command: &Command, state: &mut ShellState) -> CommandStatus {
+    if command.args.is_empty() {
+        print_error("unalias: usage: unalias NAME ...");
+        return CommandStatus::failure();
+    }
+
+    for arg in &command.args {
+        let name = arg.as_lit_str().unwrap_or("");
+        if state.aliases.remove(name).is_none() {
+            print_error(format!("unalias: no such alias: {}", name));
+            return CommandStatus::failure();
+        }
+    }
+
+    CommandStatus::success()
+}
+
+fn run_trap(command: &Command, state: &mut ShellState) -> CommandStatus {
+    if command.args.is_empty() {
+        let mut entries: Vec<_> = state.traps.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (signal, handler) in entries {
+            println!("trap '{}' {}", handler, signal);
+        }
+        return CommandStatus::success();
+    }
+
+    if command.args.len() == 2 && command.args[0].as_lit_str() == Some("-") {
+        let Some(signal) = normalize_trap_name(command.args[1].as_lit_str().unwrap_or("")) else {
+            print_error("trap: only EXIT and INT are supported");
+            return CommandStatus::failure();
+        };
+        state.traps.remove(signal);
+        return CommandStatus::success();
+    }
+
+    if command.args.len() != 2 {
+        print_error("trap: usage: trap 'command' EXIT|INT");
+        return CommandStatus::failure();
+    }
+
+    let handler = command.args[0].as_lit_str().unwrap_or("");
+    let Some(signal) = normalize_trap_name(command.args[1].as_lit_str().unwrap_or("")) else {
+        print_error("trap: only EXIT and INT are supported");
+        return CommandStatus::failure();
+    };
+    state.traps.insert(signal.to_string(), handler.to_string());
+    CommandStatus::success()
+}
+
+fn normalize_trap_name(name: &str) -> Option<&'static str> {
+    match name {
+        "EXIT" => Some("EXIT"),
+        "INT" | "SIGINT" => Some("INT"),
+        _ => None,
+    }
+}
+
+fn run_type(command: &Command, state: &mut ShellState) -> CommandStatus {
+    if command.args.is_empty() {
+        print_error("type: usage: type NAME ...");
+        return CommandStatus::failure();
+    }
+
+    let mut ok = true;
+    for arg in &command.args {
+        let name = arg.as_lit_str().unwrap_or("");
+        match describe_command(name, state) {
+            Some(CommandDescription::Alias(value)) => {
+                println!("{} is aliased to `{}`", name, value)
+            }
+            Some(CommandDescription::Builtin) => println!("{} is a shell builtin", name),
+            Some(CommandDescription::External(path)) => println!("{} is {}", name, path.display()),
+            None => {
+                print_error(format!("type: not found: {}", name));
+                ok = false;
+            }
+        }
+    }
+
+    if ok {
+        CommandStatus::success()
+    } else {
+        CommandStatus::failure()
+    }
+}
+
+fn run_which(command: &Command, state: &mut ShellState) -> CommandStatus {
+    if command.args.is_empty() {
+        print_error("which: usage: which NAME ...");
+        return CommandStatus::failure();
+    }
+
+    let mut ok = true;
+    for arg in &command.args {
+        let name = arg.as_lit_str().unwrap_or("");
+        match describe_command(name, state) {
+            Some(CommandDescription::Alias(value)) => println!("alias {}='{}'", name, value),
+            Some(CommandDescription::Builtin) => println!("{}: shell builtin", name),
+            Some(CommandDescription::External(path)) => println!("{}", path.display()),
+            None => {
+                print_error(format!("which: not found: {}", name));
+                ok = false;
+            }
+        }
+    }
+
+    if ok {
+        CommandStatus::success()
+    } else {
+        CommandStatus::failure()
+    }
+}
+
+fn run_history(command: &Command, state: &mut ShellState) -> CommandStatus {
+    if !command.args.is_empty() {
+        print_error("history: usage: history");
+        return CommandStatus::failure();
+    }
+
+    for (idx, entry) in state.command_history.iter().enumerate() {
+        println!("{:>5}  {}", idx + 1, entry);
+    }
+    CommandStatus::success()
+}
+
+enum CommandDescription<'a> {
+    Alias(&'a str),
+    Builtin,
+    External(PathBuf),
+}
+
+fn describe_command<'a>(name: &'a str, state: &'a ShellState) -> Option<CommandDescription<'a>> {
+    if let Some(alias) = state.aliases.get(name) {
+        return Some(CommandDescription::Alias(alias.as_str()));
+    }
+    if BUILTIN_NAMES.contains(&name) {
+        return Some(CommandDescription::Builtin);
+    }
+    resolve_external_command(name).map(CommandDescription::External)
+}
+
+fn resolve_external_command(name: &str) -> Option<PathBuf> {
+    if name.contains('/') {
+        let path = PathBuf::from(name);
+        return is_executable_file(&path).then_some(path);
+    }
+
+    let path = std::env::var("PATH").ok()?;
+    for dir in path.split(':') {
+        let candidate = Path::new(dir).join(name);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
 }
 
 /// `clear` 命令：清空终端屏幕。

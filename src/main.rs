@@ -3,7 +3,7 @@
 //! 主循环的每一轮迭代：
 //!   1. reap_background_jobs  — 非阻塞回收后台子进程
 //!   2. build_prompt          — 生成带颜色的提示符
-//!   3. read_line             — 等待用户输入或脚本行
+//!   3. read_complete_command — 等待用户输入，并在 incomplete 时继续续行
 //!   4. parse_line            — 词法 + 语法分析
 //!   5. run_parsed_line       — 根据 AST 类型分派执行
 
@@ -13,7 +13,9 @@ use ecsh::executor::{init_shell_job_control, reap_background_jobs, run_command, 
 use ecsh::input::{InputLine, ShellInput};
 use ecsh::parser::parse_line;
 use ecsh::prompt::build_prompt;
+use ecsh::shell_error::format_shell_parse_error;
 use ecsh::types::{CommandFlow, CommandStatus, ParsedJob, ParsedLine, ShellState};
+use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_loop()
@@ -33,6 +35,9 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
         next_job_id: 1,
         current_fg_pgid: None,
         script_env: Environment::new(),
+        aliases: HashMap::new(),
+        traps: HashMap::new(),
+        command_history: Vec::new(),
     };
     // 交互模式下初始化 job control（设进程组、抢终端、忽略信号）。
     init_shell_job_control(&mut state)?;
@@ -42,39 +47,41 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
         // 1. 非阻塞回收已结束的后台子进程。
         reap_background_jobs(&mut state)?;
 
-        // 2. 显示 prompt。
-        let prompt = build_prompt(&state)?;
-
-        // 3. 读取一行输入。
-        let line = match input.read_line(&prompt)? {
-            InputLine::Line(line) => line,
-            InputLine::Interrupted => {
-                // Ctrl-C 在读取输入时 → 取消当前行，显示新 prompt。
-                // 退出码 130 = 128 + SIGINT(2)。
+        // 2. 读取一条完整命令；若 parser/lexer 判定 incomplete，则继续读续行。
+        let line = match read_complete_command(&mut input, &state)? {
+            ReadCommand::Line(line) => line,
+            ReadCommand::Interrupted => {
+                if let Some(flow) = run_named_trap("INT", &mut state)? {
+                    if matches!(flow, CommandFlow::Exit(_)) {
+                        break;
+                    }
+                }
                 state.last_status = CommandStatus::new(130);
                 continue;
             }
-            InputLine::Eof => break, // Ctrl-D 或管道结束 → 退出 shell
+            ReadCommand::Eof => break,
         };
         let line = line.trim();
 
-        // 4. 空输入，重置状态码后直接下一轮。
+        // 3. 空输入，重置状态码后直接下一轮。
         if line.is_empty() {
             state.last_status = CommandStatus::success();
             continue;
         }
+        state.command_history.push(line.to_string());
+        input.add_history_entry(line);
 
-        // 5. 词法 + 语法分析。
+        // 4. 词法 + 语法分析。
         let parsed = match parse_line(line, &state) {
             Ok(parsed) => parsed,
             Err(err) => {
-                print_error(format!("parse line: {}", err));
+                print_error(format_shell_parse_error(line, &err));
                 state.last_status = CommandStatus::failure();
                 continue;
             }
         };
 
-        // 6. 根据 AST 类型分派执行。
+        // 5. 根据 AST 类型分派执行。
         match run_parsed_line(&parsed, &mut state)? {
             CommandFlow::Continue(current_status) => {
                 state.last_status = current_status;
@@ -85,8 +92,125 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let _ = run_named_trap("EXIT", &mut state)?;
     input.save_history();
     Ok(())
+}
+
+enum ReadCommand {
+    Line(String),
+    Interrupted,
+    Eof,
+}
+
+fn read_complete_command(
+    input: &mut ShellInput,
+    state: &ShellState,
+) -> Result<ReadCommand, Box<dyn std::error::Error>> {
+    let prompt = build_prompt(state)?;
+    let mut buffer = String::new();
+
+    loop {
+        let current_prompt = if buffer.is_empty() { &prompt } else { "... " };
+        let line = match input.read_line(current_prompt)? {
+            InputLine::Line(line) => line,
+            InputLine::Interrupted => return Ok(ReadCommand::Interrupted),
+            InputLine::Eof => {
+                return Ok(if buffer.is_empty() {
+                    ReadCommand::Eof
+                } else {
+                    ReadCommand::Line(buffer)
+                });
+            }
+        };
+
+        if !buffer.is_empty() {
+            buffer.push('\n');
+        }
+        buffer.push_str(line.trim_end_matches('\n'));
+
+        match parse_line(&buffer, state) {
+            Ok(_) => return Ok(ReadCommand::Line(buffer)),
+            Err(err) if err.incomplete => {}
+            Err(_) => return Ok(ReadCommand::Line(buffer)),
+        }
+    }
+}
+
+fn run_named_trap(
+    name: &str,
+    state: &mut ShellState,
+) -> Result<Option<CommandFlow>, Box<dyn std::error::Error>> {
+    let Some(command_line) = state.traps.get(name).cloned() else {
+        return Ok(None);
+    };
+    let parsed = match parse_line(&command_line, state) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            print_error(format_shell_parse_error(&command_line, &err));
+            state.last_status = CommandStatus::failure();
+            return Ok(Some(CommandFlow::Continue(CommandStatus::failure())));
+        }
+    };
+    let flow = run_parsed_line(&parsed, state)?;
+    Ok(Some(flow))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReadCommand, read_complete_command};
+    use ecsh::ecscript::env::Environment;
+    use ecsh::input::{InputLine, ShellInput};
+    use ecsh::types::{CommandStatus, ShellState};
+    use std::collections::HashMap;
+
+    fn state() -> ShellState {
+        ShellState {
+            last_status: CommandStatus::success(),
+            interactive: true,
+            shell_pgid: None,
+            shell_terminal_fd: None,
+            jobs: Vec::new(),
+            next_job_id: 1,
+            current_fg_pgid: None,
+            script_env: Environment::new(),
+            aliases: HashMap::new(),
+            traps: HashMap::new(),
+            command_history: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn read_complete_command_requests_continuation_for_braced_envvar() {
+        let mut input =
+            ShellInput::scripted([InputLine::Line("echo ${HOME".into()), InputLine::Eof]);
+        let result = read_complete_command(&mut input, &state()).unwrap();
+
+        match result {
+            ReadCommand::Line(buffer) => assert_eq!(buffer, "echo ${HOME"),
+            _ => panic!("expected buffered line on EOF after incomplete envvar"),
+        }
+
+        assert_eq!(input.recorded_prompts().len(), 2);
+        assert_eq!(input.recorded_prompts()[1], "... ");
+    }
+
+    #[test]
+    fn read_complete_command_interrupts_during_continuation() {
+        let mut input = ShellInput::scripted([
+            InputLine::Line("echo \"unterminated".into()),
+            InputLine::Interrupted,
+        ]);
+        let result = read_complete_command(&mut input, &state()).unwrap();
+
+        match result {
+            ReadCommand::Interrupted => {}
+            _ => panic!("expected interruption during continuation"),
+        }
+
+        assert_eq!(input.recorded_prompts().len(), 2);
+        assert_eq!(input.recorded_prompts()[1], "... ");
+    }
 }
 
 /// 根据解析出的语法结构分派到不同的执行路径。

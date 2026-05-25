@@ -1,5 +1,6 @@
 use ecsh::lexer::tokenize;
 use ecsh::types::{CommandStatus, ShellState, ShellWord, Token, WordFragment};
+use std::collections::HashMap;
 
 fn state() -> ShellState {
     ShellState {
@@ -11,6 +12,9 @@ fn state() -> ShellState {
         next_job_id: 1,
         current_fg_pgid: None,
         script_env: ecsh::ecscript::env::Environment::new(),
+        aliases: HashMap::new(),
+        traps: HashMap::new(),
+        command_history: Vec::new(),
     }
 }
 
@@ -255,27 +259,29 @@ fn tokenizes_backslash_escapes() {
 #[test]
 fn reports_lexer_errors() {
     assert_eq!(
-        tokenize("echo \"unterminated", &state()).unwrap_err(),
+        tokenize("echo \"unterminated", &state())
+            .unwrap_err()
+            .message,
         "unterminated double quote"
     );
     assert_eq!(
-        tokenize("echo ${}", &state()).unwrap_err(),
+        tokenize("echo ${}", &state()).unwrap_err().message,
         "empty variable name in braces"
     );
     assert_eq!(
-        tokenize("echo ${1}", &state()).unwrap_err(),
+        tokenize("echo ${1}", &state()).unwrap_err().message,
         "invalid variable name in braces"
     );
     assert_eq!(
-        tokenize("echo ${HOME", &state()).unwrap_err(),
+        tokenize("echo ${HOME", &state()).unwrap_err().message,
         "unterminated ${...} expansion"
     );
     assert_eq!(
-        tokenize(r#"echo hello\"#, &state()).unwrap_err(),
+        tokenize(r#"echo hello\"#, &state()).unwrap_err().message,
         "trailing backslash"
     );
     assert_eq!(
-        tokenize(r#"echo "hello\"#, &state()).unwrap_err(),
+        tokenize(r#"echo "hello\"#, &state()).unwrap_err().message,
         "trailing backslash in double quotes"
     );
 }

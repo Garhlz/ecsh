@@ -213,6 +213,7 @@ mod tests {
     use crate::types::{
         Command, CommandStatus, OutputRedirection, Redirection, ShellState, ShellWord, WordFragment,
     };
+    use std::collections::HashMap;
 
     fn state() -> ShellState {
         ShellState {
@@ -224,6 +225,9 @@ mod tests {
             next_job_id: 1,
             current_fg_pgid: None,
             script_env: Environment::new(),
+            aliases: HashMap::new(),
+            traps: HashMap::new(),
+            command_history: Vec::new(),
         }
     }
 
