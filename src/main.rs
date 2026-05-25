@@ -1,11 +1,4 @@
-//! ecsh 入口：主循环和 AST 执行调度。
-//!
-//! 主循环的每一轮迭代：
-//!   1. reap_background_jobs  — 非阻塞回收后台子进程
-//!   2. build_prompt          — 生成带颜色的提示符
-//!   3. read_complete_command — 等待用户输入，并在 incomplete 时继续续行
-//!   4. parse_line            — 词法 + 语法分析
-//!   5. run_parsed_line       — 根据 AST 类型分派执行
+//! ecsh 入口：主循环、续行读取和顶层执行分派。
 
 use ecsh::diagnostics::print_error;
 use ecsh::ecscript::env::Environment;
@@ -14,40 +7,23 @@ use ecsh::input::{InputLine, ShellInput};
 use ecsh::parser::parse_line;
 use ecsh::prompt::build_prompt;
 use ecsh::shell_error::format_shell_parse_error;
-use ecsh::types::{CommandFlow, CommandStatus, ParsedJob, ParsedLine, ShellState};
+use ecsh::types::{CommandFlow, CommandStatus, ParsedLine, ShellState};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_loop()
 }
 
-/// shell 主循环。
-///
-/// 初始化 → 进入 REPL (Read-Eval-Print Loop) → 退出时保存历史。
+/// 初始化输入与全局状态，然后进入交互主循环。
 fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = ShellInput::new()?;
-    let mut state = ShellState {
-        last_status: CommandStatus::success(),
-        interactive: input.is_interactive(),
-        shell_pgid: None,
-        shell_terminal_fd: None,
-        jobs: Vec::new(),
-        next_job_id: 1,
-        current_fg_pgid: None,
-        script_env: Environment::new(),
-        aliases: HashMap::new(),
-        traps: HashMap::new(),
-        command_history: Vec::new(),
-    };
-    // 交互模式下初始化 job control（设进程组、抢终端、忽略信号）。
+    let mut state = new_shell_state(input.is_interactive());
     init_shell_job_control(&mut state)?;
     input.print_welcome();
 
     loop {
-        // 1. 非阻塞回收已结束的后台子进程。
         reap_background_jobs(&mut state)?;
 
-        // 2. 读取一条完整命令；若 parser/lexer 判定 incomplete，则继续读续行。
         let line = match read_complete_command(&mut input, &state)? {
             ReadCommand::Line(line) => line,
             ReadCommand::Interrupted => {
@@ -63,7 +39,6 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
         };
         let line = line.trim();
 
-        // 3. 空输入，重置状态码后直接下一轮。
         if line.is_empty() {
             state.last_status = CommandStatus::success();
             continue;
@@ -71,7 +46,6 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
         state.command_history.push(line.to_string());
         input.add_history_entry(line);
 
-        // 4. 词法 + 语法分析。
         let parsed = match parse_line(line, &state) {
             Ok(parsed) => parsed,
             Err(err) => {
@@ -81,14 +55,16 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        // 5. 根据 AST 类型分派执行。
-        match run_parsed_line(&parsed, &mut state)? {
+        match run_parsed_line(
+            &parsed.line,
+            parsed.background,
+            &parsed.command_line,
+            &mut state,
+        )? {
             CommandFlow::Continue(current_status) => {
                 state.last_status = current_status;
             }
-            CommandFlow::Exit(_current_status) => {
-                break; // exit 命令
-            }
+            CommandFlow::Exit(_current_status) => break,
         }
     }
 
@@ -103,6 +79,27 @@ enum ReadCommand {
     Eof,
 }
 
+/// 构造 shell 运行时的初始状态。
+fn new_shell_state(interactive: bool) -> ShellState {
+    ShellState {
+        last_status: CommandStatus::success(),
+        interactive,
+        shell_pgid: None,
+        shell_terminal_fd: None,
+        jobs: Vec::new(),
+        next_job_id: 1,
+        current_fg_pgid: None,
+        script_env: Environment::new(),
+        aliases: HashMap::new(),
+        traps: HashMap::new(),
+        command_history: Vec::new(),
+    }
+}
+
+/// 读取一条完整命令。
+///
+/// 当 lexer/parser 报 incomplete 时，继续用 `... ` 提示符读续行；
+/// 当输入在 EOF 结束时，保留当前缓冲并交给后续解析阶段统一报错。
 fn read_complete_command(
     input: &mut ShellInput,
     state: &ShellState,
@@ -111,6 +108,7 @@ fn read_complete_command(
     let mut buffer = String::new();
 
     loop {
+        // 第一行使用完整 prompt，续行统一切到简短提示符。
         let current_prompt = if buffer.is_empty() { &prompt } else { "... " };
         let line = match input.read_line(current_prompt)? {
             InputLine::Line(line) => line,
@@ -124,6 +122,7 @@ fn read_complete_command(
             }
         };
 
+        // 续行按真实换行拼回去，保持后续 parse/error 的源码位置一致。
         if !buffer.is_empty() {
             buffer.push('\n');
         }
@@ -131,12 +130,17 @@ fn read_complete_command(
 
         match parse_line(&buffer, state) {
             Ok(_) => return Ok(ReadCommand::Line(buffer)),
+            // incomplete 表示当前行还可能合法，继续读下一行。
             Err(err) if err.incomplete => {}
+            // 普通 parse error 留给主循环统一格式化和输出。
             Err(_) => return Ok(ReadCommand::Line(buffer)),
         }
     }
 }
 
+/// 执行指定 trap 中保存的一段 shell 命令。
+///
+/// trap 命令仍然走正常的 parse/execute 路径，只是输入来源变成了 trap 表。
 fn run_named_trap(
     name: &str,
     state: &mut ShellState,
@@ -152,32 +156,18 @@ fn run_named_trap(
             return Ok(Some(CommandFlow::Continue(CommandStatus::failure())));
         }
     };
-    let flow = run_parsed_line(&parsed, state)?;
+    let flow = run_parsed_line(&parsed.line, parsed.background, &parsed.command_line, state)?;
     Ok(Some(flow))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ReadCommand, read_complete_command};
-    use ecsh::ecscript::env::Environment;
     use ecsh::input::{InputLine, ShellInput};
-    use ecsh::types::{CommandStatus, ShellState};
-    use std::collections::HashMap;
+    use ecsh::types::ShellState;
 
     fn state() -> ShellState {
-        ShellState {
-            last_status: CommandStatus::success(),
-            interactive: true,
-            shell_pgid: None,
-            shell_terminal_fd: None,
-            jobs: Vec::new(),
-            next_job_id: 1,
-            current_fg_pgid: None,
-            script_env: Environment::new(),
-            aliases: HashMap::new(),
-            traps: HashMap::new(),
-            command_history: Vec::new(),
-        }
+        super::new_shell_state(true)
     }
 
     #[test]
@@ -213,108 +203,71 @@ mod tests {
     }
 }
 
-/// 根据解析出的语法结构分派到不同的执行路径。
+/// 根据顶层 AST 递归分派执行。
 ///
-/// 递归处理控制流操作符（&& / || / ;）：
-///   - `&&`：左侧执行；成功(code=0)才执行右侧
-///   - `||`：左侧执行；失败(code≠0)才执行右侧
-///   - `;`：左侧执行；无论成败都执行右侧（exit 除外）
-///
-/// 每个操作符递归时会构造一个新的 ParsedJob（强制 foreground=false），
-/// 这是因为 `&&` / `||` 的左右侧不应该继承最外层的 `&` 语义。
+/// 最外层的 `background` 只作用于完整命令或完整管道；
+/// 递归进入 `&& / || / ;` 的左右子树时，不继承这层 `&` 语义。
 fn run_parsed_line(
-    parsed: &ParsedJob,
+    line: &ParsedLine,
+    background: bool,
+    command_line: &str,
     state: &mut ShellState,
 ) -> Result<CommandFlow, Box<dyn std::error::Error>> {
-    match &parsed.line {
-        // ── 单条命令：交给 executor 统一做展开 / builtin / external 分派 ──
-        ParsedLine::Command(command) => {
-            run_command(command, state, parsed.background, &parsed.command_line)
-        }
-
-        // ── 管道：直接派发 ──
+    match line {
+        // 单条命令交给 executor 做展开、builtin 判定和外部命令启动。
+        ParsedLine::Command(command) => run_command(command, state, background, command_line),
+        // 管道是单独的执行路径，但返回值仍然折叠成顶层 CommandFlow。
         ParsedLine::Pipeline(pipeline) => Ok(CommandFlow::Continue(run_pipeline(
             pipeline,
             state,
-            parsed.background,
-            &parsed.command_line,
+            background,
+            command_line,
         )?)),
+        ParsedLine::AndThen(left, right) => {
+            run_with_condition(left, right, command_line, state, |status| status.code == 0)
+        }
+        ParsedLine::OrElse(left, right) => {
+            run_with_condition(left, right, command_line, state, |status| status.code != 0)
+        }
+        ParsedLine::Sequence(left, right) => run_sequence(left, right, command_line, state),
+    }
+}
 
-        // ── `&&`：左侧成功才执行右侧；左侧 exit 则透传 ──
-        ParsedLine::AndThen(left, right) => match run_parsed_line(
-            &ParsedJob {
-                line: left.as_ref().clone(),
-                background: false,
-                command_line: parsed.command_line.clone(),
-            },
-            state,
-        )? {
-            CommandFlow::Exit(status) => Ok(CommandFlow::Exit(status)),
-            CommandFlow::Continue(status) => {
-                if status.code == 0 {
-                    state.last_status = status;
-                    run_parsed_line(
-                        &ParsedJob {
-                            line: right.as_ref().clone(),
-                            background: false,
-                            command_line: parsed.command_line.clone(),
-                        },
-                        state,
-                    )
-                } else {
-                    Ok(CommandFlow::Continue(status))
-                }
-            }
-        },
-
-        // ── `||`：左侧失败才执行右侧；左侧 exit 则透传 ──
-        ParsedLine::OrElse(left, right) => match run_parsed_line(
-            &ParsedJob {
-                line: left.as_ref().clone(),
-                background: false,
-                command_line: parsed.command_line.clone(),
-            },
-            state,
-        )? {
-            CommandFlow::Exit(status) => Ok(CommandFlow::Exit(status)),
-            CommandFlow::Continue(status) => {
-                if status.code != 0 {
-                    state.last_status = status;
-                    run_parsed_line(
-                        &ParsedJob {
-                            line: right.as_ref().clone(),
-                            background: false,
-                            command_line: parsed.command_line.clone(),
-                        },
-                        state,
-                    )
-                } else {
-                    Ok(CommandFlow::Continue(status))
-                }
-            }
-        },
-
-        // ── `;`：左侧执行完始终执行右侧（exit 除外）──
-        ParsedLine::Sequence(left, right) => match run_parsed_line(
-            &ParsedJob {
-                line: left.as_ref().clone(),
-                background: false,
-                command_line: parsed.command_line.clone(),
-            },
-            state,
-        )? {
-            CommandFlow::Exit(status) => Ok(CommandFlow::Exit(status)),
-            CommandFlow::Continue(status) => {
+/// 复用 `&&` / `||` 的条件分派骨架。
+fn run_with_condition(
+    left: &ParsedLine,
+    right: &ParsedLine,
+    command_line: &str,
+    state: &mut ShellState,
+    predicate: impl Fn(CommandStatus) -> bool,
+) -> Result<CommandFlow, Box<dyn std::error::Error>> {
+    match run_parsed_line(left, false, command_line, state)? {
+        CommandFlow::Exit(status) => Ok(CommandFlow::Exit(status)),
+        CommandFlow::Continue(status) => {
+            if predicate(status) {
                 state.last_status = status;
-                run_parsed_line(
-                    &ParsedJob {
-                        line: right.as_ref().clone(),
-                        background: false,
-                        command_line: parsed.command_line.clone(),
-                    },
-                    state,
-                )
+                run_parsed_line(right, false, command_line, state)
+            } else {
+                Ok(CommandFlow::Continue(status))
             }
-        },
+        }
+    }
+}
+
+/// 执行 `left ; right`。
+///
+/// 左侧只要不是 `exit`，右侧都会继续执行。
+fn run_sequence(
+    left: &ParsedLine,
+    right: &ParsedLine,
+    command_line: &str,
+    state: &mut ShellState,
+) -> Result<CommandFlow, Box<dyn std::error::Error>> {
+    match run_parsed_line(left, false, command_line, state)? {
+        CommandFlow::Exit(status) => Ok(CommandFlow::Exit(status)),
+        CommandFlow::Continue(status) => {
+            state.last_status = status;
+            run_parsed_line(right, false, command_line, state)
+        }
     }
 }

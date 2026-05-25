@@ -10,6 +10,7 @@ use crate::ecscript::env::Environment;
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::os::fd::RawFd;
+use std::rc::Rc;
 /// shell 内部统一的 Result 类型。
 pub type ShellResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -63,9 +64,9 @@ pub struct Pipeline {
 pub enum ParsedLine {
     Command(Command),
     Pipeline(Pipeline),
-    AndThen(Box<ParsedLine>, Box<ParsedLine>),
-    OrElse(Box<ParsedLine>, Box<ParsedLine>),
-    Sequence(Box<ParsedLine>, Box<ParsedLine>),
+    AndThen(Rc<ParsedLine>, Rc<ParsedLine>),
+    OrElse(Rc<ParsedLine>, Rc<ParsedLine>),
+    Sequence(Rc<ParsedLine>, Rc<ParsedLine>),
 }
 
 /// 解析后的完整作业：语法结构 + 前后台标志 + 命令原文。
@@ -82,34 +83,26 @@ pub struct ParsedJob {
 // ── 运行时状态 ──────────────────────────────────────────────────────
 
 /// Shell 全局运行时状态。
-///
-/// 交互模式下维护了完整的 job control 上下文：
-/// shell_pgid / shell_terminal_fd / current_fg_pgid 用于前台终端切换；
-/// jobs / next_job_id 用于后台/暂停作业管理。
 pub struct ShellState {
     /// 上一条命令的退出码（`$?` 的值）。
     pub last_status: CommandStatus,
 
     /// 只有真实 tty 交互模式才启用 job control。
-    /// 非交互模式下，shell 回到"同步执行一条、返回一条"的简单模式。
     pub interactive: bool,
 
-    /// shell 自己的进程组 PGID。闲置时终端前台必须指向它。
+    /// shell 自己的进程组 PGID。
     pub shell_pgid: Option<Pid>,
 
-    /// 控制终端 fd（借用 fd=0 stdin 作为句柄）。
-    /// 保存下来用于前台 job 和 shell 之间反复 tcsetpgrp 切换。
+    /// 控制终端 fd。
     pub shell_terminal_fd: Option<RawFd>,
 
     /// 后台和已停止的 job 表。
-    /// 前台 job 正常结束 → 不放入此表（没必要继续管理）；
-    /// 后台 job / Ctrl-Z 暂停的 job → 放入此表。
     pub jobs: Vec<Job>,
 
-    /// 下一个分配的 job id（自增计数器）。
+    /// 下一个分配的 job id。
     pub next_job_id: usize,
 
-    /// 当前正在占用终端前台的进程组（记录用，主要是表达运行时状态）。
+    /// 当前占用终端前台的进程组。
     pub current_fg_pgid: Option<Pid>,
 
     pub script_env: Environment<'static>, // ← 新增：ecscript 全局根环境
@@ -170,29 +163,25 @@ pub enum OutputRedirection {
 
 // ── 作业控制 ────────────────────────────────────────────────────────
 
-/// 一个作业（Job）：shell 管理的最小调度单元。
-///
-/// 作业以进程组 pgid 为核心标识——
-/// 前台/后台切换、发 SIGCONT、接收 Ctrl-C，操作对象都是进程组。
-/// 单条命令的 Job 只有一个成员进程；管道的 Job 有多个成员进程。
+/// Shell 管理的一个作业，对应一个进程组。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Job {
     /// Shell 分配的 job 编号（`jobs` 命令里的 [N]）。
     pub id: usize,
 
-    /// 作业的进程组 ID。同一管道的所有进程共享同一个 pgid。
+    /// 作业的进程组 ID。
     pub pgid: Pid,
 
-    /// 用户输入的命令行原文（供 `jobs` 输出展示）。
+    /// 用户输入的命令行原文。
     pub command_line: String,
 
     /// 作业的聚合状态。
     pub status: JobStatus,
 
-    /// 管道最后一条命令的 PID。shell 退出码取这个进程的结果。
+    /// 管道最后一条命令的 PID，作业退出码取它的结果。
     pub last_pid: Pid,
 
-    /// 作业中所有进程的列表。
+    /// 作业中的所有进程。
     pub processes: Vec<JobProcess>,
 }
 
@@ -201,10 +190,10 @@ pub struct Job {
 pub struct JobProcess {
     pub pid: Pid,
 
-    /// shell 观察到的进程状态（与内核真实状态不完全一致，但足够支撑 jobs/fg/bg）。
+    /// shell 观察到的进程状态。
     pub state: ProcessState,
 
-    /// 该进程最后的退出/终止状态。
+    /// 该进程最后的退出或终止状态。
     pub last_status: Option<CommandStatus>,
 }
 

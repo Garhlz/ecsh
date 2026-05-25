@@ -4,6 +4,7 @@ use ecsh::types::{
     ShellState, ShellWord,
 };
 use std::collections::HashMap;
+use std::rc::Rc;
 
 fn state() -> ShellState {
     ShellState {
@@ -103,8 +104,8 @@ fn parses_logical_operators() {
         parse_line("true && echo ok", &state()).unwrap(),
         parsed_job(
             ParsedLine::AndThen(
-                Box::new(ParsedLine::Command(command("true", &[]))),
-                Box::new(ParsedLine::Command(command("echo", &["ok"]))),
+                Rc::new(ParsedLine::Command(command("true", &[]))),
+                Rc::new(ParsedLine::Command(command("echo", &["ok"]))),
             ),
             "true && echo ok"
         )
@@ -114,8 +115,8 @@ fn parses_logical_operators() {
         parse_line("false || echo fallback", &state()).unwrap(),
         parsed_job(
             ParsedLine::OrElse(
-                Box::new(ParsedLine::Command(command("false", &[]))),
-                Box::new(ParsedLine::Command(command("echo", &["fallback"]))),
+                Rc::new(ParsedLine::Command(command("false", &[]))),
+                Rc::new(ParsedLine::Command(command("echo", &["fallback"]))),
             ),
             "false || echo fallback"
         )
@@ -128,11 +129,11 @@ fn parses_left_associative_logical_chain() {
         parse_line("false || true && echo done", &state()).unwrap(),
         parsed_job(
             ParsedLine::AndThen(
-                Box::new(ParsedLine::OrElse(
-                    Box::new(ParsedLine::Command(command("false", &[]))),
-                    Box::new(ParsedLine::Command(command("true", &[]))),
+                Rc::new(ParsedLine::OrElse(
+                    Rc::new(ParsedLine::Command(command("false", &[]))),
+                    Rc::new(ParsedLine::Command(command("true", &[]))),
                 )),
-                Box::new(ParsedLine::Command(command("echo", &["done"]))),
+                Rc::new(ParsedLine::Command(command("echo", &["done"]))),
             ),
             "false || true && echo done"
         )
@@ -145,11 +146,11 @@ fn parses_sequence_as_lowest_precedence_left_associative_operator() {
         parse_line("echo a; echo b; echo c", &state()).unwrap(),
         parsed_job(
             ParsedLine::Sequence(
-                Box::new(ParsedLine::Sequence(
-                    Box::new(ParsedLine::Command(command("echo", &["a"]))),
-                    Box::new(ParsedLine::Command(command("echo", &["b"]))),
+                Rc::new(ParsedLine::Sequence(
+                    Rc::new(ParsedLine::Command(command("echo", &["a"]))),
+                    Rc::new(ParsedLine::Command(command("echo", &["b"]))),
                 )),
-                Box::new(ParsedLine::Command(command("echo", &["c"]))),
+                Rc::new(ParsedLine::Command(command("echo", &["c"]))),
             ),
             "echo a; echo b; echo c"
         )
@@ -159,11 +160,11 @@ fn parses_sequence_as_lowest_precedence_left_associative_operator() {
         parse_line("false && echo no; echo yes", &state()).unwrap(),
         parsed_job(
             ParsedLine::Sequence(
-                Box::new(ParsedLine::AndThen(
-                    Box::new(ParsedLine::Command(command("false", &[]))),
-                    Box::new(ParsedLine::Command(command("echo", &["no"]))),
+                Rc::new(ParsedLine::AndThen(
+                    Rc::new(ParsedLine::Command(command("false", &[]))),
+                    Rc::new(ParsedLine::Command(command("echo", &["no"]))),
                 )),
-                Box::new(ParsedLine::Command(command("echo", &["yes"]))),
+                Rc::new(ParsedLine::Command(command("echo", &["yes"]))),
             ),
             "false && echo no; echo yes"
         )

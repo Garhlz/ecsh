@@ -37,11 +37,6 @@ pub fn run_command(
         }
     };
 
-    let print_lifecycle = command.program.as_lit_str() != Some("clear");
-    if print_lifecycle {
-        println!("{} starting...", &command.program);
-    }
-
     let flow = if let Some(kind) = builtin_kind(&command) {
         if background {
             // builtin 在后台子进程里执行无意义：
@@ -81,10 +76,6 @@ pub fn run_command(
         CommandFlow::Continue(status)
     };
 
-    if print_lifecycle {
-        println!("{} ending.", &command.program);
-    }
-
     Ok(flow)
 }
 
@@ -99,11 +90,8 @@ pub fn run_pipeline(
     background: bool,
     command_line: &str,
 ) -> ShellResult<CommandStatus> {
-    println!("pipeline starting...");
-
     if let Err(err) = validate_pipeline_redirection(pipeline) {
         print_error(format!("pipeline: {}", err));
-        println!("pipeline ending.");
         return Ok(CommandStatus::failure());
     }
 
@@ -116,7 +104,6 @@ pub fn run_pipeline(
         Ok(commands) => Pipeline { commands },
         Err(err) => {
             print_error(format!("pipeline: expand: {}", err));
-            println!("pipeline ending.");
             return Ok(CommandStatus::failure());
         }
     };
@@ -128,14 +115,12 @@ pub fn run_pipeline(
                     "pipeline: built-in command is not supported in pipelines: {}",
                     command.program
                 ));
-                println!("pipeline ending.");
                 return Ok(CommandStatus::failure());
             }
         }
     }
 
     let status = launch::launch_pipeline_job(&expanded_pipeline, state, background, command_line)?;
-    println!("pipeline ending.");
     Ok(status)
 }
 

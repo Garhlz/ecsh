@@ -15,6 +15,7 @@ use crate::types::{
     Command, OutputRedirection, ParsedJob, ParsedLine, Pipeline, Redirection, ShellState,
     ShellWord, Token,
 };
+use std::rc::Rc;
 
 fn err(msg: impl Into<String>) -> ParseError {
     ParseError::new(0, msg)
@@ -105,8 +106,8 @@ fn parse_tokens(tokens: &[Token]) -> Result<ParsedLine, ParseError> {
             return Err(err("missing command after ;"));
         }
         return Ok(ParsedLine::Sequence(
-            Box::new(parse_tokens(left)?),
-            Box::new(parse_tokens(right)?),
+            Rc::new(parse_tokens(left)?),
+            Rc::new(parse_tokens(right)?),
         ));
     }
 
@@ -135,13 +136,13 @@ fn parse_tokens(tokens: &[Token]) -> Result<ParsedLine, ParseError> {
         let right_parsed = parse_tokens(right)?;
         if matches!(op, Token::AndIf) {
             return Ok(ParsedLine::AndThen(
-                Box::new(left_parsed),
-                Box::new(right_parsed),
+                Rc::new(left_parsed),
+                Rc::new(right_parsed),
             ));
         }
         return Ok(ParsedLine::OrElse(
-            Box::new(left_parsed),
-            Box::new(right_parsed),
+            Rc::new(left_parsed),
+            Rc::new(right_parsed),
         ));
     }
 

@@ -1,13 +1,15 @@
-//! 词法分析：将一行输入字符串拆成 Token 序列。
+//! 词法分析：将一行 shell 输入拆成 `Token` 序列。
 //!
-//! 状态机有三种模式：Normal（正常）、SingleQuoted（单引号）、DoubleQuoted（双引号）。
-//! 空格和操作符在 Normal 模式下作为 token 边界；引号内所有内容保留为字面量。
-//! 错误统一通过 `ParseError` 返回，携带字节偏移和续行感知标志。
+//! lexer 只负责识别顶层操作符、引号边界和 shell word 的 fragment 结构；
+//! `$...` 的实际求值继续延后到执行阶段。
 
 use crate::ecscript::error::ParseError;
 use crate::types::{LexerStatus, ShellState, ShellWord, Token, WordFragment};
 
-/// 将一行输入拆分为 Token 序列，错误携带字节偏移。
+/// 将一行输入拆成 token 序列。
+///
+/// 这里同时负责把普通单词收集成 `ShellWord`，并把 `$VAR`、`${VAR}`、
+/// `$(cmd)`、`$[expr]` 等结构编码成 `WordFragment`。
 pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseError> {
     let mut chars = line.chars().peekable();
     let mut lexer_status = LexerStatus::Normal;
@@ -20,7 +22,7 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseErro
     while let Some(ch) = chars.next() {
         offset += ch.len_utf8();
         match lexer_status {
-            // ── Normal 模式：操作符和空白有特殊意义 ──
+            // Normal 模式下，空白和 shell 操作符会切开 token。
             LexerStatus::Normal => match ch {
                 ch if ch.is_whitespace() => {
                     flush_word(&mut lit_buffer, &mut fragments, &mut tokens);
@@ -81,7 +83,7 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseErro
                 }
             },
 
-            // ── 单引号模式：所有字符按字面量处理，不被识别为操作符 ──
+            // 单引号里完全按字面量处理，不再识别 `$` 或操作符。
             LexerStatus::SingleQuoted => match ch {
                 '\'' => {
                     lexer_status = LexerStatus::Normal;
@@ -89,7 +91,7 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseErro
                 _ => lit_buffer.push(ch),
             },
 
-            // ── 双引号模式：保留空白和操作符字面量，但 $ 和 \" 仍会被处理 ──
+            // 双引号保留字面量边界，但仍支持 `$` 展开和有限的反斜杠转义。
             LexerStatus::DoubleQuoted => match ch {
                 '"' => lexer_status = LexerStatus::Normal,
                 '$' => handle_dollar(&mut chars, &mut lit_buffer, &mut fragments, &mut offset)?,
@@ -114,7 +116,6 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseErro
         }
     }
 
-    // 输入结束但引号未闭合,报错。
     if let LexerStatus::DoubleQuoted = lexer_status {
         return Err(ParseError::incomplete(offset, "unterminated double quote"));
     }
@@ -126,15 +127,14 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseErro
     Ok(tokens)
 }
 
-/// 将当前累积的字面量提交到fragments数组中，并重置buffer。
-/// 使用 `std::mem::take` 把 String 所有权移交给 Token，避免 clone。
+/// 把当前字面量缓冲区提交为一个 `Lit` fragment。
 fn flush_buffer(lit_buffer: &mut String, fragments: &mut Vec<WordFragment>) {
     if !lit_buffer.is_empty() {
         fragments.push(WordFragment::Lit(std::mem::take(lit_buffer)));
     }
 }
 
-// 同理，提交token
+/// 结束当前 shell word，并把它提交为一个 `Token::Word`。
 fn flush_word(lit_buffer: &mut String, fragments: &mut Vec<WordFragment>, tokens: &mut Vec<Token>) {
     flush_buffer(lit_buffer, fragments);
     if !fragments.is_empty() {
@@ -144,38 +144,42 @@ fn flush_word(lit_buffer: &mut String, fragments: &mut Vec<WordFragment>, tokens
     }
 }
 
+/// 解析 `$` 开头的 shell word fragment。
+///
+/// 支持的形式包括：
+/// - `$VAR`
+/// - `${VAR}`
+/// - `$(cmd)`
+/// - `$[expr]` / `$[...expr]`
+///
+/// 任何不属于这些形式的 `$` 都退化为普通字面量。
 fn handle_dollar(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     lit_buffer: &mut String,
     fragments: &mut Vec<WordFragment>,
     offset: &mut usize,
 ) -> Result<(), ParseError> {
-    // 进入之前`$`已经消费掉了
     match chars.peek().copied() {
         None => {
-            // 行尾的孤 $，保留字面量。
             lit_buffer.push('$');
             Ok(())
         }
         Some('?') => {
-            // 视为var
+            // `$?` 走和普通变量一致的 fragment 表示，后面由执行阶段解释。
             let _ = chars.next();
             flush_buffer(lit_buffer, fragments);
             fragments.push(WordFragment::Var("?".to_string()));
             Ok(())
         }
         Some('{') => {
-            flush_buffer(lit_buffer, fragments); // 把之前的字面量消费掉
-
-            // 解析为EnvVar,不需要深度计数
+            // `${VAR}` 只表示环境变量，不参与脚本作用域 fallback。
+            flush_buffer(lit_buffer, fragments);
             let _ = chars.next();
 
             match chars.next() {
                 Some('}') => Err(ParseError::new(*offset, "empty variable name in braces")),
                 Some(start) if start == '_' || start.is_ascii_alphabetic() => {
-                    // 开始循环解析{}中的环境变量
                     let mut is_close = false;
-
                     let mut envvar_buffer = String::new();
                     envvar_buffer.push(start);
 
@@ -211,12 +215,10 @@ fn handle_dollar(
             }
         }
         Some('(') => {
-            // 解析为 Cmd,需要深度计数（处理引号和转义）
-            flush_buffer(lit_buffer, fragments); // 把之前的字面量消费掉
-
+            // `$(...)` 需要自己维护括号深度，同时保留内部原始文本。
+            flush_buffer(lit_buffer, fragments);
             let _ = chars.next();
             let mut depth = 1;
-
             let mut cmd_buffer = String::new();
 
             enum LoopState {
@@ -241,7 +243,6 @@ fn handle_dollar(
                             cmd_buffer.push('(');
                         }
                         Some('\\') => {
-                            // 保留原始文本，留给之后的程序处理
                             cmd_buffer.push('\\');
                             let Some(nxt) = chars.next() else {
                                 return Err(ParseError::incomplete(
@@ -269,9 +270,7 @@ fn handle_dollar(
                             ));
                         }
                     },
-                    // 1. 括号不再影响整个dollar表达式
-                    // 2. 处理转义
-                    // 3. 不嵌套处理$，将其视为普通char
+                    // 引号内部只维护引号自己的结束条件，不再额外解释括号或 `$`。
                     LoopState::InDoubleQuote => match chars.next() {
                         Some('"') => {
                             loop_state = LoopState::Normal;
@@ -318,18 +317,16 @@ fn handle_dollar(
             }
 
             fragments.push(WordFragment::Cmd(cmd_buffer));
-
             Ok(())
         }
         Some('[') => {
-            // 解析为 ecscript Expr,需要深度计数（处理引号和转义）
-            flush_buffer(lit_buffer, fragments); // 把之前的字面量消费掉
-
+            // `$[...]` 复用和 `$(...)` 类似的扫描策略，但括号改成 `[]`。
             let _ = chars.next();
+            flush_buffer(lit_buffer, fragments);
             let mut depth = 1;
-
             let mut expr_buffer = String::new();
 
+            // 仅在最开头识别 `...` 作为 spread 标记，其余 `.` 都按源码保留。
             let mut is_spread = false;
             let mut dot_cnt = 0;
 
@@ -367,7 +364,6 @@ fn handle_dollar(
                             expr_buffer.push('[');
                         }
                         Some('\\') => {
-                            // 保留原始文本，留给之后的程序处理
                             expr_buffer.push('\\');
                             let Some(nxt) = chars.next() else {
                                 return Err(ParseError::incomplete(
@@ -395,9 +391,7 @@ fn handle_dollar(
                             ));
                         }
                     },
-                    // 1. 括号不再影响整个dollar表达式
-                    // 2. 处理转义
-                    // 3. 不嵌套处理$，将其视为普通char
+                    // 引号内部不再参与 `[]` 深度计算，只等待对应引号闭合。
                     LoopState::InDoubleQuote => match chars.next() {
                         Some('"') => {
                             loop_state = LoopState::Normal;
@@ -447,16 +441,12 @@ fn handle_dollar(
                 src: expr_buffer,
                 spread: is_spread,
             });
-
             Ok(())
         }
         Some(ch) => {
             if ch == '_' || ch.is_ascii_alphabetic() {
-                // 解析为普通var， 也就是先匹配ecscript本地变量，然后fallback到环境变量
-                // `$NAME` 使用最长匹配：一直读到第一个非变量名字符为止。
-
-                flush_buffer(lit_buffer, fragments); // 先提交之前的字面量部分
-
+                // `$NAME` 采用最长匹配，执行阶段再做脚本变量优先的查找策略。
+                flush_buffer(lit_buffer, fragments);
                 let _ = chars.next();
                 let mut var_buffer = String::new();
                 var_buffer.push(ch);
@@ -472,7 +462,6 @@ fn handle_dollar(
 
                 fragments.push(WordFragment::Var(var_buffer));
             } else {
-                // `$` 后不是当前支持的展开形式，保留字面量 `$`。
                 lit_buffer.push('$');
             }
             Ok(())
