@@ -1,0 +1,20 @@
+let user = {
+    name: "elaine",
+    tags: ["rust", "shell"],
+    stats: {
+        commits: 3,
+        reviews: 2
+    }
+}
+
+user.stats.commits += 4
+push(user.tags, "ecs")
+
+println("name")
+println(user.name)
+println("user")
+println(to_json(user))
+println("stat-keys")
+println(to_json(keys(user.stats)))
+println("stat-values")
+println(to_json(values(user.stats)))

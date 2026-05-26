@@ -36,10 +36,10 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 已支持：
 
 - `$VAR`：脚本作用域优先，再回退环境变量
-- `${VAR}`：只查环境变量
+- `${expr}`：调用 `ecscript` 表达式求值
+- `${env("VAR")}`：通过 ecscript 内置函数显式读取环境变量
 - `$(cmd)`：通过 `/bin/sh -c` 做命令替换
-- `$[expr]`：调用 `ecscript` 表达式求值
-- `$[...arr]`：把数组展开成多个 argv
+- `${...arr}`：把数组展开成多个 argv
 
 这一部分对应 [TODO.md](/home/elaine/work/projects/ecsh/docs/TODO.md) 中的 stage 6。当前 `HEAD` 对应的主提交也是这一阶段。
 
@@ -53,21 +53,32 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `if` / `while` / `for in`
 - `break` / `continue` / `return`
 - 命名函数、lambda、闭包、自由变量捕获
-- builtin：`len`、`push`、`pop`、`insert`、`remove`、`keys`、`values`、`to_json`、`print`、`println`
+- builtin：`env`、`range`、`len`、`push`、`pop`、`insert`、`remove`、`keys`、`values`、`to_json`、`print`、`println`
 - 独立解释器入口：REPL / 文件执行 / `-e` / stdin
 - parse/runtime 错误的偏移定位和源码格式化
 
+当前还已经收紧了两条语言边界：
+
+- `1..10` / `1..=10` 只在 `for` 语句中保留；普通值世界改用 `range(start, end)`，默认闭区间
+- `ecsh` 顶层已支持一部分脚本模式分派，但脚本 block 内仍然只接受 ecscript 语句，不直接接受 shell 命令
+
 ## 阶段状态
 
-### 阶段 7：顶层集成与文件执行
+### 阶段 7：顶层集成与文件执行（已完成）
 
-当前仍未完成的阶段 7 事项包括：
+阶段 7 已完成的内容包括：
 
-- 顶层输入按首 token 在 shell 模式 / ecscript 模式之间分派
-- `ecsh` 的正式脚本文件执行入口
-- `~/.ecshrc`
-- `source` / `.`
-- shell REPL 与 `ecscript` REPL 在 incomplete 检测和错误输出上的进一步统一
+- 交互顶层按首 token 在 shell 模式 / ecscript 模式之间分派
+- `ecsh file.ecs` 走 ecscript 文件执行路径
+- `source` / `.` 在当前 shell 的 `script_env` 中执行 `.ecs` 文件
+- 交互启动时自动加载 `~/.ecshrc`
+- 顶层 shell parse error 与 ecscript parse/runtime error 已分别走源码定位输出
+
+当前固定的环境边界是：
+
+- 交互顶层、`source` / `.`、`.ecshrc` 共享当前 shell 的 `script_env`
+- `ecsh file.ecs` 使用新的脚本根环境
+- ecscript block 内仍是纯 ecscript 语句，不直接执行 shell 命令；后续命令桥由 `cmd{}` 承担
 
 ### 阶段 7.5：Shell 诊断与交互收口（已完成）
 
@@ -114,23 +125,14 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 
 如果按当前路线继续推进，后续工作可以归为四类：
 
-### 1. 顶层脚本集成
-
-对应 `TODO.md` 中的阶段 7：
-
-- 顶层输入分派
-- `ecsh` 文件执行入口
-- `~/.ecshrc` 与 `source` / `.`
-- shell / script 双入口的错误处理与续行逻辑统一
-
-### 2. shell 诊断与交互收口
+### 1. shell 诊断与交互收口
 
 对应 `TODO.md` 中的阶段 7.5：
 
 - Tab 补全、alias / unalias、交互层体验增强
 - shell 侧后续诊断接口的增量整理
 
-### 3. shell 语义补完
+### 2. shell 语义补完
 
 对应 `TODO.md` 中的阶段 8：
 
@@ -139,7 +141,7 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - subshell
 - 更完整的作业控制与执行语义
 
-### 4. 工程收口
+### 3. 工程收口
 
 - 统一 shell / `ecscript` 的错误类型与格式化接口
 - 清理阶段性文档与命名残留

@@ -1,0 +1,21 @@
+let total = 0
+let seen = []
+
+for i in 1..=5 {
+    total += i
+    push(seen, i * i)
+}
+
+println("sum")
+println(total)
+println("squares")
+println(to_json(seen))
+
+let countdown = []
+while total > 6 {
+    push(countdown, total)
+    total -= 3
+}
+
+println("countdown")
+println(to_json(countdown))

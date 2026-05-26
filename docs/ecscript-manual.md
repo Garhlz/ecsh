@@ -1,7 +1,7 @@
-# ecscript 当前实现手册（stage 6）
+# ecscript 当前实现手册（stage 6 / 7 过渡期）
 
 本文描述 ecscript **当前已经实现** 的语法与语义。
-按当前提交历史，`HEAD` 对应 `TODO.md` 中的 stage 6。除独立解释器本身外，`ecscript` 也已经被 `ecsh` 用于 `$[expr]` / `$[...arr]` 运行时展开。
+按当前提交历史，`ecscript` 内核主体已经完成，`ecsh` 顶层也开始进入 stage 7 集成。除独立解释器本身外，`ecscript` 现在也已经被 `ecsh` 用于 `${expr}` / `${...arr}` 运行时展开。
 
 ---
 
@@ -17,7 +17,7 @@
 - 数组 / 对象字面量
 - 字段访问、索引访问
 - 字段赋值、索引赋值
-- 全局 builtin：`len` / `print` / `println` / `push` / `pop` / `insert` / `remove` / `keys` / `values` / `to_json`
+- 全局 builtin：`env` / `range` / `len` / `print` / `println` / `push` / `pop` / `insert` / `remove` / `keys` / `values` / `to_json`
 - `if / else if / else`
 - `while`
 - `for in`：遍历数组 / 对象 key / 区间
@@ -45,8 +45,8 @@
 当前 `ecscript` 与 `ecsh` 的关系如下：
 
 - `ecscript` 已经可以独立运行：REPL、文件执行、`-e`、stdin 都可用
-- `ecsh` 已经会在运行时调用 `ecscript` 表达式求值，支撑 `$[expr]` 和 `$[...arr]`
-- `ecsh` 顶层输入本身还没有正式切换到“shell 模式 / script 模式”双入口，这一部分对应 `TODO.md` 中的阶段 7
+- `ecsh` 已经会在运行时调用 `ecscript` 表达式求值，支撑 `${expr}` 和 `${...arr}`
+- `ecsh` 顶层输入已经接入“shell 模式 / script 模式”分派，`.ecs` 文件、`source` / `.`、`.ecshrc` 都复用同一套 ecscript 文件执行入口
 
 ### 已知边界（非 bug）
 
@@ -197,7 +197,7 @@ let pattern = r"\d+\.\d+";
 - `[]`：索引访问 / 数组字面量
 - `()`：分组 / 调用
 - `{}`：block / 对象字面量
-- `..` / `..=`：区间表达式
+- `..` / `..=`：保留给 `for` 语句的区间语法
 
 ---
 
@@ -576,17 +576,25 @@ func f() { return x; }
 当前支持：
 
 ```ecs
-0..3
-0..=3
+for i in 0..3 { ... }
+for i in 0..=3 { ... }
 ```
 
-在运行时，区间表达式当前会被求值成 `Array<Int>`。  
+区间语法当前只保留给 `for` 语句。  
 在 `for i in 0..3 { ... }` 这种语法里，parser 会直接产出 `ForRange` 语句节点。
+
+普通值世界里不再把 `0..3` 当成可求值表达式；需要一个整数数组时，使用：
+
+```ecs
+range(0, 3)   // => [0, 1, 2, 3]
+```
 
 ### 9.5 builtin
 
 | 名字 | 语义 | 备注 |
 |------|------|------|
+| `env(name)` | 读取环境变量 | `name` 必须是 `String`，不存在时返回 `nil` |
+| `range(start, end)` | 生成闭区间整数数组 | `start` / `end` 必须是 `Int` |
 | `len(x)` | 返回长度 | 支持 `Array` / `Object` / `String` |
 | `print(v...)` | 输出一个或多个值 | 参数之间用空格分隔，不自动换行 |
 | `println(v...)` | 输出一个或多个值并换行 | 参数之间用空格分隔 |
