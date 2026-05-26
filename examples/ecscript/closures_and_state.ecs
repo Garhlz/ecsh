@@ -1,0 +1,26 @@
+func make_counter(start) {
+    let current = start
+    return (step) => {
+        current += step
+        return current
+    }
+}
+
+let counter = make_counter(10)
+let snapshots = []
+
+push(snapshots, counter(1))
+push(snapshots, counter(2))
+push(snapshots, counter(5))
+
+println("snapshots")
+println(to_json(snapshots))
+
+let workers = []
+for i in 0..3 {
+    let f = () => i * i
+    push(workers, f())
+}
+
+println("worker-results")
+println(to_json(workers))

@@ -14,7 +14,7 @@
 - 所有操作数据的函数是**全局内置函数**（`push(arr, val)`、`run(cmd)`、`to_json(obj)`），不加在数据结构上作为方法
 - Array 和 Object 分离，不混淆（不搞 Lua table 那种"同一结构同时是数组和字典"）
 - 数据结构操作分两层：结构访问用短语法标记（`arr[0]` / `obj.name`），容器操作用全局内置函数（`push(arr, val)` / `to_json(obj)`）
-- 四种嵌入语法各用不同定界符：`$VAR` / `${VAR}` / `$(cmd)` / `$[expr]`，互不混用
+- shell word 中只保留少量高价值入口：`$name` 表示简单变量，`${expr}` 表示完整语言表达式，`$(cmd)` 表示命令替换
 - 脚本解析和 shell 命令解析由**关键字前缀**切换，不依赖隐式类型推断
 
 > 多写几个字符不是问题。阅读时不需要猜语义才是。
@@ -61,27 +61,32 @@ ls -la          → 关键字未命中 → shell 命令
 
 **例外**：顶层"关键字未命中 → shell 命令"的分派仍然在 parse 阶段做，因为需要区分"这行走脚本 AST 还是走 shell 执行器"，这不是符号表问题，是语法模式决策。
 
-### 四种嵌入语法
+### shell word 嵌入语法（目标设计）
 
 | 语法 | 含义 | 示例 |
 |------|------|------|
 | `$VAR` | 脚本作用域优先 → fallback `std::env::var` | `echo $HOME` |
-| `${VAR}` | **仅** `std::env::var`，不查脚本作用域 | `echo ${HOME}/work` |
-| `$(cmd)` | shell 命令替换（bash 兼容） | `echo $(date)` |
-| `$[expr]` | 脚本表达式求值 | `echo $[x + 1]` |
+| `${expr}` | ecscript 表达式求值 | `echo ${x + 1}` |
+| `$(cmd)` | 传统 shell 命令替换 | `echo $(date)` |
 
-**语义：** `$VAR` 先查脚本作用域，不存在才 fallback 环境变量。`${VAR}` 只查环境变量——花括号是显式的"我要环境变量"信号。三者互不混用：
+**语义：** `$VAR` 是简单变量快捷形式，先查脚本作用域，不存在才 fallback 环境变量。`${expr}` 是完整表达式入口，可读取字段、索引、函数调用和计算结果。环境变量强制访问不再占用 `${}`，改用语言内置函数：
 
 ```sh
 let HOME = "/custom"
 echo $HOME       # → /custom（脚本遮蔽了环境变量）
-echo ${HOME}     # → /home/elaine（强取环境变量）
-echo $[HOME]     # → /custom（脚本表达式，与 $HOME 一致但用于表达式场景）
+echo ${HOME}     # → /custom（完整表达式，读取脚本变量）
+echo ${env("HOME")}  # → /home/elaine（强取环境变量）
 ```
 
 **`$VAR` 扫描**：`.`、`/`、`-`、空格等非标识符字符自然终止变量名。`$name.c` = 变量 `name` + 字面量 `.c`。
 
-**单引号内不做任何展开。** `echo '$[x + 1]'` 输出字面字符串 `$[x + 1]`，不需要求值。遵循 POSIX 惯例：单引号完全字面，双引号内做 `$` 展开。
+**单引号内不做任何展开。** `echo '${x + 1}'` 输出字面字符串 `${x + 1}`，不需要求值。遵循 POSIX 惯例：单引号完全字面，双引号内做 `$` 展开。
+
+**迁移说明**：当前实现已经支持 `$[expr]` / `$[...arr]`。目标设计倾向于先用 `${expr}` 替换 `$[expr]`，减少一种表达式入口。`$[...arr]` 这类 argv 展开属于后续可评估语法糖，不放进当前目标语法。
+
+**兼容性取舍**：`ecsh` 不以 bash 语法兼容为硬约束。`${expr}` 优先服务 ecscript 表达式嵌入，环境变量通过 `env("NAME")` 或后续 `std.env.get("NAME")` 显式访问。
+
+**argv 展开暂缓**：普通 shell word 里不急着支持 `${...arr}`。复合值进入 shell 时先使用显式转换，例如 `${join(files, " ")}`、`${to_json(obj)}`，后续有 `|>` 后可以写成 `${files |> join(" ")}`。真正的多 argv 展开优先放在命令构造层处理，例如 `cmd("rustfmt", ...files)`。
 
 ### 块语法：`{}`
 
@@ -96,21 +101,21 @@ func build(name) {
 }
 ```
 
-规则与顶层一致：关键字启动脚本模式，其余都是 shell 命令。函数参数在脚本作用域中，`$name` 优先查到参数（`${name}` 查的是环境变量，注意区分）。
+规则与顶层一致：关键字启动脚本模式，其余都是 shell 命令。函数参数在脚本作用域中，`$name` 和 `${name}` 都会查到参数；强制读取环境变量时使用 `${env("NAME")}`。
 
-**重要约束**：在 shell 命令模式里，Object 字段访问、数组索引和任意脚本表达式都必须通过 `$[...]` 嵌入；否则就只是普通字面参数。
+**重要约束**：在 shell 命令模式里，Object 字段访问、数组索引和任意脚本表达式都必须通过 `${expr}` 嵌入；否则就只是普通字面参数。
 
 ```sh
 echo result.stderr      # 字面量 "result.stderr"
-echo $[result.stderr]   # 读取对象字段值
-echo $[arr[0]]          # 读取数组元素
+echo ${result.stderr}   # 读取对象字段值
+echo ${arr[0]}          # 读取数组元素
 ```
 
 ---
 
 ## 二、Shell Word 模型变更
 
-当前 shell lexer 使用 `Token::Word(String)`，`$` 展开在 lex 阶段就写死为普通字符串。新设计下 `$VAR` 需要运行时查脚本作用域，`$[expr]` 需要运行时求值，甚至 `$[...arr]` 会把一个词展开成多个 argv——这些都不能在 lex 时做死。
+当前 shell lexer 曾使用 `Token::Word(String)`，`$` 展开在 lex 阶段就写死为普通字符串。新设计下 `$VAR` 需要运行时查脚本作用域，`${expr}` 需要运行时求值，这些都不能在 lex 时做死。
 
 ### 新 Word 模型：片段 AST（每个 argv 词一个 ShellWord）
 
@@ -122,27 +127,26 @@ struct ShellWord {
 enum WordFragment {
     Lit(String),                        // 纯文本字面量
     Var(String),                        // $VAR  → 执行时查作用域→fallback env
-    EnvVar(String),                     // ${VAR} → 执行时只查 env
     Cmd(String),                        // $(cmd) → 执行时通过 /bin/sh -c 做命令替换
-    Expr { src: String, spread: bool }, // $[expr] / $[...arr]
+    Expr(String),                       // ${expr}
 }
 ```
 
 一个命令最终不是 `Vec<String>`，而是先得到 `Vec<ShellWord>`；每个 shell 参数各自保存自己的片段，真正的字符串拼接/展开延后到执行阶段：
 
 ```
-echo Hello $HOME $[x + 1]
+echo Hello $HOME ${x + 1}
   → [
       ShellWord { fragments: [Lit("echo")] },
       ShellWord { fragments: [Lit("Hello")] },
       ShellWord { fragments: [Var("HOME")] },
-      ShellWord { fragments: [Expr{src:"x+1", spread:false}] }
+      ShellWord { fragments: [Expr("x+1")] }
     ]
   → 执行时展开: "echo" "Hello" "/home/elaine" "11"
   → argv: ["echo", "Hello", "/home/elaine", "11"]
 ```
 
-`spread: true`（即 `$[...arr]`）时，一个 fragment 展开成多个 argv。
+多 argv 展开暂不放进 `ShellWord` 的目标模型。需要展开参数时，优先在 `cmd(...)` 这类命令值构造函数里使用 `...args`。
 
 ---
 
@@ -299,7 +303,7 @@ struct Object {
 let x = 1          # 全局
 if true {
     let y = 2       # if 块作用域
-    echo $[x + y]   # y 查当前作用域，x 沿链向外查
+    echo ${x + y}   # y 查当前作用域，x 沿链向外查
 }
 # y 在此不可见
 ```
@@ -397,21 +401,20 @@ let r = run("grep", "x", "no_such_file")
 | 方式 | 语法 | 说明 |
 |------|------|------|
 | 脚本变量读取 | `$VAR` | 脚本作用域优先，不存在则 fallback `std::env::var` |
-| 环境变量读取 | `${VAR}` | **仅** `std::env::var`，不查脚本作用域 |
-| 表达式嵌入 | `$[expr]` | 脚本表达式求值；仅标量值可隐式转字符串，`Array/Object` 运行时报错 |
+| 表达式嵌入 | `${expr}` | 脚本表达式求值；仅标量值可隐式转字符串，`Array/Object` 运行时报错 |
+| 环境变量读取 | `${env("VAR")}` | 通过语言内置函数显式读取环境变量 |
 | 命令替换 | `$(cmd)` | 执行 shell 命令，输出替换到原位置 |
-| 显式 JSON 转换 | `$[to_json(expr)]` | 将 `Array/Object` 显式序列化为 JSON 字符串后嵌入单个参数 |
-| 参数展开（显式） | `$[...arr]` | 将数组显式拆散为多个独立的 argv 参数（降维） |
+| 显式 JSON 转换 | `${to_json(expr)}` | 将 `Array/Object` 显式序列化为 JSON 字符串后嵌入单个参数 |
 
-`$[arr]`、`$[to_json(arr)]` 和 `$[...arr]` 的区别：
+`${arr}`、`${to_json(arr)}` 和 `${join(arr, " ")}` 的区别：
 ```sh
 let a = [1, 2, 3]
-echo $[a]       # → RuntimeError（Array 不能隐式字符串化）
-echo $[to_json(a)] # → echo "[1,2,3]"（一个 JSON 字符串参数）
-echo $[...a]    # → echo 1 2 3（三个独立参数）
+echo ${a}       # → RuntimeError（Array 不能隐式字符串化）
+echo ${to_json(a)} # → echo "[1,2,3]"（一个 JSON 字符串参数）
+echo ${join(a, " ")} # → echo "1 2 3"（一个字符串参数）
 ```
 
-这条规则体现“显式优于隐式”：`$[expr]` 适合标量值（`String/Int/Float/Bool/Nil`）嵌入；复合值必须显式说明你想要的是 **JSON 字符串**（`to_json(obj)`）还是 **argv 展开**（`$[...arr]`）。若后续需要其他文本化策略，再单独加内置函数（如 `join(arr, ",")`），而不是让 `Array/Object` 自动变字符串。
+这条规则体现“显式优于隐式”：`${expr}` 适合标量值（`String/Int/Float/Bool/Nil`）嵌入；复合值必须显式说明你想要的是 **JSON 字符串**（`to_json(obj)`）还是普通文本（如 `join(arr, ",")`）。若后续确认“数组展开成多个 argv”是高频需求，再单独加语法糖，而不是让 `Array/Object` 自动变字符串或自动降维。
 
 ### Shell → Script（状态捕获）
 
@@ -422,7 +425,7 @@ let result = run("gcc", "-O2", "main.c", "-o", "main")
 # result = { code: 0, signal: 0, stdout: "", stderr: "" }
 # signal = 0 表示正常退出；signal > 0 表示被信号终止（如 SIGTERM = 15）
 if result.code != 0 || result.signal != 0 {
-    echo $[result.stderr]
+    echo ${result.stderr}
 }
 ```
 
@@ -430,28 +433,28 @@ if result.code != 0 || result.signal != 0 {
 
 **MVP 边界：`run()` 只支持单条命令 + 参数列表，不支持 shell 操作符（`|`、`&&`、`;` 等）。** 需要管道时拆成多次 `run()` 调用，或回到 shell 命令行使用。
 
-**与 `$[...arr]` 共享展开规则：** `run("gcc", ...args)` 和 `echo $[...args]` 的 `...` 是同一套展开语义——将数组拆散为独立参数。两个入口，同一套逻辑。这里的 `...args` 是脚本函数调用参数 grammar 的一部分，等价于“把数组元素逐个追加到参数列表”。
+**命令构造中的展开规则：** `run("gcc", ...args)` 这类函数调用中的 `...args` 是脚本函数调用参数 grammar 的一部分，等价于“把数组元素逐个追加到参数列表”。普通 shell word 暂不承担多 argv 展开职责。
 
 ### 数据序列化
 
 ```sh
 let data = {name: "elaine", age: 25}
-echo $[to_json(data)] > /tmp/data.json
-echo $[to_json(data)] | jq .name
+echo ${to_json(data)} > /tmp/data.json
+echo ${to_json(data)} | jq .name
 ```
 
-`to_json(table)` 内置函数将 Object/Array 序列化为 JSON 字符串。若要把脚本表达式结果送入 shell 的重定向或管道，先用 `$[...]` 把它嵌入为 shell 参数；`Array/Object` 本身不能直接通过 `$[expr]` 隐式字符串化，必须显式写成 `to_json(...)`（或未来其他专用转换函数）。`|` 管道仅在 shell 命令行模式下可用，脚本表达式内不要混用。
+`to_json(table)` 内置函数将 Object/Array 序列化为 JSON 字符串。若要把脚本表达式结果送入 shell 的重定向或管道，先用 `${expr}` 把它嵌入为 shell 参数；`Array/Object` 本身不能直接通过 `${expr}` 隐式字符串化，必须显式写成 `to_json(...)`（或未来其他专用转换函数）。`|` 管道仅在 shell 命令行模式下可用，脚本表达式内不要混用。
 
 ---
 
-## 六、开发路线（优化版：7 阶段）
+## 六、开发路线（当前版）
 
 ### 总体实施策略
 
 - **先做独立 ecscript 内核，再接 shell。** 不要一开始就改 `main.rs` 和现有 shell parser；先把 `src/script/` 跑通，最后一阶段再接线。
 - **每阶段都要有最小可运行产物。** 优先得到“可在单元测试或小 REPL 中运行”的子系统，而不是一次性把所有模块写完。
 - **优先让 AST 干净，再让语法糖降级。** 例如 `x.y()` 直接在 parser 中降成 `Call(FieldAccess(x, "y"), ...)`，不要在 evaluator 里额外分支。
-- **shell 命令模式与 script 表达式模式严格分离。** shell 里只认 `$[...]` 作为脚本表达式入口，不做隐式字段读取。
+- **shell 命令模式与 script 表达式模式严格分离。** shell 里只认 `${expr}` 作为完整脚本表达式入口，不做隐式字段读取。
 
 ### 阶段 1：ecscript 表达式内核（已完成）
 
@@ -751,7 +754,7 @@ echo $[to_json(data)] | jq .name
 
 **为什么暂缓**
 
-- [ ] 字符串插值会和 shell 侧 `${VAR}` / `$[expr]` 设计形成语义邻接，最好在 shell 集成方向更清晰后再定
+- [ ] 字符串插值会和 shell 侧 `${expr}` 设计形成语义邻接，最好在 shell 集成方向更清晰后再定
 - [ ] 这类特性提升体验明显，但实现和语法决策都比注释 / 原始字符串 / 复合赋值更容易牵一发动全身
 
 **明确不放在 5.5 的内容**
@@ -778,13 +781,13 @@ echo $[to_json(data)] | jq .name
 - [x] 计数器和累加逻辑不再大量重复 `x = x + 1`
 - [ ] 简短函数和 lambda 不再被 `return` / 分号样板代码淹没
 
-### 阶段 6：ShellWord 与四种嵌入语法（已完成）
+### 阶段 6：ShellWord 与嵌入语法（已完成）
 
 **目标**：把脚本值安全地桥接到现有 shell 执行器。
 
 **已完成**
 - [x] `src/types.rs`：`ShellWord` / `WordFragment` 数据模型，`Command` 改用 `ShellWord`
-- [x] `src/lexer.rs`：`handle_dollar` 产出 `Var`/`EnvVar`/`Cmd`/`Expr` fragment，
+- [x] `src/lexer.rs`：`handle_dollar` 已按 shell word 嵌入模型产出 `Var`/`Cmd`/`Expr` fragment，
       不再在 lex 阶段展开，引号/深度计数/转义联合判定已覆盖
 - [x] `src/parser.rs`：`Token::Word(ShellWord)` 通路
 - [x] `src/executor/expand.rs`：`expand_argv` / `expand_shell_word` / `expand_cmd`
@@ -794,38 +797,40 @@ echo $[to_json(data)] | jq .name
 - [x] 所有现有测试适配为新数据模型，lexer 测试验证 fragment 产出
 
 **后续可继续做**
+- [ ] 语法收紧：将 `$[expr]` 迁移为 `${expr}`，`$[]` 作为过渡兼容语法再评估是否移除
+- [ ] 环境变量强制读取从 `${VAR}` 迁移到 `${env("VAR")}` / 未来 `std.env.get("VAR")`
+- [ ] 将 shell word 里的 `$[...arr]` / `${...arr}` 从目标语法中降级为后续可评估糖；多 argv 展开优先放在 `cmd("x", ...args)` 这类命令构造入口
 - [ ] 调用参数展开 `...expr` grammar
 - [x] `launch.rs` 前的执行路径已统一接入运行时展开（包含 builtin / external / pipeline / redirection）
-- [x] $[...arr] spread 的端到端验证
+- [x] $[...arr] spread 的端到端验证（旧语法）
 - [x] 执行时展开的完整测试（含 builtin 参数、动态命令头、redirection、$(cmd)）
 
-### 阶段 7：顶层集成与文件执行
+### 阶段 7：顶层集成与文件执行（已完成）
 
 **目标**：把独立 ecscript 内核真正接到 ecsh 上。
-**当前状态**：在接回 `ecsh` 主入口之前，已经有独立 `ecscript` binary 可用于 REPL、stdin、文件执行和 `-e`。
+**当前状态**：已完成。
 
-**涉及的现有模块**
-- [ ] `src/main.rs`：统一入口分派
-- [ ] `src/input.rs`：续行读取与 `... ` prompt
-- [ ] `src/parser.rs` 或新增 glue 模块：顶层关键字分派
-- [ ] `src/lib.rs`：导出 script 模块
+**已完成**
+- [x] `src/main.rs`：统一入口分派
+- [x] `src/input.rs`：续行读取与 `... ` prompt
+- [x] `src/parser.rs` 或新增 glue 模块：顶层关键字分派
+- [x] `src/lib.rs`：导出 script 模块
+- [x] 顶层 parser 集成：关键字开头走 ecscript parser，其他走现有 shell parser
+- [x] shell word 表达式入口切换到目标语法：`${expr}`
+- [x] 环境变量强制访问改为 `env("NAME")`，不再让 `${}` 专属于环境变量
+- [x] `ecsh foo.ecs`：走文件级 parser + evaluator
+- [x] `~/.ecshrc`：走与 `.ecs` 文件相同的文件级入口
+- [x] `source` / `.`：也走同一套文件级 parser + evaluator
+- [x] continuation prompt：`{}` / 引号未闭合时继续读
+- [x] 统一顶层错误出口：shell parse error、ecscript parse/runtime error 在 `ecsh` 主入口中保持一致的定位格式
+- [x] 明确交互执行和文件执行的作用域边界：
+      交互顶层、`source` / `.`、`.ecshrc` 共享当前 shell 的 `script_env`；
+      `ecsh file.ecs` 使用新的脚本根环境
+- [x] 交互模式、脚本文件模式、`source` 模式三者行为一致
+- [x] 现有 shell 功能（管道、重定向、job control）不被 ecscript 集成破坏
 
-**本阶段要做的事**
-- [ ] 顶层 parser 集成：关键字开头走 ecscript parser，其他走现有 shell parser
-- [ ] 函数体内部沿用同一规则：关键字语句 vs shell 命令
-- [ ] `ecsh foo.ecs`：走文件级 parser + evaluator
-- [ ] `~/.ecshrc`：走与 `.ecs` 文件相同的文件级入口
-- [ ] `source` / `.`：也走同一套文件级 parser + evaluator
-- [ ] continuation prompt：`{}` / 引号未闭合时继续读
-
-**集成测试重点**
-- [ ] 顶层 `let/func/if` 与普通 shell 命令共存
-- [ ] 在函数体内执行 shell 命令并读取脚本变量
-- [ ] 文件执行、`source`、`.ecshrc` 共用同一语义
-
-**完成标准**
-- [ ] 交互模式、脚本文件模式、`source` 模式三者行为一致
-- [ ] 现有 shell 功能（管道、重定向、job control）不被 ecscript 集成破坏
+**边界说明**
+- [ ] ecscript block 内当前仍是纯 ecscript 语句，不直接混入 shell 命令；后续通过 `cmd{}` 命令桥补上这部分能力
 
 ---
 
@@ -846,7 +851,7 @@ echo $[to_json(data)] | jq .name
 - [x] smoke 已覆盖跨行双引号、跨行 `$[...]` 和 EOF 下的不完整输入报错
 - [x] smoke 已覆盖跨行 `$(...)`
 - [x] shell parse 错误输出已升级为 `line:column + 源码行 + caret`
-- [x] 跨行 `${...}` 的续行 / EOF 边界测试已补齐
+- [x] 跨行 `${...}` 的续行 / EOF 边界测试已补齐（旧/过渡语法边界）
 - [x] 续行中的 Ctrl-C 单元测试已补齐
 - [x] shell parse 错误格式化已收束到独立模块
 
@@ -868,9 +873,135 @@ echo $[to_json(data)] | jq .name
 - [x] **更多内置命令** — `type`、`which`、`history` 已接入
 - [ ] **更多内置命令** — `read`、`shift`
 
-### 阶段 8：Shell 语义补完
+### 阶段 8：命令值与结构化执行桥
 
-**目标**：在顶层脚本集成与 7.5 收口完成后，继续补上传统 shell 语义缺口。
+**目标**：把 `ecscript -> shell` 的方向补成稳定接口。这个阶段不追求让语言吞掉 shell，而是提供结构化命令值、明确的执行函数和可检查的命令结果。
+
+**优先级说明**
+
+这一阶段的 ROI 高于继续补传统 shell 语义：它直接决定 `ecscript` 是否能成为可用的 shell 脚本语言，而不只是 shell 里的表达式求值器。
+
+**本阶段要做的事**
+
+- [ ] 新增 `Value::Command` / `Value::CommandResult`，命令值按 argv / cwd / env / stdin 等结构保存
+- [ ] 实现 `cmd(...)` 函数：以 argv-first 方式构造命令值，避免字符串拼接和 quoting 问题
+- [ ] 实现 `cmd{ ... }` 结构化命令字面量：内部走 shell lexer/parser，外部仍是 ecscript AST
+- [ ] 实现 `run(cmd)`：继承当前终端执行，返回状态对象
+- [ ] 实现 `capture(cmd)`：捕获 stdout / stderr / code / signal / duration
+- [ ] 实现 `text(cmd)`、`lines(cmd)`、`json(cmd)`：覆盖最常见的脚本消费方式
+- [ ] 实现 `with_env(cmd, obj)`、`with_cwd(cmd, path)`：以不可变派生方式调整命令值
+- [ ] 明确命令失败和语言错误的边界：非零退出码不是 `RuntimeError`，除非调用的是显式失败即报错的 API
+
+**测试重点**
+
+- [ ] `cmd("git", "status")` 不经过 shell 字符串解析
+- [ ] `cmd{ git status --short }` 能得到结构化命令值
+- [ ] `text(...)` / `lines(...)` / `json(...)` 的成功和失败路径
+- [ ] `with_env` / `with_cwd` 不污染当前 shell 全局状态
+- [ ] `run(cmd{ false })` 的退出码作为普通结果返回
+
+**完成标准**
+
+- [ ] `ecscript` 可以用结构化方式运行外部命令、读取输出、检查状态
+- [ ] `cmd{}`、`cmd("x", ...args)` 和 shell word 展开规则能够自然配合
+
+### 阶段 9：值流与脚本标准库核心
+
+**目标**：补上 `ecscript` 内部的数据编排能力，让语言自己的值流和 shell 的字节流保持分离。
+
+**本阶段要做的事**
+
+- [ ] 引入 `|>` 值传递操作符：`x |> f(a, b)` 等价于 `f(x, a, b)`
+- [ ] 实现 eager Array 版高阶函数：`map`、`filter`、`reduce`、`each`、`find`、`any`、`all`
+- [ ] 实现基础序列函数：`take`、`drop`、`join`、`split`、`contains`、`starts_with`、`ends_with`
+- [ ] 补齐 text/value bridge：`stdin()`、`read_lines()`、`print(...)`、`write_lines(...)`
+- [ ] 补齐 JSON bridge：`from_json(...)`、`to_json(...)`
+- [ ] 建立小型标准库命名空间草案：`std.str`、`std.path`、`std.json`、`std.proc`、`std.iter`
+- [ ] 先不做 lazy Iterator / Stream；只预留接口，不引入生命周期和消费语义复杂度
+
+**测试重点**
+
+- [ ] `lines(cmd{ ... }) |> filter(...) |> map(...)` 的常见脚本链路
+- [ ] `|>` 只传值，不启动进程、不读写 stdin/stdout
+- [ ] 高阶函数中的闭包捕获、错误传播和参数个数错误
+- [ ] JSON / text 转换失败时给出清晰运行时错误
+
+**完成标准**
+
+- [ ] 可以自然写出“命令输出 -> 行数组 -> 过滤/转换 -> 再展开给命令”的脚本
+- [ ] shell `|` 与 ecscript `|>` 的职责边界在实现和文档中都保持清楚
+
+### 阶段 10：模块、扩展点与交互脚本化
+
+**目标**：让 `ecscript` 成为 shell 的扩展语言，而不是只用于普通脚本计算。这个阶段重点借鉴 fish 的事件模型和 Nushell / Elvish 的模块组织方式。
+
+**本阶段要做的事**
+
+- [ ] 实现文件级模块：`use ./foo.ecs as foo`
+- [ ] 实现 `pub let` / `pub func`：模块内部默认私有，公开绑定进入模块对象
+- [ ] 实现模块缓存：同一路径模块只初始化一次
+- [ ] 明确 `use` 语义：只加载模块并返回命名空间对象，不自动注册全局副作用
+- [ ] 实现最小 hook API：`before_prompt`、`after_cd`、`preexec`、`postexec`
+- [ ] 实现 completion API：`complete(name, func(ctx) { ... })`
+- [ ] 预留 key binding API：`bind(key, func(ctx) { ... })`
+- [ ] 预留 prompt API：`prompt(func(ctx) { ... })`
+
+**推荐上下文对象**
+
+```sh
+hook("postexec", func(ctx) {
+    # ctx = { command: "...", status: 0, duration_ms: 12, cwd: "..." }
+})
+
+complete("git", func(ctx) {
+    # ctx = { line: "...", word: "...", argv: [...], arg_index: 1, cwd: "..." }
+})
+```
+
+**设计边界**
+
+- [ ] hook 通过受控 API 修改 shell 状态，不直接暴露 shell 内部结构
+- [ ] 模块副作用必须显式调用 `init()`，不因 `use` 自动发生
+- [ ] completion 返回结构化对象：`{ value, display, desc, kind }`
+- [ ] prompt / completion / hook 都复用 `ecscript` 函数值，不再引入配置字符串 DSL
+
+**完成标准**
+
+- [ ] 可以用 `.ecs` 模块实现一个最小 zoxide / direnv / starship adapter 原型
+- [ ] 用户配置可以写成：`use zoxide as zoxide; zoxide.init()`
+
+### 阶段 11：外部命令元数据与适配层
+
+**目标**：借鉴 Nushell extern 和 fish completion，把外部命令从“PATH 里的黑盒程序”逐步纳入 `ecsh` 的 help、completion 和脚本工具链。
+
+**本阶段要做的事**
+
+- [ ] 设计 `external(...)` / `extern(...)` 元数据对象
+- [ ] 支持为外部命令声明 subcommand、flag、参数补全和简短 help
+- [ ] 将 extern 元数据接入 `type` / `which` / `help` / completion
+- [ ] 为常见工具写 adapter 示例：`git`、`cargo`、`zoxide`、`direnv`
+- [ ] 支持按模块加载 extern 描述，避免硬编码进 shell 本体
+
+**示例形态**
+
+```sh
+pub let git = external({
+    name: "git",
+    help: "distributed version control",
+    complete: func(ctx) {
+        ...
+    }
+})
+```
+
+**完成标准**
+
+- [ ] 外部命令可以拥有脚本定义的补全和 help 信息
+- [ ] adapter 仍然只是模块能力，不改变 `execvp` 的基础执行模型
+
+### 阶段 12：Shell 语义补完
+
+**目标**：在顶层集成、命令桥、值流和扩展系统形成闭环后，继续补上传统 shell 语义缺口。
 
 **输入与展开**
 
@@ -886,7 +1017,7 @@ echo $[to_json(data)] | jq .name
 - [ ] 更完整 job control 语义
 - [ ] 管道增强：`|&` 同时重定向 stderr、`!` 取反退出码
 
-## 八、技术债
+## 七、技术债
 
 - [x] 去掉 `run_command` 里的 "starting... / ending." 调试输出
 - [x] `main.rs` 里 `run_parsed_line` 的 clone 开销
@@ -894,7 +1025,7 @@ echo $[to_json(data)] | jq .name
 
 ---
 
-## 附：展开与解析规则速查表
+## 附一：展开与解析规则速查表
 
 ### 一、顶层入口分派（每行输入的第一个 token）
 
@@ -920,13 +1051,12 @@ echo $[to_json(data)] | jq .name
 | 语法 | 查什么 | 结果 | 示例 |
 |------|--------|------|------|
 | `$VAR` | 脚本作用域优先 → fallback `std::env::var` | 字符串，单参数 | `echo $HOME` |
-| `${VAR}` | **仅** `std::env::var`（不查脚本作用域） | 字符串，单参数 | `echo ${HOME}/work` |
 | `$(cmd)` | 执行 shell 命令 | 通过 `/bin/sh -c` 捕捉 stdout，单参数 | `echo $(date)` |
-| `$[expr]` | 脚本表达式求值 | 标量值转字符串；`Array/Object` 报错 | `echo $[x + 1]` |
-| `$[to_json(expr)]` | 脚本表达式求值并序列化为 JSON | JSON 字符串，单参数 | `echo $[to_json(obj)]` |
-| `$[...arr]` | 脚本表达式求值 + 展开 | 数组拆散为多个参数 | `echo $[...a]` |
+| `${expr}` | 脚本表达式求值 | 标量值转字符串；`Array/Object` 报错 | `echo ${x + 1}` |
+| `${env("VAR")}` | 显式读取环境变量 | 字符串，单参数 | `echo ${env("HOME")}/work` |
+| `${to_json(expr)}` | 脚本表达式求值并序列化为 JSON | JSON 字符串，单参数 | `echo ${to_json(obj)}` |
 
-**优先级**: `$VAR` 先查脚本作用域，不存在才 fallback 到环境变量。`${VAR}` 只查环境变量——花括号是显式的"我要环境变量"的信号。若脚本声明了 `let HOME = "/x"`，`$HOME` 取脚本值 `/x`，`${HOME}` 仍取环境变量值。
+**优先级**: `$VAR` 先查脚本作用域，不存在才 fallback 到环境变量。`${expr}` 是完整脚本表达式入口。若脚本声明了 `let HOME = "/x"`，`$HOME` 和 `${HOME}` 都取脚本值 `/x`；强制读取环境变量使用 `${env("HOME")}`。
 
 **`$VAR` 变量名扫描**：`.`、`/`、`-`、空格等非标识符字符会自然终止变量名。`$name.c` = 变量 `name` + 字面量 `.c`，不需要花括号。
 
@@ -934,7 +1064,7 @@ echo $[to_json(data)] | jq .name
 
 **单引号内**：全部 `$` 语法按字面量输出，不做任何展开。
 
-**双引号内**：`$VAR`、`${VAR}`、`$(cmd)`、`$[expr]` 都生效。
+**双引号内**：`$VAR`、`${expr}`、`$(cmd)` 都生效。
 
 ### 三、脚本模式下的值
 
@@ -949,13 +1079,13 @@ echo $[to_json(data)] | jq .name
 | `[1, 2, 3]` | Array | `let a = [1, 2]` |
 | `{k: "v"}` | Object | `let o = {name: "hi"}` |
 
-**脚本字符串插值**：脚本模式的双引号内，`$name` 查脚本作用域，`${VAR}` 仍然**只查环境变量**，`$[expr]` 也生效。若需要显式表达"这里是脚本表达式，不是环境变量"，用 `$[name]`：
+**脚本字符串插值**：脚本模式的双引号内，`$name` 查脚本作用域，`${expr}` 执行完整表达式。若需要读取环境变量，用 `${env("NAME")}`：
 ```sh
 let name = "elaine"
 let msg = "hello $name"          # → "hello elaine"
-let home = "home = ${HOME}"      # → 读取环境变量 HOME
-let exact = "[$[name]]"          # → "[elaine]"
-let calc = "result: $[1 + 2]"    # → "result: 3"
+let home = "home = ${env(\"HOME\")}" # → 读取环境变量 HOME
+let exact = "[${name}]"          # → "[elaine]"
+let calc = "result: ${1 + 2}"    # → "result: 3"
 ```
 
 ### 四、数据结构操作速查
@@ -972,22 +1102,26 @@ let calc = "result: $[1 + 2]"    # → "result: 3"
 | 删除 | `remove(arr, i)` | — |
 | 序列化 | `to_json(arr)` | `to_json(obj)` |
 
-### 五、`run()` 函数
+### 五、命令值与运行函数
 
 ```sh
-let r = run("gcc", "-O2", "main.c")
-# r = { code: 0, signal: 0, stdout: "", stderr: "" }
+let c = cmd("gcc", "-O2", "main.c")
+let r = run(c)
+# r = { code: 0, stdout: "", stderr: "", ok: true }
 ```
 
-- MVP 只支持单条命令 + 参数列表，不支持 shell 操作符（`|`/`&&`/`;`）
-- 数组展开：`run("echo", ...args)` 共用 `$[...]` 的展开规则
-- 需要管道时拆分多次 `run()` 调用或回到 shell 命令行
+- `cmd(...)` 构造结构化命令值，不直接执行
+- `run(cmd)` / `capture(cmd)` / `text(cmd)` / `lines(cmd)` 负责执行与结果转换
+- 命令值默认按 argv 结构保存，避免字符串拼接和 shell quoting 问题
+- 数组展开：`cmd("echo", ...args)` 属于命令构造层的 argv 展开，不属于普通 shell word 插值
+- 需要 shell 管道、重定向或复杂命令编排时，优先使用后续的 `cmd{ ... }` 结构化命令字面量
 
 ### 六、`for` 循环语义
 
 ```sh
 for i in 1..10 { ... }        # 左闭右开: 1,2,...,9
 for i in 1..=10 { ... }       # 左闭右闭: 1,2,...,10
+range(1, 10)                  # 闭区间数组: [1, 2, ..., 10]
 for v in arr { ... }          # 遍历 Array 的元素值
 for k in obj { ... }          # 遍历 Object 的键名
 for v in values(obj) { ... }  # 遍历 Object 的值
@@ -998,5 +1132,222 @@ for v in values(obj) { ... }  # 遍历 Object 的值
 | 引号类型 | 上下文 | \$ 展开 | 换行 | 用途 |
 |---------|--------|---------|------|------|
 | `'...'` | shell + script | 否 | 否 | 纯字面量 |
-| `"..."` | shell | `$VAR`/`${VAR}`/`$(cmd)`/`$[expr]` | 否 | 带展开的字符串 |
-| `"..."` | script | `$name`（脚本变量）/ `${VAR}`（环境变量）/ `$[expr]` | 否 | 脚本字符串插值 |
+| `"..."` | shell | `$VAR`/`${expr}`/`$(cmd)` | 否 | 带展开的字符串 |
+| `"..."` | script | `$name`（简单变量）/ `${expr}`（完整表达式） | 否 | 脚本字符串插值 |
+
+---
+
+## 附二：shell / ecscript 协作边界
+
+当前更倾向的长期方向如下：
+
+- `ecsh` 负责字节流管道（byte pipeline）
+  - 外部命令执行
+  - shell 管道 `|`
+  - 重定向
+  - 作业控制
+  - 环境变量与工作目录等会话上下文
+- `ecscript` 负责值流（value flow）
+  - 表达式求值
+  - 函数、闭包、模块
+  - 语言内部的值变换与组合
+
+这意味着：
+
+- shell 管道默认只传文本/字节，不自动升级为结构化值流
+- `ecscript` 如果参与 `ecsh` 管道，其默认角色是“文本处理节点”
+  - 输入：字符串 / stdin 文本
+  - 输出：字符串 / stdout 文本
+- `ecscript` 内部如果需要值流，应在语言自身内部实现，而不是直接复用 shell 管道语义
+- text/value 转换保持显式，不做大范围隐式桥接
+
+后续可以围绕这条边界补最小 bridge 能力，例如：
+
+- `stdin()` / `read_lines()`
+- `print(...)` / `write_lines(...)`
+- `from_json(...)` / `to_json(...)`
+- `run(...)` / `capture(...)`
+
+这条路线的目标不是让 shell 和语言彻底混成一个系统，而是让两者保持各自完整性，并通过少量明确桥接协作。
+
+### `cmd{ ... }`：语言中的结构化命令字面量
+
+`cmd{ ... }` 用于在 `ecscript` 中嵌入一段 shell 命令语法，并把它解析成结构化命令值。
+
+示例：
+
+```sh
+let c = cmd{ git status --short }
+let out = text(c)
+let files = lines(cmd{ git ls-files })
+```
+
+语义边界：
+
+- `cmd{ ... }` 只构造命令值，不立即执行
+- `cmd{ ... }` 内部走 shell lexer/parser，外部仍是 `ecscript` AST
+- 初始版本可以只支持单条命令，后续再扩展到 pipeline / redirection
+- 内部 shell word 继续沿用 `${expr}` 表达式桥接；多 argv 展开优先由 `cmd("x", ...args)` 处理
+- 返回值应是结构化对象，而不是字符串
+
+概念上，`cmd{}` 是第三个桥接点：
+
+- shell 顶层进入语言语句：关键字分派
+- shell word 嵌入语言表达式：`${expr}`
+- 语言中嵌入 shell 指令：`cmd{ ... }`
+
+围绕命令值可以继续补内置函数：
+
+- `run(cmd)`：继承终端运行，返回状态对象
+- `capture(cmd)`：捕获 stdout/stderr/code
+- `text(cmd)`：返回 stdout 字符串
+- `lines(cmd)`：返回 stdout 行数组
+- `json(cmd)`：将 stdout 解析为 JSON 值
+- `with_env(cmd, obj)` / `with_cwd(cmd, path)`：派生命令值
+
+### `|>`：ecscript 内部值流
+
+shell 的 `|` 继续表示字节流管道；`ecscript` 内部可以单独引入 `|>` 表示值传递。
+
+基础语义：
+
+```sh
+x |> f(a, b)
+# 等价于：
+f(x, a, b)
+```
+
+设计边界：
+
+- `|>` 不启动进程
+- `|>` 不读写 stdin/stdout
+- `|>` 只在 `ecscript` 值世界里工作
+- 右侧优先限制为函数调用或可调用值
+- 初始版本可以只支持 eager Array，后续再设计 Iterator / Stream
+
+高阶函数是 `|>` 的基础能力：
+
+- `map(arr, func(x) { ... })`
+- `filter(arr, func(x) { ... })`
+- `reduce(arr, init, func(acc, x) { ... })`
+- `each(arr, func(x) { ... })`
+- `find(arr, func(x) { ... })`
+- `any(arr, func(x) { ... })`
+- `all(arr, func(x) { ... })`
+- `take(arr, n)` / `drop(arr, n)`
+
+示例：
+
+```sh
+let targets =
+    lines(cmd{ git ls-files })
+    |> filter(func(x) { ends_with(x, ".rs") })
+    |> filter(func(x) { !contains(x, "target/") })
+
+run(cmd("rustfmt", ...targets))
+```
+
+这条链路保持了清晰边界：
+
+- `cmd{ ... }` 从语言进入 shell 命令值
+- `lines(...)` 把命令 stdout 显式转换为 `Array<String>`
+- `|>` 在语言内部处理值
+- `cmd("rustfmt", ...targets)` 再把值数组显式展开回 shell argv
+
+后续 Iterator / Stream 可以作为第二阶段设计：
+
+- `iter(arr)`
+- `collect(iter)`
+- `map_iter(...)` / `filter_iter(...)`
+- `read_lines()` 返回 lazy line stream
+
+MVP 不需要直接实现 lazy 语义。先完成 Array + 高阶函数 + `|>`，再评估是否需要惰性迭代。
+
+### block 作为 expr（后续增强）
+
+后续可以评估把 `block` 扩展为表达式形态，让最后一条 `ExprStmt` 成为 block 的值：
+
+```ecs
+let x = do {
+    let a = 1
+    let b = 2
+    a + b
+}
+```
+
+这一能力应视为语言表达能力增强，不与“`}` 前可省分号”绑定。即使 block 最后一个语句可以省分号，也不自动意味着 block 具备返回值语义。
+
+如果后续落地，建议显式设计以下之一：
+
+- `do { ... }` 作为值 block
+- 让特定语法（如 `if`）演进为表达式
+- 为 block-value 单独定义 AST / evaluator 规则
+
+不建议靠“最后一条语句是否写分号”隐式决定 block 是否返回值。
+
+### 模块、命名空间与 `pub`
+
+模块系统是插件生态和配置组织的前置条件。没有模块边界，hook、completion、prompt、第三方集成都会污染全局环境。
+
+目标能力：
+
+- 文件级模块
+- `pub` 可见性声明
+- 命名空间导入
+- 导入结果作为模块对象
+- 模块初始化
+- 与 `~/.ecshrc` / `source` / `ecsh file.ecs` 共用同一文件级 evaluator
+
+可以先考虑的语法形态：
+
+```sh
+use zoxide
+use direnv as de
+use ./scripts/git.ecs as git
+
+git.changed_files()
+```
+
+模块内部默认私有，只有 `pub` 标记的绑定进入模块对象：
+
+```sh
+pub func changed_files() {
+    return lines(cmd{ git diff --name-only })
+}
+
+pub let root = text(cmd{ git rev-parse --show-toplevel })
+```
+
+`use ./scripts/git.ecs as git` 的结果可以理解为一个普通对象/键值对命名空间：
+
+```sh
+let git = {
+    changed_files: <func>,
+    root: <string>,
+}
+```
+
+因此模块成员访问直接复用已有对象字段语义：
+
+```sh
+git.changed_files()
+echo ${git.root}
+```
+
+设计边界：
+
+- 未标记 `pub` 的绑定不进入模块外部命名空间
+- `pub` 是语言层可见性声明，不复用 shell builtin `export`
+- `use name` 默认绑定为模块对象，不把成员直接散进当前作用域
+- 模块对象可以先复用 Object 表示，后续再考虑只读模块对象
+- 需要全局注入时后续再设计显式形式，不作为 MVP 默认行为
+- 模块加载应缓存，避免重复执行初始化逻辑
+- 模块内可以注册 hook / completion / binding，但应通过显式 API 完成
+
+推荐的最小实现顺序：
+
+- 文件级 parser/evaluator 先稳定
+- 支持相对路径模块：`use ./foo.ecs as foo`
+- 支持 `pub let` / `pub func`
+- 支持模块对象字段访问：`foo.bar`
+- 再引入标准模块搜索路径和第三方模块命名规则

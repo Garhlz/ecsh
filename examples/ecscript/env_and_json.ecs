@@ -1,0 +1,20 @@
+let home = env("HOME")
+
+println("HOME")
+println(home)
+
+let payload = {
+    ok: true,
+    home: home,
+    range_len: len(range(1, 4))
+}
+
+println("payload")
+println(to_json(payload))
+
+let xs = range(3, 6)
+remove(xs, 1)
+insert(xs, 1, 99)
+
+println("patched-range")
+println(to_json(xs))
