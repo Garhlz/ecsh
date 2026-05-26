@@ -268,13 +268,12 @@ impl std::fmt::Display for ShellWord {
             match frag {
                 WordFragment::Lit(s) => write!(f, "{}", s)?,
                 WordFragment::Var(name) => write!(f, "${}", name)?,
-                WordFragment::EnvVar(name) => write!(f, "${{{}}}", name)?,
                 WordFragment::Cmd(src) => write!(f, "$({})", src)?,
                 WordFragment::Expr { src, spread } => {
                     if *spread {
-                        write!(f, "$[...{}]", src)?
+                        write!(f, "${{{}}}", format!("...{}", src))?
                     } else {
-                        write!(f, "$[{}]", src)?
+                        write!(f, "${{{}}}", src)?
                     }
                 }
             }
@@ -287,7 +286,6 @@ impl std::fmt::Display for ShellWord {
 pub enum WordFragment {
     Lit(String),
     Var(String),
-    EnvVar(String),
     Cmd(String),
     Expr { src: String, spread: bool },
 }

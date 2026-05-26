@@ -1,7 +1,7 @@
 use crate::ecscript::{
     ast::{CompoundAssignOp, Stmt, StmtKind, expr_to_assign_target},
     error::ParseError,
-    lexer::{Delimiter, Token, TokenKind},
+    lexer::{Delimiter, Keyword, Token, TokenKind},
     pratt::{TokenStream, parse_expr_in},
 };
 
@@ -14,9 +14,11 @@ enum AssignmentKind {
 pub fn parse_script(tokens: &[Token]) -> Result<Vec<Stmt>, ParseError> {
     let mut state = TokenStream::new(tokens);
     let mut result_stmts: Vec<Stmt> = Vec::new();
+    state.skip_newlines();
     while !state.check(&TokenKind::EOF) {
         let cur_stmt = parse_stmt(&mut state)?;
         result_stmts.push(cur_stmt);
+        state.skip_newlines();
     }
     Ok(result_stmts)
 }
@@ -24,19 +26,27 @@ pub fn parse_script(tokens: &[Token]) -> Result<Vec<Stmt>, ParseError> {
 /// 把token流转换成单一语句
 fn parse_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     match state.peek().kind.clone() {
-        TokenKind::Let => parse_let(state),
-        TokenKind::If => parse_if(state),
-        TokenKind::While => parse_while(state),
-        TokenKind::For => parse_for(state),
-        TokenKind::Break => parse_break(state),
-        TokenKind::Continue => parse_continue(state),
-        TokenKind::Return => parse_return(state),
+        TokenKind::Keyword(keyword) => match keyword {
+            Keyword::Let => parse_let(state),
+            Keyword::If => parse_if(state),
+            Keyword::While => parse_while(state),
+            Keyword::For => parse_for(state),
+            Keyword::Break => parse_break(state),
+            Keyword::Continue => parse_continue(state),
+            Keyword::Return => parse_return(state),
+            Keyword::Func => parse_func(state),
+            _ => Err(ParseError::new(
+                state.current_offset(),
+                "unexpected 'in' or 'else' at first place of top level".to_string(),
+            )),
+        },
+
         TokenKind::Delimiter(Delimiter::RBrace) => Err(ParseError::new(
             state.current_offset(),
             "unexpected '}' at top level".to_string(),
         )),
         TokenKind::Delimiter(Delimiter::LBrace) => parse_block(state),
-        TokenKind::Func => parse_func(state),
+
         _ => parse_assignment_or_expr_stmt(state),
     }
 }
@@ -142,6 +152,7 @@ fn parse_block(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     state.consume(); // consume '{'
     let mut block_stmts: Vec<Stmt> = Vec::new();
     loop {
+        state.skip_newlines();
         if matches!(state.peek().kind, TokenKind::Delimiter(Delimiter::RBrace)) {
             state.consume();
             break;
@@ -162,20 +173,35 @@ fn parse_block(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
 }
 
 fn expect_semicolon(state: &mut TokenStream<'_>) -> Result<(), ParseError> {
-    if !state.check(&TokenKind::Delimiter(Delimiter::Semicolon)) {
-        let next = &state.peek().kind;
-        let message = if next.can_start_expr() {
-            format!(
-                "expected operator or ';' after expression, found {}",
-                next.describe()
-            )
-        } else {
-            format!("expected ';' after statement, found {}", next.describe())
-        };
-        return Err(ParseError::new(state.current_offset(), message));
+    // 分号现在只作为同一行拆分多语句的显式分隔符。
+    if matches!(
+        state.peek().kind,
+        TokenKind::Delimiter(Delimiter::Semicolon) | TokenKind::Newline
+    ) {
+        while matches!(
+            state.peek().kind,
+            TokenKind::Delimiter(Delimiter::Semicolon) | TokenKind::Newline
+        ) {
+            state.consume();
+        }
+        return Ok(());
     }
-    state.consume();
-    Ok(())
+    if matches!(
+        state.peek().kind,
+        TokenKind::EOF | TokenKind::Delimiter(Delimiter::RBrace)
+    ) {
+        return Ok(());
+    }
+    let next = &state.peek().kind;
+    let message = if next.can_start_expr() {
+        format!(
+            "expected operator or ';' after expression, found {}",
+            next.describe()
+        )
+    } else {
+        format!("expected ';' after statement, found {}", next.describe())
+    };
+    Err(ParseError::new(state.current_offset(), message))
 }
 
 fn parse_if(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
@@ -184,9 +210,9 @@ fn parse_if(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     let cond = parse_expr_in(state)?;
     let then_body = expect_block(state, "if")?;
 
-    if state.check(&TokenKind::Else) {
+    if state.check(&TokenKind::Keyword(Keyword::Else)) {
         state.consume();
-        let else_body = if state.check(&TokenKind::If) {
+        let else_body = if state.check(&TokenKind::Keyword(Keyword::If)) {
             vec![parse_if(state)?]
         } else {
             expect_block(state, "else")?
@@ -237,7 +263,7 @@ fn parse_for(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     };
     state.consume();
 
-    let TokenKind::In = state.peek().kind.clone() else {
+    let TokenKind::Keyword(Keyword::In) = state.peek().kind.clone() else {
         return Err(ParseError::new(
             state.current_offset(),
             format!(
@@ -356,8 +382,19 @@ fn parse_continue(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
 fn parse_return(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     let span = state.current_offset();
     state.consume();
-    if state.check(&TokenKind::Delimiter(Delimiter::Semicolon)) {
-        state.consume();
+    if matches!(
+        state.peek().kind,
+        TokenKind::Delimiter(Delimiter::Semicolon)
+            | TokenKind::Newline
+            | TokenKind::Delimiter(Delimiter::RBrace)
+            | TokenKind::EOF
+    ) {
+        while matches!(
+            state.peek().kind,
+            TokenKind::Delimiter(Delimiter::Semicolon) | TokenKind::Newline
+        ) {
+            state.consume();
+        }
         Ok(Stmt {
             kind: StmtKind::Return { value: None },
             span,
@@ -375,6 +412,7 @@ fn parse_return(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
 }
 
 pub fn expect_block(state: &mut TokenStream<'_>, name: &str) -> Result<Vec<Stmt>, ParseError> {
+    state.skip_newlines();
     if !state.check(&TokenKind::Delimiter(Delimiter::LBrace)) {
         let incomplete = matches!(state.peek().kind, TokenKind::EOF);
         let mk = if incomplete {
@@ -481,6 +519,20 @@ mod tests {
             "let x 5;",
             7,
             "expected '=' after 'let x', found integer literal",
+        );
+    }
+
+    #[test]
+    fn accepts_missing_semicolon_at_eof() {
+        assert_eq!(
+            parse_src("let x = 42"),
+            vec![Stmt {
+                kind: StmtKind::Let {
+                    name: "x".into(),
+                    expr: lit_int(42),
+                },
+                span: 0
+            }]
         );
     }
 
@@ -722,6 +774,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_newline_separated_statements() {
+        let stmts = parse_src("let x = 1\nlet y = 2\nx + y\n");
+        assert_eq!(stmts.len(), 3);
+        assert!(matches!(stmts[0].kind, StmtKind::Let { .. }));
+        assert!(matches!(stmts[1].kind, StmtKind::Let { .. }));
+        assert!(matches!(stmts[2].kind, StmtKind::ExprStmt { .. }));
+    }
+
+    #[test]
     fn parses_two_assigns() {
         let stmts = parse_src("x = 1; y = 2;");
         assert_eq!(stmts.len(), 2);
@@ -730,17 +791,17 @@ mod tests {
     }
 
     #[test]
-    fn reports_missing_final_semicolon() {
-        assert_parse_error(
-            "let x = 1",
-            9,
-            "expected ';' after statement, found end of input",
-        );
+    fn accepts_missing_final_semicolon() {
+        let stmts = parse_src("let x = 1");
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0].kind, StmtKind::Let { .. }));
     }
 
     #[test]
-    fn reports_missing_final_semicolon_in_block() {
-        assert_parse_error("{ 1 }", 5, "expected ';' after statement, found '}'");
+    fn accepts_missing_final_semicolon_in_block() {
+        let stmts = parse_src("{ 1 }");
+        assert_eq!(stmts.len(), 1);
+        assert!(matches!(stmts[0].kind, StmtKind::Block { .. }));
     }
 
     #[test]

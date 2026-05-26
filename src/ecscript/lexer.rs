@@ -19,9 +19,15 @@ pub enum TokenKind {
     Identifier(String),
     Operator(Operator),
     Delimiter(Delimiter),
+    Newline,
     EOF,
 
     // 保留字
+    Keyword(Keyword),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Keyword {
     Let,
     If,
     Else,
@@ -32,6 +38,22 @@ pub enum TokenKind {
     Break,
     Func,
     Return,
+}
+
+impl Keyword {
+    pub fn is_top_level(&self) -> bool {
+        matches!(
+            self,
+            Keyword::Let
+                | Keyword::If
+                | Keyword::While
+                | Keyword::For
+                | Keyword::Continue
+                | Keyword::Break
+                | Keyword::Func
+                | Keyword::Return
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Copy)]
@@ -171,17 +193,18 @@ impl TokenKind {
             TokenKind::Identifier(name) => format!("identifier '{}'", name),
             TokenKind::Operator(operator) => format!("operator '{}'", operator.lexeme()),
             TokenKind::Delimiter(delimiter) => format!("'{}'", delimiter.lexeme()),
+            TokenKind::Newline => "newline".to_string(),
             TokenKind::EOF => "end of input".to_string(),
-            TokenKind::Let => "keyword 'let'".to_string(),
-            TokenKind::If => "keyword 'if'".to_string(),
-            TokenKind::Else => "keyword 'else'".to_string(),
-            TokenKind::While => "keyword 'while'".to_string(),
-            TokenKind::For => "keyword 'for'".to_string(),
-            TokenKind::In => "keyword 'in'".to_string(),
-            TokenKind::Continue => "keyword 'continue'".to_string(),
-            TokenKind::Break => "keyword 'break'".to_string(),
-            TokenKind::Func => "keyword 'func'".to_string(),
-            TokenKind::Return => "keyword 'return'".to_string(),
+            TokenKind::Keyword(Keyword::Let) => "keyword 'let'".to_string(),
+            TokenKind::Keyword(Keyword::If) => "keyword 'if'".to_string(),
+            TokenKind::Keyword(Keyword::Else) => "keyword 'else'".to_string(),
+            TokenKind::Keyword(Keyword::While) => "keyword 'while'".to_string(),
+            TokenKind::Keyword(Keyword::For) => "keyword 'for'".to_string(),
+            TokenKind::Keyword(Keyword::In) => "keyword 'in'".to_string(),
+            TokenKind::Keyword(Keyword::Continue) => "keyword 'continue'".to_string(),
+            TokenKind::Keyword(Keyword::Break) => "keyword 'break'".to_string(),
+            TokenKind::Keyword(Keyword::Func) => "keyword 'func'".to_string(),
+            TokenKind::Keyword(Keyword::Return) => "keyword 'return'".to_string(),
         }
     }
 
@@ -211,6 +234,16 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
 
     while let Some(ch) = chars.next() {
         match ch {
+            '\n' => {
+                offset += ch.len_utf8();
+                tokens.push(Token {
+                    kind: TokenKind::Newline,
+                    end: offset,
+                });
+            }
+            '\r' => {
+                offset += ch.len_utf8();
+            }
             ch if ch.is_whitespace() => {
                 offset += ch.len_utf8();
             }
@@ -323,43 +356,43 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
 
                     // 保留字
                     "let" => tokens.push(Token {
-                        kind: TokenKind::Let,
+                        kind: TokenKind::Keyword(Keyword::Let),
                         end: offset,
                     }),
                     "if" => tokens.push(Token {
-                        kind: TokenKind::If,
+                        kind: TokenKind::Keyword(Keyword::If),
                         end: offset,
                     }),
                     "else" => tokens.push(Token {
-                        kind: TokenKind::Else,
+                        kind: TokenKind::Keyword(Keyword::Else),
                         end: offset,
                     }),
                     "while" => tokens.push(Token {
-                        kind: TokenKind::While,
+                        kind: TokenKind::Keyword(Keyword::While),
                         end: offset,
                     }),
                     "for" => tokens.push(Token {
-                        kind: TokenKind::For,
+                        kind: TokenKind::Keyword(Keyword::For),
                         end: offset,
                     }),
                     "in" => tokens.push(Token {
-                        kind: TokenKind::In,
+                        kind: TokenKind::Keyword(Keyword::In),
                         end: offset,
                     }),
                     "continue" => tokens.push(Token {
-                        kind: TokenKind::Continue,
+                        kind: TokenKind::Keyword(Keyword::Continue),
                         end: offset,
                     }),
                     "break" => tokens.push(Token {
-                        kind: TokenKind::Break,
+                        kind: TokenKind::Keyword(Keyword::Break),
                         end: offset,
                     }),
                     "func" => tokens.push(Token {
-                        kind: TokenKind::Func,
+                        kind: TokenKind::Keyword(Keyword::Func),
                         end: offset,
                     }),
                     "return" => tokens.push(Token {
-                        kind: TokenKind::Return,
+                        kind: TokenKind::Keyword(Keyword::Return),
                         end: offset,
                     }),
                     _ => tokens.push(Token {

@@ -5,6 +5,7 @@
 //! run_builtin 对它们返回 None，交由特殊路径处理。
 
 use crate::diagnostics::print_error;
+use crate::ecscript::{repl_output_needs_newline, reset_repl_output_state, run_script_file};
 use crate::types::Command;
 use crate::types::{CommandFlow, CommandStatus, ShellState};
 use nix::unistd::isatty;
@@ -40,6 +41,7 @@ pub enum BuiltinKind {
     Type,
     Which,
     History,
+    Source,
 }
 
 /// 将命令名映射到 BuiltinKind。
@@ -65,13 +67,15 @@ pub fn builtin_kind(command: &Command) -> Option<BuiltinKind> {
         "type" => Some(BuiltinKind::Type),
         "which" => Some(BuiltinKind::Which),
         "history" => Some(BuiltinKind::History),
+        "source" => Some(BuiltinKind::Source),
+        "." => Some(BuiltinKind::Source),
         _ => None,
     }
 }
 
 pub const BUILTIN_NAMES: &[&str] = &[
     "help", "exit", "cd", "pwd", "env", "export", "unset", "clear", "status", "jobs", "fg", "bg",
-    "alias", "unalias", "trap", "type", "which", "history",
+    "alias", "unalias", "trap", "type", "which", "history", "source", ".",
 ];
 
 /// 判断某个内置命令是否可以出现在管道中。
@@ -112,6 +116,7 @@ pub fn run_builtin(command: &Command, state: &mut ShellState) -> Option<CommandF
         BuiltinKind::Type => Some(CommandFlow::Continue(run_type(command, state))),
         BuiltinKind::Which => Some(CommandFlow::Continue(run_which(command, state))),
         BuiltinKind::History => Some(CommandFlow::Continue(run_history(command, state))),
+        BuiltinKind::Source => Some(CommandFlow::Continue(run_source(command, state))),
         // jobs / fg / bg 需要访问作业表和前台等待逻辑，
         // 由 executor 层统一处理，避免 builtin 模块反向依赖 executor。
         BuiltinKind::Jobs | BuiltinKind::Fg | BuiltinKind::Bg => None,
@@ -142,6 +147,7 @@ pub fn print_help() {
     println!("  type NAME ... - describe how each command name resolves");
     println!("  which NAME ... - print resolved command path or shell resolution");
     println!("  history - show command history");
+    println!("  source FILE / . FILE - run an .ecs file in the current shell script environment");
 }
 
 /// 打印 help 标题行。每个词用不同颜色，重定向到文件时自动去掉颜色。
@@ -458,6 +464,37 @@ fn run_history(command: &Command, state: &mut ShellState) -> CommandStatus {
         println!("{:>5}  {}", idx + 1, entry);
     }
     CommandStatus::success()
+}
+
+/// `source FILE` / `. FILE`：在当前 shell 的 script_env 里执行一份 ecscript 文件。
+fn run_source(command: &Command, state: &mut ShellState) -> CommandStatus {
+    if command.args.len() != 1 {
+        print_usage("source", "source FILE");
+        return CommandStatus::failure();
+    }
+
+    let path = command.args[0].as_lit_str().unwrap_or("");
+    if path.is_empty() {
+        print_usage("source", "source FILE");
+        return CommandStatus::failure();
+    }
+
+    reset_repl_output_state();
+    match run_script_file(path, &state.script_env) {
+        Ok(()) => {
+            if repl_output_needs_newline() {
+                println!();
+            }
+            CommandStatus::success()
+        }
+        Err(err) => {
+            if repl_output_needs_newline() {
+                println!();
+            }
+            print_error(err.format_for_user());
+            CommandStatus::failure()
+        }
+    }
 }
 
 /// `type` / `which` 的内部统一解析结果。

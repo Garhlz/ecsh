@@ -33,6 +33,12 @@ impl<'a> TokenStream<'a> {
         self.pos += 1;
     }
 
+    pub fn skip_newlines(&mut self) {
+        while matches!(self.peek().kind, TokenKind::Newline) {
+            self.consume();
+        }
+    }
+
     pub fn peek_n(&self, n: usize) -> Option<&Token> {
         self.tokens.get(self.pos + n)
     }
@@ -59,7 +65,9 @@ impl<'a> TokenStream<'a> {
 /// 把token流转换为单个表达式
 pub fn parse_expr(tokens: &[Token]) -> Result<Expr, ParseError> {
     let mut state = TokenStream::new(tokens);
+    state.skip_newlines();
     let expr = pratt_parser(&mut state, 0)?;
+    state.skip_newlines();
     if state.check(&TokenKind::EOF) {
         // 在这里判断是否已经收尾
         Ok(expr)
@@ -80,6 +88,7 @@ pub fn parse_expr_in(state: &mut TokenStream<'_>) -> Result<Expr, ParseError> {
 }
 
 fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseError> {
+    state.skip_newlines();
     let mut left: Expr;
 
     let prefix_span = state.current_offset();
@@ -161,6 +170,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
         TokenKind::Delimiter(Delimiter::LParen) => {
             let span = state.current_offset();
             state.consume();
+            state.skip_newlines();
 
             // save & load
             let pos = state.save();
@@ -185,6 +195,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                             break;
                         } else if state.check(&TokenKind::Delimiter(Delimiter::Comma)) {
                             state.consume();
+                            state.skip_newlines();
                         } else {
                             return None;
                         }
@@ -205,6 +216,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                 state.load(pos);
 
                 left = pratt_parser(state, 0)?;
+                state.skip_newlines();
                 if state.check(&TokenKind::Delimiter(Delimiter::RParen)) {
                     state.consume();
                 } else {
@@ -219,6 +231,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
         // `[` 用于数组字面量  Array(Vec<Expr>) [1,2,3]
         TokenKind::Delimiter(Delimiter::LBracket) => {
             state.consume();
+            state.skip_newlines();
             let mut arr = Vec::new();
             loop {
                 if state.check(&TokenKind::Delimiter(Delimiter::RBracket)) {
@@ -232,9 +245,11 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                 // 可能是空数组
                 let element = pratt_parser(state, 0)?;
                 arr.push(element);
+                state.skip_newlines();
 
                 if state.check(&TokenKind::Delimiter(Delimiter::Comma)) {
                     state.consume();
+                    state.skip_newlines();
                 } else if state.check(&TokenKind::Delimiter(Delimiter::RBracket)) {
                     state.consume();
                     left = Expr {
@@ -251,6 +266,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
         // `{`用于对象的字面量表达式 Object(Vec<(String, Expr)>) {"a": 1, "b": 2}
         TokenKind::Delimiter(Delimiter::LBrace) => {
             state.consume();
+            state.skip_newlines();
             let mut obj: Vec<(String, Expr)> = Vec::new();
 
             loop {
@@ -286,6 +302,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     TokenKind::Delimiter(Delimiter::Colon)
                 ) {
                     state.consume();
+                    state.skip_newlines();
                 } else {
                     return Err(ParseError::new(
                         state.current_offset(),
@@ -294,11 +311,13 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                 }
 
                 let value = pratt_parser(state, 0)?;
+                state.skip_newlines();
 
                 obj.push((key, value));
 
                 if state.check(&TokenKind::Delimiter(Delimiter::Comma)) {
                     state.consume();
+                    state.skip_newlines();
                 } else if state.check(&TokenKind::Delimiter(Delimiter::RBrace)) {
                     state.consume();
                     left = Expr {
@@ -353,6 +372,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     break;
                 }
                 state.consume();
+                state.skip_newlines();
                 if let TokenKind::Identifier(name) = state.peek().kind.clone() {
                     state.consume();
                     left = Expr {
@@ -376,7 +396,9 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     break;
                 }
                 state.consume();
+                state.skip_newlines();
                 let expr = pratt_parser(state, 0)?;
+                state.skip_newlines();
                 if state.check(&TokenKind::Delimiter(Delimiter::RBracket)) {
                     state.consume();
                 } else {
@@ -397,6 +419,7 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     break;
                 }
                 state.consume();
+                state.skip_newlines();
                 let mut argvs: Vec<Expr> = Vec::new();
                 loop {
                     if state.check(&TokenKind::Delimiter(Delimiter::RParen)) {
@@ -405,11 +428,13 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     } // 参数列表可以为空
                     let expr = pratt_parser(state, 0)?;
                     argvs.push(expr);
+                    state.skip_newlines();
                     if state.check(&TokenKind::Delimiter(Delimiter::RParen)) {
                         state.consume();
                         break;
                     } else if state.check(&TokenKind::Delimiter(Delimiter::Comma)) {
                         state.consume();
+                        state.skip_newlines();
                     } else {
                         return Err(parse_error(state, "expected ',' or ')'"));
                     }
@@ -464,6 +489,7 @@ fn parse_lambda(
     params: Vec<String>,
     span: usize,
 ) -> Result<Expr, ParseError> {
+    state.skip_newlines();
     if state.check(&TokenKind::Delimiter(Delimiter::LBrace)) {
         let body = expect_block(state, "lambda")?;
 
@@ -797,6 +823,17 @@ mod tests {
     #[test]
     fn parses_nested_parens() {
         assert_parse("((42))", lit_int(42));
+    }
+
+    #[test]
+    fn parses_newlines_inside_call_arguments() {
+        assert_parse(
+            "foo(\n1,\n2\n)",
+            Expr {
+                kind: ExprKind::Call(Box::new(var("foo")), vec![lit_int(1), lit_int(2)]),
+                span: 0,
+            },
+        );
     }
 
     #[test]
