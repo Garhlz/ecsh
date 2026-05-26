@@ -2,9 +2,9 @@
 //!
 //! 四种嵌入语法只在执行时展开，不在 lexer/parser 阶段做死：
 //!   - $VAR    → 先查脚本作用域，不存在则 fallback std::env::var
-//!   - ${VAR}  → 只查 std::env::var
+//!   - ${expr} → 调用 ecscript evaluator 求值，标量转字符串
 //!   - $(cmd)  → 通过 /bin/sh -c 执行 shell 命令，捕获 stdout
-//!   - $[expr] → 调用 ecscript evaluator 求值，标量转字符串
+//!   - ${...arr} → 对 Array 做 argv spread
 
 use std::process::{Command as ProcessCommand, Stdio};
 
@@ -56,7 +56,7 @@ pub fn expand_command(command: &Command, state: &ShellState) -> ShellResult<Comm
 
 /// 将命令头和参数统一展开为扁平 argv。
 ///
-/// 注意：program 允许通过 `$[...arr]` 之类展开成多个 argv；
+/// 注意：program 允许通过 `${...arr}` 之类展开成多个 argv；
 /// 调用方需要再把第一个元素拆成真正的程序名。
 pub fn expand_argv(command: &Command, env: &ExpandEnv<'_>) -> ShellResult<Vec<String>> {
     let mut argv = Vec::new();
@@ -112,10 +112,6 @@ fn expand_shell_word(word: &ShellWord, env: &ExpandEnv<'_>) -> ShellResult<Vec<S
                 };
                 append_fragment(&mut result, &val);
             }
-            WordFragment::EnvVar(name) => {
-                let val = std::env::var(name).unwrap_or_default();
-                append_fragment(&mut result, &val);
-            }
             WordFragment::Cmd(src) => {
                 let output = expand_cmd(src)?;
                 append_fragment(&mut result, &output);
@@ -125,7 +121,7 @@ fn expand_shell_word(word: &ShellWord, env: &ExpandEnv<'_>) -> ShellResult<Vec<S
                 match &value {
                     Value::Array(_) | Value::Object(_) => {
                         return Err(
-                            "cannot inline array/object — use to_json() or $[...arr] to spread"
+                            "cannot inline array/object — use to_json() or ${...arr} to spread"
                                 .into(),
                         );
                     }
@@ -135,7 +131,7 @@ fn expand_shell_word(word: &ShellWord, env: &ExpandEnv<'_>) -> ShellResult<Vec<S
             WordFragment::Expr { src, spread: true } => {
                 let value = eval_expr_src(src, env.script_env)?;
                 let Value::Array(arr) = value else {
-                    return Err("$[...arr] expects an Array".into());
+                    return Err("${...arr} expects an Array".into());
                 };
 
                 let items: Vec<String> = arr.borrow().iter().map(value_to_string).collect();
@@ -189,7 +185,7 @@ fn append_fragment(result: &mut Vec<String>, text: &str) {
     }
 }
 
-/// 把 `$[...arr]` 展开的多个元素缝到当前 word 上。
+/// 把 `${...arr}` 展开的多个元素缝到当前 word 上。
 ///
 /// 例如 `pre$[...["a", "b"]]` 会变成 `["prea", "b"]`。
 fn splice_spread(result: &mut Vec<String>, items: Vec<String>) {
@@ -271,7 +267,10 @@ mod tests {
             fragments: vec![
                 WordFragment::Var(var_name.into()),
                 WordFragment::Lit(":".into()),
-                WordFragment::EnvVar(var_name.into()),
+                WordFragment::Expr {
+                    src: format!(r#"env("{var_name}")"#),
+                    spread: false,
+                },
             ],
         };
         let env = ExpandEnv {
@@ -332,16 +331,19 @@ mod tests {
     }
 
     #[test]
-    fn envvar_missing_gives_empty_string() {
+    fn env_builtin_missing_stringifies_nil_in_shell_word() {
         let state = state();
         let word = ShellWord {
-            fragments: vec![WordFragment::EnvVar("ECSH_NONEXISTENT_VAR".into())],
+            fragments: vec![WordFragment::Expr {
+                src: r#"env("ECSH_NONEXISTENT_VAR")"#.into(),
+                spread: false,
+            }],
         };
         let env = ExpandEnv {
             script_env: &state.script_env,
         };
         let expanded = expand_shell_word(&word, &env).unwrap();
-        assert_eq!(expanded, vec![""]);
+        assert_eq!(expanded, vec!["nil"]);
     }
 
     #[test]

@@ -8,8 +8,7 @@ use crate::types::{LexerStatus, ShellState, ShellWord, Token, WordFragment};
 
 /// 将一行输入拆成 token 序列。
 ///
-/// 这里同时负责把普通单词收集成 `ShellWord`，并把 `$VAR`、`${VAR}`、
-/// `$(cmd)`、`$[expr]` 等结构编码成 `WordFragment`。
+/// 这里同时负责把普通单词收集成 `ShellWord`，并把 `$VAR`、`${expr}`、`$(cmd)` 等结构编码成 `WordFragment`。
 pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseError> {
     let mut chars = line.chars().peekable();
     let mut lexer_status = LexerStatus::Normal;
@@ -148,9 +147,8 @@ fn flush_word(lit_buffer: &mut String, fragments: &mut Vec<WordFragment>, tokens
 ///
 /// 支持的形式包括：
 /// - `$VAR`
-/// - `${VAR}`
+/// - `${expr}` / `${...expr}`
 /// - `$(cmd)`
-/// - `$[expr]` / `$[...expr]`
 ///
 /// 任何不属于这些形式的 `$` 都退化为普通字面量。
 fn handle_dollar(
@@ -172,47 +170,11 @@ fn handle_dollar(
             Ok(())
         }
         Some('{') => {
-            // `${VAR}` 只表示环境变量，不参与脚本作用域 fallback。
             flush_buffer(lit_buffer, fragments);
             let _ = chars.next();
-
-            match chars.next() {
-                Some('}') => Err(ParseError::new(*offset, "empty variable name in braces")),
-                Some(start) if start == '_' || start.is_ascii_alphabetic() => {
-                    let mut is_close = false;
-                    let mut envvar_buffer = String::new();
-                    envvar_buffer.push(start);
-
-                    loop {
-                        if let Some(succ) =
-                            chars.next_if(|ch| *ch == '_' || ch.is_ascii_alphanumeric())
-                        {
-                            envvar_buffer.push(succ);
-                        } else if chars.next_if_eq(&'}').is_some() {
-                            is_close = true;
-                            break;
-                        } else {
-                            break;
-                        }
-                    }
-
-                    if !is_close {
-                        return Err(ParseError::incomplete(
-                            *offset,
-                            "unterminated ${...} expansion",
-                        ));
-                    }
-
-                    fragments.push(WordFragment::EnvVar(envvar_buffer));
-
-                    Ok(())
-                }
-                Some(_) => Err(ParseError::new(*offset, "invalid variable name in braces")),
-                None => Err(ParseError::incomplete(
-                    *offset,
-                    "unterminated ${...} expansion",
-                )),
-            }
+            let (src, spread) = scan_braced_expr(chars, offset)?;
+            fragments.push(WordFragment::Expr { src, spread });
+            Ok(())
         }
         Some('(') => {
             // `$(...)` 需要自己维护括号深度，同时保留内部原始文本。
@@ -320,128 +282,22 @@ fn handle_dollar(
             Ok(())
         }
         Some('[') => {
-            // `$[...]` 复用和 `$(...)` 类似的扫描策略，但括号改成 `[]`。
             let _ = chars.next();
-            flush_buffer(lit_buffer, fragments);
-            let mut depth = 1;
-            let mut expr_buffer = String::new();
-
-            // 仅在最开头识别 `...` 作为 spread 标记，其余 `.` 都按源码保留。
-            let mut is_spread = false;
             let mut dot_cnt = 0;
-
             while chars.next_if_eq(&'.').is_some() {
                 dot_cnt += 1;
             }
-
             if dot_cnt == 3 {
-                is_spread = true;
+                Err(ParseError::new(
+                    *offset,
+                    "$[...expr] has been removed; use ${...expr}",
+                ))
             } else {
-                for _ in 0..dot_cnt {
-                    expr_buffer.push('.');
-                }
+                Err(ParseError::new(
+                    *offset,
+                    "$[expr] has been removed; use ${expr}",
+                ))
             }
-
-            enum LoopState {
-                Normal,
-                InDoubleQuote,
-                InSingleQuote,
-            }
-            let mut loop_state = LoopState::Normal;
-
-            loop {
-                match loop_state {
-                    LoopState::Normal => match chars.next() {
-                        Some(']') => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                            expr_buffer.push(']');
-                        }
-                        Some('[') => {
-                            depth += 1;
-                            expr_buffer.push('[');
-                        }
-                        Some('\\') => {
-                            expr_buffer.push('\\');
-                            let Some(nxt) = chars.next() else {
-                                return Err(ParseError::incomplete(
-                                    *offset,
-                                    "unterminated $[...] expansion",
-                                ));
-                            };
-                            expr_buffer.push(nxt);
-                        }
-                        Some('"') => {
-                            loop_state = LoopState::InDoubleQuote;
-                            expr_buffer.push('"');
-                        }
-                        Some('\'') => {
-                            loop_state = LoopState::InSingleQuote;
-                            expr_buffer.push('\'');
-                        }
-                        Some(ch) => {
-                            expr_buffer.push(ch);
-                        }
-                        None => {
-                            return Err(ParseError::incomplete(
-                                *offset,
-                                "unterminated $[...] expansion",
-                            ));
-                        }
-                    },
-                    // 引号内部不再参与 `[]` 深度计算，只等待对应引号闭合。
-                    LoopState::InDoubleQuote => match chars.next() {
-                        Some('"') => {
-                            loop_state = LoopState::Normal;
-                            expr_buffer.push('"');
-                        }
-                        Some('\\') => {
-                            expr_buffer.push('\\');
-                            if let Some(nxt) = chars.next() {
-                                expr_buffer.push(nxt);
-                            } else {
-                                return Err(ParseError::incomplete(
-                                    *offset,
-                                    "unterminated $[...] expansion",
-                                ));
-                            };
-                        }
-                        Some(ch) => {
-                            expr_buffer.push(ch);
-                        }
-                        None => {
-                            return Err(ParseError::incomplete(
-                                *offset,
-                                "unterminated $[...] expansion",
-                            ));
-                        }
-                    },
-                    LoopState::InSingleQuote => match chars.next() {
-                        Some('\'') => {
-                            loop_state = LoopState::Normal;
-                            expr_buffer.push('\'');
-                        }
-
-                        Some(ch) => {
-                            expr_buffer.push(ch);
-                        }
-                        None => {
-                            return Err(ParseError::incomplete(
-                                *offset,
-                                "unterminated $[...] expansion",
-                            ));
-                        }
-                    },
-                }
-            }
-
-            fragments.push(WordFragment::Expr {
-                src: expr_buffer,
-                spread: is_spread,
-            });
-            Ok(())
         }
         Some(ch) => {
             if ch == '_' || ch.is_ascii_alphabetic() {
@@ -467,4 +323,123 @@ fn handle_dollar(
             Ok(())
         }
     }
+}
+
+fn scan_braced_expr(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    offset: &mut usize,
+) -> Result<(String, bool), ParseError> {
+    let mut expr_buffer = String::new();
+    let mut depth = 1;
+
+    let mut is_spread = false;
+    let mut dot_cnt = 0;
+    while chars.next_if_eq(&'.').is_some() {
+        dot_cnt += 1;
+    }
+    if dot_cnt == 3 {
+        is_spread = true;
+    } else {
+        for _ in 0..dot_cnt {
+            expr_buffer.push('.');
+        }
+    }
+
+    enum LoopState {
+        Normal,
+        InDoubleQuote,
+        InSingleQuote,
+    }
+    let mut loop_state = LoopState::Normal;
+
+    loop {
+        match loop_state {
+            LoopState::Normal => match chars.next() {
+                Some('}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    expr_buffer.push('}');
+                }
+                Some('{') => {
+                    depth += 1;
+                    expr_buffer.push('{');
+                }
+                Some('\\') => {
+                    expr_buffer.push('\\');
+                    let Some(nxt) = chars.next() else {
+                        return Err(ParseError::incomplete(
+                            *offset,
+                            "unterminated ${...} expansion",
+                        ));
+                    };
+                    expr_buffer.push(nxt);
+                }
+                Some('"') => {
+                    loop_state = LoopState::InDoubleQuote;
+                    expr_buffer.push('"');
+                }
+                Some('\'') => {
+                    loop_state = LoopState::InSingleQuote;
+                    expr_buffer.push('\'');
+                }
+                Some(ch) => expr_buffer.push(ch),
+                None => {
+                    return Err(ParseError::incomplete(
+                        *offset,
+                        "unterminated ${...} expansion",
+                    ));
+                }
+            },
+            LoopState::InDoubleQuote => match chars.next() {
+                Some('"') => {
+                    loop_state = LoopState::Normal;
+                    expr_buffer.push('"');
+                }
+                Some('\\') => {
+                    expr_buffer.push('\\');
+                    if let Some(nxt) = chars.next() {
+                        expr_buffer.push(nxt);
+                    } else {
+                        return Err(ParseError::incomplete(
+                            *offset,
+                            "unterminated ${...} expansion",
+                        ));
+                    }
+                }
+                Some(ch) => expr_buffer.push(ch),
+                None => {
+                    return Err(ParseError::incomplete(
+                        *offset,
+                        "unterminated ${...} expansion",
+                    ));
+                }
+            },
+            LoopState::InSingleQuote => match chars.next() {
+                Some('\'') => {
+                    loop_state = LoopState::Normal;
+                    expr_buffer.push('\'');
+                }
+                Some(ch) => expr_buffer.push(ch),
+                None => {
+                    return Err(ParseError::incomplete(
+                        *offset,
+                        "unterminated ${...} expansion",
+                    ));
+                }
+            },
+        }
+    }
+
+    if expr_buffer.is_empty() {
+        let message = if is_spread {
+            "empty spread expression in braces"
+        } else {
+            "empty expression in braces"
+        };
+        return Err(ParseError::new(*offset, message));
+    }
+
+    Ok((expr_buffer, is_spread))
 }

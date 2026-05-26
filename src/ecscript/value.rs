@@ -67,6 +67,8 @@ pub fn validate_array_index(
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Builtin {
+    Env,
+    Range,
     Len,
     Keys,
     Values,
@@ -82,6 +84,8 @@ pub enum Builtin {
 impl Builtin {
     pub fn name(&self) -> &'static str {
         match self {
+            Builtin::Env => "env",
+            Builtin::Range => "range",
             Builtin::Len => "len",
             Builtin::Keys => "keys",
             Builtin::Values => "values",

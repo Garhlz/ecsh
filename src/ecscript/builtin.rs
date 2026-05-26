@@ -12,6 +12,8 @@ use std::{
 
 pub fn lookup_builtin(name: &str) -> Option<Builtin> {
     match name {
+        "env" => Some(Builtin::Env),
+        "range" => Some(Builtin::Range),
         "len" => Some(Builtin::Len),
         "to_json" => Some(Builtin::ToJson),
         "keys" => Some(Builtin::Keys),
@@ -28,6 +30,45 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
 
 pub fn run_builtin(builtin: Builtin, args: Vec<Value>, span: usize) -> Result<Value, RuntimeError> {
     match builtin {
+        Builtin::Env => {
+            expect_arity(&args, 1, span, "env")?;
+            let Value::String(name) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("env expects String, got {}", args[0].type_name()),
+                ));
+            };
+
+            Ok(match std::env::var(name) {
+                Ok(value) => Value::String(value),
+                Err(_) => Value::Nil,
+            })
+        }
+        Builtin::Range => {
+            expect_arity(&args, 2, span, "range")?;
+            let Value::Int(start) = args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("range expects Int start, got {}", args[0].type_name()),
+                ));
+            };
+            let Value::Int(end) = args[1] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("range expects Int end, got {}", args[1].type_name()),
+                ));
+            };
+
+            let values = if start <= end {
+                (start..=end).map(Value::Int).collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            Ok(Value::Array(Rc::new(RefCell::new(values))))
+        }
         Builtin::Len => {
             expect_arity(&args, 1, span, "len")?;
 
@@ -372,6 +413,64 @@ mod tests {
     }
 
     #[test]
+    fn env_reads_environment_variable() {
+        let result = run_builtin(Builtin::Env, vec![Value::String("PATH".into())], 0).unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn env_returns_nil_for_missing_variable() {
+        let result = run_builtin(
+            Builtin::Env,
+            vec![Value::String("ECSH_TEST_MISSING_ENV_VAR".into())],
+            0,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Nil);
+    }
+
+    #[test]
+    fn env_requires_string_argument() {
+        let err = run_builtin(Builtin::Env, vec![Value::Int(1)], 0).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.message, "env expects String, got Int");
+    }
+
+    #[test]
+    fn range_returns_closed_interval_array() {
+        let result = run_builtin(Builtin::Range, vec![Value::Int(1), Value::Int(4)], 0).unwrap();
+        let Value::Array(values) = result else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            *values.borrow(),
+            vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)]
+        );
+    }
+
+    #[test]
+    fn range_returns_empty_when_start_exceeds_end() {
+        let result = run_builtin(Builtin::Range, vec![Value::Int(4), Value::Int(1)], 0).unwrap();
+        let Value::Array(values) = result else {
+            panic!("expected array");
+        };
+        assert!(values.borrow().is_empty());
+    }
+
+    #[test]
+    fn range_requires_int_arguments() {
+        let err =
+            run_builtin(Builtin::Range, vec![Value::Bool(true), Value::Int(1)], 0).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.message, "range expects Int start, got Bool");
+
+        let err =
+            run_builtin(Builtin::Range, vec![Value::Int(1), Value::Bool(true)], 0).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.message, "range expects Int end, got Bool");
+    }
+
+    #[test]
     fn values_follow_sorted_keys() {
         let obj = Rc::new(RefCell::new(HashMap::from([
             ("b".to_string(), Value::Int(2)),
@@ -455,5 +554,61 @@ mod tests {
         ]);
 
         assert_eq!(text, "hi 42 [true]");
+    }
+
+    #[test]
+    fn env_returns_nil_for_missing_var() {
+        let var = format!("ECSH_TEST_NONEXIST_{}", std::process::id());
+        let result = run_builtin(Builtin::Env, vec![Value::String(var)], 0).unwrap();
+        assert_eq!(result, Value::Nil);
+    }
+
+    #[test]
+    fn env_returns_env_value() {
+        unsafe { std::env::set_var("ECSH_TEST_RUNTIME_VAR2", "runtime") };
+        let result = run_builtin(
+            Builtin::Env,
+            vec![Value::String("ECSH_TEST_RUNTIME_VAR2".into())],
+            0,
+        )
+        .unwrap();
+        assert_eq!(result, Value::String("runtime".into()));
+        unsafe { std::env::remove_var("ECSH_TEST_RUNTIME_VAR2") };
+    }
+
+    #[test]
+    fn env_rejects_wrong_type() {
+        let err = run_builtin(Builtin::Env, vec![Value::Int(1)], 0).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    }
+
+    #[test]
+    fn range_produces_inclusive_range() {
+        let result = run_builtin(Builtin::Range, vec![Value::Int(0), Value::Int(3)], 0).unwrap();
+        let Value::Array(arr) = result else {
+            panic!("expected array")
+        };
+        assert_eq!(
+            *arr.borrow(),
+            vec![Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3)]
+        );
+    }
+
+    #[test]
+    fn range_single_element_when_start_equals_end() {
+        let result = run_builtin(Builtin::Range, vec![Value::Int(5), Value::Int(5)], 0).unwrap();
+        let Value::Array(arr) = result else {
+            panic!("expected array")
+        };
+        assert_eq!(*arr.borrow(), vec![Value::Int(5)]);
+    }
+
+    #[test]
+    fn range_reversed_returns_empty() {
+        let result = run_builtin(Builtin::Range, vec![Value::Int(5), Value::Int(0)], 0).unwrap();
+        let Value::Array(arr) = result else {
+            panic!("expected array")
+        };
+        assert!(arr.borrow().is_empty());
     }
 }

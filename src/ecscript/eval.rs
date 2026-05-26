@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use crate::ecscript::{
     ast::{
         AssignTarget, CompoundAssignOp, Expr, ExprKind, InfixOper, Literal, PrefixOper, RangeExpr,
-        StmtKind,
+        Stmt, StmtKind,
     },
     builtin::run_builtin,
     env::Environment,
@@ -19,10 +19,8 @@ pub enum ExecFlow {
     Return { value: Option<Value>, span: usize },
 }
 
-pub fn eval_script(
-    stmts: &[crate::ecscript::ast::Stmt],
-    env: &Environment<'_>,
-) -> EvalResult<ExecFlow> {
+/// 把解析好的语句ast解析运行，返回执行流
+pub fn eval_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<ExecFlow> {
     for stmt in stmts {
         match eval_stmt(stmt, env)? {
             ExecFlow::Normal => continue,
@@ -50,6 +48,62 @@ pub fn eval_script(
         }
     }
     Ok(ExecFlow::Normal)
+}
+
+/// 执行顶层脚本，并在最后一条语句是表达式语句时返回它的值。
+pub fn eval_top_level_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<Option<Value>> {
+    let Some((last, prefix)) = stmts.split_last() else {
+        return Ok(None);
+    };
+
+    for stmt in prefix {
+        match eval_stmt(stmt, env)? {
+            ExecFlow::Normal => {}
+            ExecFlow::Break(span) => {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::BreakOutsideLoop,
+                    "break outside loop",
+                ));
+            }
+            ExecFlow::Continue(span) => {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::ContinueOutsideLoop,
+                    "continue outside loop",
+                ));
+            }
+            ExecFlow::Return { span, .. } => {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::ReturnOutsideFunction,
+                    "return outside function",
+                ));
+            }
+        }
+    }
+
+    match &last.kind {
+        StmtKind::ExprStmt { expr } => Ok(Some(eval_expr(expr, env)?)),
+        _ => match eval_stmt(last, env)? {
+            ExecFlow::Normal => Ok(None),
+            ExecFlow::Break(span) => Err(RuntimeError::new(
+                span,
+                RuntimeErrorKind::BreakOutsideLoop,
+                "break outside loop",
+            )),
+            ExecFlow::Continue(span) => Err(RuntimeError::new(
+                span,
+                RuntimeErrorKind::ContinueOutsideLoop,
+                "continue outside loop",
+            )),
+            ExecFlow::Return { span, .. } => Err(RuntimeError::new(
+                span,
+                RuntimeErrorKind::ReturnOutsideFunction,
+                "return outside function",
+            )),
+        },
+    }
 }
 
 /// 求值单条语句。
@@ -626,22 +680,11 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
                 )),
             }
         }
-        ExprKind::Range(RangeExpr {
-            start,
-            end,
-            inclusive,
-        }) => {
-            let start = expect_int(eval_expr(start, env)?, span, "range start")?;
-            let end = expect_int(eval_expr(end, env)?, span, "range end")?;
-
-            if *inclusive {
-                let vec: Vec<Value> = (start..=end).map(|val| Value::Int(val)).collect();
-                Ok(Value::Array(Rc::new(RefCell::new(vec))))
-            } else {
-                let vec: Vec<Value> = (start..end).map(|val| Value::Int(val)).collect();
-                Ok(Value::Array(Rc::new(RefCell::new(vec))))
-            }
-        }
+        ExprKind::Range(RangeExpr { .. }) => Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::TypeMismatch,
+            "range expressions are only valid in for loops; use range(start, end)",
+        )),
         ExprKind::FuncLiteral { params, body } => {
             let mut captures = HashMap::new();
 
@@ -1899,6 +1942,30 @@ mod stmt_tests {
         let env = Environment::new();
         eval_script_src("let s = 0; for i in 0..=3 { s = s + i; }", &env).unwrap();
         assert_eq!(env.get("s", 0), Ok(Value::Int(6)));
+    }
+
+    #[test]
+    fn eval_range_expression_reports_use_builtin() {
+        let env = Environment::new();
+        let err = eval_script_src("let xs = 1..3", &env).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(
+            err.message,
+            "range expressions are only valid in for loops; use range(start, end)"
+        );
+    }
+
+    #[test]
+    fn eval_builtin_range_returns_closed_interval() {
+        let env = Environment::new();
+        eval_script_src("let xs = range(1, 3)", &env).unwrap();
+        let Value::Array(values) = env.get("xs", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            *values.borrow(),
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+        );
     }
 
     #[test]

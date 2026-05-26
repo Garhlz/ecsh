@@ -111,7 +111,10 @@ fn collects_dollar_fragments_without_expanding() {
             Token::Word(ShellWord {
                 fragments: vec![
                     WordFragment::Lit("prefix-".into()),
-                    WordFragment::EnvVar("HOME".into()),
+                    WordFragment::Expr {
+                        src: "HOME".into(),
+                        spread: false,
+                    },
                     WordFragment::Lit("/x".into()),
                 ]
             }),
@@ -135,7 +138,7 @@ fn tokenizes_command_and_expr_fragments_with_preserved_source() {
     );
 
     assert_eq!(
-        tokenize(r#"echo $["a\"b"] $[...[1, 2]]"#, &state()).unwrap(),
+        tokenize(r#"echo ${"a\"b"} ${...[1, 2]}"#, &state()).unwrap(),
         vec![
             Token::Word(ShellWord::lit("echo")),
             Token::Word(ShellWord {
@@ -266,11 +269,15 @@ fn reports_lexer_errors() {
     );
     assert_eq!(
         tokenize("echo ${}", &state()).unwrap_err().message,
-        "empty variable name in braces"
+        "empty expression in braces"
     );
     assert_eq!(
-        tokenize("echo ${1}", &state()).unwrap_err().message,
-        "invalid variable name in braces"
+        tokenize("echo $[1]", &state()).unwrap_err().message,
+        "$[expr] has been removed; use ${expr}"
+    );
+    assert_eq!(
+        tokenize("echo $[...[1, 2]]", &state()).unwrap_err().message,
+        "$[...expr] has been removed; use ${...expr}"
     );
     assert_eq!(
         tokenize("echo ${HOME", &state()).unwrap_err().message,
