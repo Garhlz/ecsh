@@ -44,11 +44,12 @@ cargo test
 - shell 运行时展开：`$VAR`、`${expr}`、`${env("VAR")}`、`$(cmd)`、`${...arr}`
 - `ecscript` stage 1-6：表达式、语句、数组/对象、控制流、函数/闭包、独立解释器入口、源码定位错误格式化、`env()` / `range()`
 - 阶段 7：`ecsh` 顶层脚本模式、`ecsh file.ecs`、`source` / `.`、`.ecshrc` 已接通
+- 阶段 8：`cmd{ ... }` 命令字面量、`command(...)` builder、`run` / `capture` / `text` / `lines`、`from_json`、`with_env` / `with_cwd` 已接通；单命令纯输出 builtin 也可走命令桥
 - 阶段 7.5：shell 诊断与交互收口已完成，当前已具备结构化 `ParseError`、续行读取和 shell parse 错误定位输出
 
 当前仍未完成：
 
-- 阶段 8：here-doc、glob、subshell、更完整的作业控制与执行语义
+- 阶段 12：here-doc、glob、subshell、更完整的作业控制与执行语义
 - `ecscript` 的 block value、模块系统、字符串插值、多行字符串
 
 更完整的进度说明见 [docs/status.md](/home/elaine/work/projects/ecsh/docs/status.md)。
@@ -87,6 +88,9 @@ func fact(n) {
 }
 
 println(fact(5));
+println(text(cmd{ printf "hello" }));
+println(text(command("/bin/echo", "builder", 7, true)));
+println(from_json(text(cmd{ printf "{\"ok\":true}" })).ok);
 ```
 
 ## 文档
@@ -94,6 +98,7 @@ println(fact(5));
 - [docs/status.md](/home/elaine/work/projects/ecsh/docs/status.md)：当前进度与后续入口
 - [docs/ecscript-manual.md](/home/elaine/work/projects/ecsh/docs/ecscript-manual.md)：`ecscript` 当前实现手册
 - [docs/TODO.md](/home/elaine/work/projects/ecsh/docs/TODO.md)：设计备忘与分阶段路线
+- [examples/ecscript/README.md](/home/elaine/work/projects/ecsh/examples/ecscript/README.md)：完整 `.ecs` 冒烟脚本与当前边界示例
 
 ## 仓库结构
 
@@ -120,9 +125,6 @@ docs/
 
 `ecsh` 当前不是完整 POSIX shell。明确未实现的能力包括：
 
-- 顶层 shell / script 双模式分派
-- `ecsh` 脚本文件执行入口
-- `~/.ecshrc` 与 `source` / `.`
 - here-doc `<<`
 - 命令替换之外的更完整 shell 展开规则
 - glob 展开

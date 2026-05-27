@@ -53,14 +53,15 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `if` / `while` / `for in`
 - `break` / `continue` / `return`
 - 命名函数、lambda、闭包、自由变量捕获
-- builtin：`env`、`range`、`len`、`push`、`pop`、`insert`、`remove`、`keys`、`values`、`to_json`、`print`、`println`
+- builtin：`env`、`range`、`len`、`push`、`pop`、`insert`、`remove`、`keys`、`values`、`to_json`、`from_json`、`print`、`println`
+- 命令桥 builtin：`run`、`capture`、`text`、`lines`、`with_env`、`with_cwd`
 - 独立解释器入口：REPL / 文件执行 / `-e` / stdin
 - parse/runtime 错误的偏移定位和源码格式化
 
 当前还已经收紧了两条语言边界：
 
 - `1..10` / `1..=10` 只在 `for` 语句中保留；普通值世界改用 `range(start, end)`，默认闭区间
-- `ecsh` 顶层已支持一部分脚本模式分派，但脚本 block 内仍然只接受 ecscript 语句，不直接接受 shell 命令
+- `ecsh` 顶层已支持脚本模式分派，但脚本 block 内仍然只接受 ecscript 语句；shell 命令需要通过 `cmd{ ... }` 命令桥进入
 
 ## 阶段状态
 
@@ -78,7 +79,7 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 
 - 交互顶层、`source` / `.`、`.ecshrc` 共享当前 shell 的 `script_env`
 - `ecsh file.ecs` 使用新的脚本根环境
-- ecscript block 内仍是纯 ecscript 语句，不直接执行 shell 命令；后续命令桥由 `cmd{}` 承担
+- ecscript block 内仍是纯 ecscript 语句，不直接执行 shell 命令；命令需要显式写成 `cmd{ ... }`
 
 ### 阶段 7.5：Shell 诊断与交互收口（已完成）
 
@@ -100,9 +101,28 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `trap EXIT|INT`
 - `type` / `which` / `history`
 
-### 阶段 8：Shell 语义补完
+### 阶段 8：命令值与结构化执行桥（进行中）
 
-阶段 8 负责传统 shell 语义缺口，当前尚未开始的主要内容包括：
+阶段 8 当前已经落地的内容包括：
+
+- `cmd{ ... }` 结构化命令字面量
+- `run(cmd)`：继承当前终端执行，非零退出码报语言错误
+- `capture(cmd)`：返回包含 `code`、`signal`、`stdout`、`stderr`、`duration_ms`、`ok` 的普通对象
+- `text(cmd)` / `lines(cmd)`：基于 `capture(cmd)` 的高频消费接口
+- `command(...)`：argv-first 的程序化命令值 builder
+- `from_json(text(cmd{ ... }))`：命令输出到 JSON 值的推荐组合方式
+- `with_env(cmd, obj)` / `with_cwd(cmd, path)`：以不可变派生方式调整命令值
+- `cmd{ a | b }` pipeline 子集
+- 单命令纯输出 shell builtin：如 `pwd` / `env` / `status` / `help`
+
+当前阶段 8 仍然保留的边界：
+
+- `cmd{ ... }` 仍不支持 `&&` / `||` / `;` / `&`
+- pipeline 中的 shell builtin 目前还不作为命令值执行桥的一部分
+
+### 阶段 12：Shell 语义补完
+
+阶段 12 负责传统 shell 语义缺口，当前尚未开始的主要内容包括：
 
 - here-doc `<<`
 - glob 展开
@@ -125,23 +145,32 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 
 如果按当前路线继续推进，后续工作可以归为四类：
 
-### 1. shell 诊断与交互收口
+### 1. 模块、扩展点与交互脚本化
 
-对应 `TODO.md` 中的阶段 7.5：
+对应 `TODO.md` 中的阶段 10：
 
-- Tab 补全、alias / unalias、交互层体验增强
-- shell 侧后续诊断接口的增量整理
+- `use ... as ...`
+- `pub let` / `pub func`
+- 模块缓存
+- hook / completion / prompt / bind
 
-### 2. shell 语义补完
+### 2. 调用元信息与外部命令适配层
 
-对应 `TODO.md` 中的阶段 8：
+对应 `TODO.md` 中的阶段 11：
+
+- builtin / 命令桥 API 的参数 shape 与帮助信息
+- 外部命令 adapter / completion 元数据
+
+### 3. shell 语义补完
+
+对应 `TODO.md` 中的阶段 12：
 
 - here-doc
 - glob
 - subshell
 - 更完整的作业控制与执行语义
 
-### 3. 工程收口
+### 4. 工程收口
 
 - 统一 shell / `ecscript` 的错误类型与格式化接口
 - 清理阶段性文档与命名残留
