@@ -18,7 +18,9 @@ use std::{
 pub use self::ast::Stmt;
 pub use self::env::Environment;
 pub use self::error::{ParseError, RuntimeError, RuntimeErrorKind};
-pub use self::eval::{eval_script, eval_top_level_script};
+pub use self::eval::{
+    eval_script, eval_script_with_ctx, eval_top_level_script, eval_top_level_script_with_ctx,
+};
 pub use self::value::{Value, display_value, repr_value};
 
 #[derive(Debug)]
@@ -176,6 +178,15 @@ pub fn parse_top_level_script(src: &str) -> Option<Result<Vec<Stmt>, ParseError>
         .find(|token| !matches!(token.kind, lexer::TokenKind::Newline))
         && keyword.is_top_level()
     {
+        return Some(parser::parse_script(&tokens));
+    }
+    if matches!(
+        tokens
+            .iter()
+            .find(|token| !matches!(token.kind, lexer::TokenKind::Newline))
+            .map(|token| &token.kind),
+        Some(lexer::TokenKind::CommandLiteral(_))
+    ) {
         return Some(parser::parse_script(&tokens));
     }
 

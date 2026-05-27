@@ -6,6 +6,7 @@
 //!   - 把具体的 fork / waitpid / job 管理委托给子模块
 
 mod builtins;
+pub mod command_value;
 mod expand;
 mod jobs;
 mod launch;
@@ -15,6 +16,7 @@ use crate::diagnostics::print_error;
 use crate::types::{Command, CommandFlow, CommandStatus, Pipeline, ShellResult, ShellState};
 
 pub use builtins::run_special_builtin;
+pub use command_value::{capture_command_invocation, run_command_invocation};
 pub use jobs::{init_shell_job_control, reap_background_jobs};
 
 /// 执行一条命令（非管道）。

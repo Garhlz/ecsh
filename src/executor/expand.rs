@@ -18,8 +18,7 @@ pub struct ExpandEnv<'a> {
     pub script_env: &'a crate::ecscript::env::Environment<'a>,
 }
 
-/// 把带 fragment 的命令展开成只含字面量 `ShellWord` 的可执行命令。
-///
+/// 把带 fragment 的命令展开成只含ShellWord WordFragment::Lit 的可执行命令。
 /// 程序名和参数可以展开成多个 argv；重定向路径必须恰好展开成一个字符串。
 pub fn expand_command(command: &Command, state: &ShellState) -> ShellResult<Command> {
     let env = ExpandEnv {

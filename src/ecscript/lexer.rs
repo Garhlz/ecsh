@@ -5,6 +5,7 @@ use crate::ecscript::error::ParseError;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
+    pub start: usize,
     pub end: usize,
 }
 
@@ -21,6 +22,7 @@ pub enum TokenKind {
     Delimiter(Delimiter),
     Newline,
     EOF,
+    CommandLiteral(String),
 
     // 保留字
     Keyword(Keyword),
@@ -38,6 +40,7 @@ pub enum Keyword {
     Break,
     Func,
     Return,
+    Cmd,
 }
 
 impl Keyword {
@@ -195,6 +198,7 @@ impl TokenKind {
             TokenKind::Delimiter(delimiter) => format!("'{}'", delimiter.lexeme()),
             TokenKind::Newline => "newline".to_string(),
             TokenKind::EOF => "end of input".to_string(),
+            TokenKind::CommandLiteral(_) => "command literal".to_string(),
             TokenKind::Keyword(Keyword::Let) => "keyword 'let'".to_string(),
             TokenKind::Keyword(Keyword::If) => "keyword 'if'".to_string(),
             TokenKind::Keyword(Keyword::Else) => "keyword 'else'".to_string(),
@@ -205,6 +209,7 @@ impl TokenKind {
             TokenKind::Keyword(Keyword::Break) => "keyword 'break'".to_string(),
             TokenKind::Keyword(Keyword::Func) => "keyword 'func'".to_string(),
             TokenKind::Keyword(Keyword::Return) => "keyword 'return'".to_string(),
+            TokenKind::Keyword(Keyword::Cmd) => "keyword 'cmd'".to_string(),
         }
     }
 
@@ -216,7 +221,8 @@ impl TokenKind {
             | TokenKind::True
             | TokenKind::False
             | TokenKind::Nil
-            | TokenKind::Identifier(_) => true,
+            | TokenKind::Identifier(_)
+            | TokenKind::CommandLiteral(_) => true,
             TokenKind::Operator(operator) => operator.prefix_info().is_some(),
             TokenKind::Delimiter(Delimiter::LParen | Delimiter::LBracket | Delimiter::LBrace) => {
                 true
@@ -226,6 +232,10 @@ impl TokenKind {
     }
 }
 
+fn push_token(tokens: &mut Vec<Token>, kind: TokenKind, start: usize, end: usize) {
+    tokens.push(Token { kind, start, end });
+}
+
 pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
     let mut chars = src.chars().peekable();
     let mut buf = String::new();
@@ -233,13 +243,11 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
     let mut offset: usize = 0; // 当前扫描位置的字节偏移
 
     while let Some(ch) = chars.next() {
+        let start = offset;
         match ch {
             '\n' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Newline,
-                    end: offset,
-                });
+                push_token(&mut tokens, TokenKind::Newline, start, offset);
             }
             '\r' => {
                 offset += ch.len_utf8();
@@ -287,15 +295,19 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 let number_text = std::mem::take(&mut buf);
                 // 夺取所有权并且置空
                 if is_int {
-                    tokens.push(Token {
-                        kind: TokenKind::Int(number_text.parse().unwrap()),
-                        end: offset,
-                    })
+                    push_token(
+                        &mut tokens,
+                        TokenKind::Int(number_text.parse().unwrap()),
+                        start,
+                        offset,
+                    )
                 } else {
-                    tokens.push(Token {
-                        kind: TokenKind::Float(number_text.parse().unwrap()),
-                        end: offset,
-                    })
+                    push_token(
+                        &mut tokens,
+                        TokenKind::Float(number_text.parse().unwrap()),
+                        start,
+                        offset,
+                    )
                 }
             }
 
@@ -317,10 +329,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
 
                 let string_text = std::mem::take(&mut buf);
                 if is_close {
-                    tokens.push(Token {
-                        kind: TokenKind::String(string_text),
-                        end: offset,
-                    })
+                    push_token(&mut tokens, TokenKind::String(string_text), start, offset)
                 } else {
                     return Err(ParseError::incomplete(
                         offset,
@@ -341,64 +350,73 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 }
                 let ident = std::mem::take(&mut buf);
                 match ident.as_str() {
-                    "nil" => tokens.push(Token {
-                        kind: TokenKind::Nil,
-                        end: offset,
-                    }),
-                    "true" => tokens.push(Token {
-                        kind: TokenKind::True,
-                        end: offset,
-                    }),
-                    "false" => tokens.push(Token {
-                        kind: TokenKind::False,
-                        end: offset,
-                    }),
+                    "nil" => push_token(&mut tokens, TokenKind::Nil, start, offset),
+                    "true" => push_token(&mut tokens, TokenKind::True, start, offset),
+                    "false" => push_token(&mut tokens, TokenKind::False, start, offset),
 
                     // 保留字
-                    "let" => tokens.push(Token {
-                        kind: TokenKind::Keyword(Keyword::Let),
-                        end: offset,
-                    }),
-                    "if" => tokens.push(Token {
-                        kind: TokenKind::Keyword(Keyword::If),
-                        end: offset,
-                    }),
-                    "else" => tokens.push(Token {
-                        kind: TokenKind::Keyword(Keyword::Else),
-                        end: offset,
-                    }),
-                    "while" => tokens.push(Token {
-                        kind: TokenKind::Keyword(Keyword::While),
-                        end: offset,
-                    }),
-                    "for" => tokens.push(Token {
-                        kind: TokenKind::Keyword(Keyword::For),
-                        end: offset,
-                    }),
-                    "in" => tokens.push(Token {
-                        kind: TokenKind::Keyword(Keyword::In),
-                        end: offset,
-                    }),
-                    "continue" => tokens.push(Token {
-                        kind: TokenKind::Keyword(Keyword::Continue),
-                        end: offset,
-                    }),
-                    "break" => tokens.push(Token {
-                        kind: TokenKind::Keyword(Keyword::Break),
-                        end: offset,
-                    }),
-                    "func" => tokens.push(Token {
-                        kind: TokenKind::Keyword(Keyword::Func),
-                        end: offset,
-                    }),
-                    "return" => tokens.push(Token {
-                        kind: TokenKind::Keyword(Keyword::Return),
-                        end: offset,
-                    }),
-                    _ => tokens.push(Token {
-                        kind: TokenKind::Identifier(ident),
-                        end: offset,
-                    }),
+                    "let" => {
+                        push_token(&mut tokens, TokenKind::Keyword(Keyword::Let), start, offset)
+                    }
+                    "if" => push_token(&mut tokens, TokenKind::Keyword(Keyword::If), start, offset),
+                    "else" => push_token(
+                        &mut tokens,
+                        TokenKind::Keyword(Keyword::Else),
+                        start,
+                        offset,
+                    ),
+                    "while" => push_token(
+                        &mut tokens,
+                        TokenKind::Keyword(Keyword::While),
+                        start,
+                        offset,
+                    ),
+                    "for" => {
+                        push_token(&mut tokens, TokenKind::Keyword(Keyword::For), start, offset)
+                    }
+                    "in" => push_token(&mut tokens, TokenKind::Keyword(Keyword::In), start, offset),
+                    "continue" => push_token(
+                        &mut tokens,
+                        TokenKind::Keyword(Keyword::Continue),
+                        start,
+                        offset,
+                    ),
+                    "break" => push_token(
+                        &mut tokens,
+                        TokenKind::Keyword(Keyword::Break),
+                        start,
+                        offset,
+                    ),
+                    "func" => push_token(
+                        &mut tokens,
+                        TokenKind::Keyword(Keyword::Func),
+                        start,
+                        offset,
+                    ),
+                    "return" => push_token(
+                        &mut tokens,
+                        TokenKind::Keyword(Keyword::Return),
+                        start,
+                        offset,
+                    ),
+                    "cmd" => {
+                        if let Some(command) = try_scan_command_literal(&mut chars, &mut offset)? {
+                            push_token(
+                                &mut tokens,
+                                TokenKind::CommandLiteral(command),
+                                start,
+                                offset,
+                            );
+                        } else {
+                            push_token(
+                                &mut tokens,
+                                TokenKind::Keyword(Keyword::Cmd),
+                                start,
+                                offset,
+                            );
+                        }
+                    }
+                    _ => push_token(&mut tokens, TokenKind::Identifier(ident), start, offset),
                 }
             }
 
@@ -442,10 +460,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 }
                 let string_text = std::mem::take(&mut buf);
                 if is_close {
-                    tokens.push(Token {
-                        kind: TokenKind::String(string_text),
-                        end: offset,
-                    })
+                    push_token(&mut tokens, TokenKind::String(string_text), start, offset)
                 } else {
                     return Err(ParseError::incomplete(
                         offset,
@@ -457,52 +472,66 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             // delimiter
             '(' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Delimiter(Delimiter::LParen),
-                    end: offset,
-                })
+                push_token(
+                    &mut tokens,
+                    TokenKind::Delimiter(Delimiter::LParen),
+                    start,
+                    offset,
+                )
             }
             ')' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Delimiter(Delimiter::RParen),
-                    end: offset,
-                })
+                push_token(
+                    &mut tokens,
+                    TokenKind::Delimiter(Delimiter::RParen),
+                    start,
+                    offset,
+                )
             }
             '{' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Delimiter(Delimiter::LBrace),
-                    end: offset,
-                })
+                push_token(
+                    &mut tokens,
+                    TokenKind::Delimiter(Delimiter::LBrace),
+                    start,
+                    offset,
+                )
             }
             '}' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Delimiter(Delimiter::RBrace),
-                    end: offset,
-                })
+                push_token(
+                    &mut tokens,
+                    TokenKind::Delimiter(Delimiter::RBrace),
+                    start,
+                    offset,
+                )
             }
             '[' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Delimiter(Delimiter::LBracket),
-                    end: offset,
-                })
+                push_token(
+                    &mut tokens,
+                    TokenKind::Delimiter(Delimiter::LBracket),
+                    start,
+                    offset,
+                )
             }
             ']' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Delimiter(Delimiter::RBracket),
-                    end: offset,
-                })
+                push_token(
+                    &mut tokens,
+                    TokenKind::Delimiter(Delimiter::RBracket),
+                    start,
+                    offset,
+                )
             }
             ',' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Delimiter(Delimiter::Comma),
-                    end: offset,
-                })
+                push_token(
+                    &mut tokens,
+                    TokenKind::Delimiter(Delimiter::Comma),
+                    start,
+                    offset,
+                )
             }
             '.' => {
                 offset += ch.len_utf8();
@@ -514,7 +543,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                     } else {
                         TokenKind::Delimiter(Delimiter::DotDot)
                     };
-                    tokens.push(Token { kind, end: offset });
+                    push_token(&mut tokens, kind, start, offset);
                 } else if let Some(next_ch) = chars.next_if(|next_ch| (*next_ch).is_ascii_digit()) {
                     // .123这种浮点数
                     offset += next_ch.len_utf8();
@@ -527,23 +556,29 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                     }
                     ensure_number_terminated(&mut chars, offset)?;
                     let number_text = std::mem::take(&mut buf);
-                    tokens.push(Token {
-                        kind: TokenKind::Float(number_text.parse().unwrap()),
-                        end: offset,
-                    })
+                    push_token(
+                        &mut tokens,
+                        TokenKind::Float(number_text.parse().unwrap()),
+                        start,
+                        offset,
+                    )
                 } else {
-                    tokens.push(Token {
-                        kind: TokenKind::Delimiter(Delimiter::Dot),
-                        end: offset,
-                    });
+                    push_token(
+                        &mut tokens,
+                        TokenKind::Delimiter(Delimiter::Dot),
+                        start,
+                        offset,
+                    );
                 }
             }
             ';' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Delimiter(Delimiter::Semicolon),
-                    end: offset,
-                })
+                push_token(
+                    &mut tokens,
+                    TokenKind::Delimiter(Delimiter::Semicolon),
+                    start,
+                    offset,
+                )
             }
             '=' => {
                 offset += ch.len_utf8();
@@ -556,7 +591,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 } else {
                     TokenKind::Delimiter(Delimiter::Eq)
                 };
-                tokens.push(Token { kind, end: offset });
+                push_token(&mut tokens, kind, start, offset);
             }
 
             // oper
@@ -568,7 +603,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 } else {
                     TokenKind::Operator(Operator::Plus)
                 };
-                tokens.push(Token { kind, end: offset })
+                push_token(&mut tokens, kind, start, offset)
             }
             '-' => {
                 offset += ch.len_utf8();
@@ -578,7 +613,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 } else {
                     TokenKind::Operator(Operator::Minus)
                 };
-                tokens.push(Token { kind, end: offset })
+                push_token(&mut tokens, kind, start, offset)
             }
             '*' => {
                 offset += ch.len_utf8();
@@ -588,7 +623,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 } else {
                     TokenKind::Operator(Operator::Star)
                 };
-                tokens.push(Token { kind, end: offset })
+                push_token(&mut tokens, kind, start, offset)
             }
             '/' => {
                 offset += ch.len_utf8();
@@ -616,15 +651,19 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                     }
                 } else if chars.next_if_eq(&'=').is_some() {
                     offset += '='.len_utf8();
-                    tokens.push(Token {
-                        kind: TokenKind::Delimiter(Delimiter::SlashEq),
-                        end: offset,
-                    })
+                    push_token(
+                        &mut tokens,
+                        TokenKind::Delimiter(Delimiter::SlashEq),
+                        start,
+                        offset,
+                    )
                 } else {
-                    tokens.push(Token {
-                        kind: TokenKind::Operator(Operator::Slash),
-                        end: offset,
-                    })
+                    push_token(
+                        &mut tokens,
+                        TokenKind::Operator(Operator::Slash),
+                        start,
+                        offset,
+                    )
                 }
             }
             '%' => {
@@ -635,23 +674,27 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 } else {
                     TokenKind::Operator(Operator::Percent)
                 };
-                tokens.push(Token { kind, end: offset })
+                push_token(&mut tokens, kind, start, offset)
             }
             ':' => {
                 offset += ch.len_utf8();
-                tokens.push(Token {
-                    kind: TokenKind::Delimiter(Delimiter::Colon),
-                    end: offset,
-                })
+                push_token(
+                    &mut tokens,
+                    TokenKind::Delimiter(Delimiter::Colon),
+                    start,
+                    offset,
+                )
             }
             '&' => {
                 offset += ch.len_utf8();
                 if chars.next_if_eq(&'&').is_some() {
                     offset += '&'.len_utf8();
-                    tokens.push(Token {
-                        kind: TokenKind::Operator(Operator::AndAnd),
-                        end: offset,
-                    })
+                    push_token(
+                        &mut tokens,
+                        TokenKind::Operator(Operator::AndAnd),
+                        start,
+                        offset,
+                    )
                 } else {
                     return Err(ParseError::new(
                         offset,
@@ -664,10 +707,12 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 offset += ch.len_utf8();
                 if chars.next_if_eq(&'|').is_some() {
                     offset += '|'.len_utf8();
-                    tokens.push(Token {
-                        kind: TokenKind::Operator(Operator::OrOr),
-                        end: offset,
-                    })
+                    push_token(
+                        &mut tokens,
+                        TokenKind::Operator(Operator::OrOr),
+                        start,
+                        offset,
+                    )
                 } else {
                     return Err(ParseError::new(
                         offset,
@@ -683,7 +728,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 } else {
                     TokenKind::Operator(Operator::Bang)
                 };
-                tokens.push(Token { kind, end: offset });
+                push_token(&mut tokens, kind, start, offset);
             }
             '<' => {
                 offset += ch.len_utf8();
@@ -693,7 +738,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 } else {
                     TokenKind::Operator(Operator::Lt)
                 };
-                tokens.push(Token { kind, end: offset });
+                push_token(&mut tokens, kind, start, offset);
             }
             '>' => {
                 offset += ch.len_utf8();
@@ -703,7 +748,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 } else {
                     TokenKind::Operator(Operator::Gt)
                 };
-                tokens.push(Token { kind, end: offset });
+                push_token(&mut tokens, kind, start, offset);
             }
             other => {
                 return Err(ParseError::new(
@@ -713,11 +758,148 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             }
         }
     }
-    tokens.push(Token {
-        kind: TokenKind::EOF,
-        end: offset,
-    });
+    push_token(&mut tokens, TokenKind::EOF, offset, offset);
     Ok(tokens)
+}
+
+/// 直接将cmd{}整体视为一个token
+/// 常规处理单双引号、转义、大括号闭合
+fn try_scan_command_literal(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    offset: &mut usize,
+) -> Result<Option<String>, ParseError> {
+    let mut probe = chars.clone();
+    while let Some(next) = probe.peek().copied() {
+        if matches!(next, ' ' | '\t') {
+            let _ = probe.next();
+        } else {
+            break;
+        }
+    }
+    if probe.next_if_eq(&'{').is_none() {
+        return Ok(None);
+    }
+
+    while let Some(next) = chars.peek().copied() {
+        if matches!(next, ' ' | '\t') {
+            let _ = chars.next();
+            *offset += next.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let _ = chars.next();
+    *offset += '{'.len_utf8();
+
+    let mut depth = 1usize;
+    let mut body = String::new();
+
+    enum ScanState {
+        Normal,
+        SingleQuoted,
+        DoubleQuoted,
+    }
+    let mut state = ScanState::Normal;
+
+    loop {
+        match state {
+            ScanState::Normal => match chars.next() {
+                Some('{') => {
+                    *offset += '{'.len_utf8();
+                    depth += 1;
+                    body.push('{');
+                }
+                Some('}') => {
+                    *offset += '}'.len_utf8();
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    body.push('}');
+                }
+                Some('\'') => {
+                    *offset += '\''.len_utf8();
+                    state = ScanState::SingleQuoted;
+                    body.push('\'');
+                }
+                Some('"') => {
+                    *offset += '"'.len_utf8();
+                    state = ScanState::DoubleQuoted;
+                    body.push('"');
+                }
+                Some('\\') => {
+                    *offset += '\\'.len_utf8();
+                    body.push('\\');
+                    let Some(next) = chars.next() else {
+                        return Err(ParseError::incomplete(
+                            *offset,
+                            "unterminated command literal",
+                        ));
+                    };
+                    *offset += next.len_utf8();
+                    body.push(next);
+                }
+                Some(ch) => {
+                    *offset += ch.len_utf8();
+                    body.push(ch);
+                }
+                None => {
+                    return Err(ParseError::incomplete(
+                        *offset,
+                        "unterminated command literal",
+                    ));
+                }
+            },
+            ScanState::SingleQuoted => match chars.next() {
+                Some('\'') => {
+                    *offset += '\''.len_utf8();
+                    state = ScanState::Normal;
+                    body.push('\'');
+                }
+                Some(ch) => {
+                    *offset += ch.len_utf8();
+                    body.push(ch);
+                }
+                None => {
+                    return Err(ParseError::incomplete(
+                        *offset,
+                        "unterminated command literal",
+                    ));
+                }
+            },
+            ScanState::DoubleQuoted => match chars.next() {
+                Some('"') => {
+                    *offset += '"'.len_utf8();
+                    state = ScanState::Normal;
+                    body.push('"');
+                }
+                Some('\\') => {
+                    *offset += '\\'.len_utf8();
+                    body.push('\\');
+                    let Some(next) = chars.next() else {
+                        return Err(ParseError::incomplete(
+                            *offset,
+                            "unterminated command literal",
+                        ));
+                    };
+                    *offset += next.len_utf8();
+                    body.push(next);
+                }
+                Some(ch) => {
+                    *offset += ch.len_utf8();
+                    body.push(ch);
+                }
+                None => {
+                    return Err(ParseError::incomplete(
+                        *offset,
+                        "unterminated command literal",
+                    ));
+                }
+            },
+        }
+    }
+
+    Ok(Some(body))
 }
 
 fn ensure_number_terminated(
@@ -826,6 +1008,17 @@ mod tests {
         assert_kinds(
             "raw r foo",
             vec![ident("raw"), ident("r"), ident("foo"), TokenKind::EOF],
+        );
+    }
+
+    #[test]
+    fn lexes_command_literal_as_single_token() {
+        assert_kinds(
+            r#"cmd{ echo "${x}" > out.txt }"#,
+            vec![
+                TokenKind::CommandLiteral(r#" echo "${x}" > out.txt "#.to_string()),
+                TokenKind::EOF,
+            ],
         );
     }
 

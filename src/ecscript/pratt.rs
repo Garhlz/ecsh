@@ -1,4 +1,5 @@
 use crate::ecscript::error::ParseError;
+use crate::parser::parse_command_literal;
 
 use crate::ecscript::ast::{Expr, ExprKind, Literal, RangeExpr, Stmt, StmtKind};
 use crate::ecscript::lexer::{Delimiter, Token, TokenKind};
@@ -39,16 +40,15 @@ impl<'a> TokenStream<'a> {
         }
     }
 
-    pub fn peek_n(&self, n: usize) -> Option<&Token> {
-        self.tokens.get(self.pos + n)
-    }
+    // pub fn peek_n(&self, n: usize) -> Option<&Token> {
+    //     self.tokens.get(self.pos + n)
+    // }
+    // pub fn check_next(&self, kind: &TokenKind) -> bool {
+    //     self.peek_n(1).is_some_and(|token| token.kind == *kind)
+    // }
 
     pub fn check(&self, kind: &TokenKind) -> bool {
         self.peek().kind == *kind
-    }
-
-    pub fn check_next(&self, kind: &TokenKind) -> bool {
-        self.peek_n(1).is_some_and(|token| token.kind == *kind)
     }
 
     pub fn current_offset(&self) -> usize {
@@ -83,7 +83,6 @@ pub fn parse_expr(tokens: &[Token]) -> Result<Expr, ParseError> {
 }
 
 pub fn parse_expr_in(state: &mut TokenStream<'_>) -> Result<Expr, ParseError> {
-    // 只解析表达式本身，不检查分号——分号由调用方（语句解析器）负责
     pratt_parser(state, 0)
 }
 
@@ -140,6 +139,16 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
         TokenKind::Identifier(s) => {
             left = Expr {
                 kind: ExprKind::Variable(s),
+                span: prefix_span,
+            };
+            state.consume();
+        }
+
+        TokenKind::CommandLiteral(src) => {
+            let command = parse_command_literal(&src)
+                .map_err(|err| ParseError::new(prefix_span, err.message))?;
+            left = Expr {
+                kind: ExprKind::CommandLiteral(command),
                 span: prefix_span,
             };
             state.consume();
@@ -516,6 +525,7 @@ mod tests {
     use super::parse_expr;
     use crate::ecscript::ast::{Expr, ExprKind, InfixOper, Literal, PrefixOper, Stmt, StmtKind};
     use crate::ecscript::lexer::tokenize;
+    use crate::ecscript::value::CommandValue;
 
     fn assert_parse(src: &str, expected: Expr) {
         let actual = parse_src(src);
@@ -657,6 +667,17 @@ mod tests {
     #[test]
     fn parses_variable_reference() {
         assert_parse("foo", var("foo"));
+    }
+
+    #[test]
+    fn parses_command_literal_expression() {
+        let expr = parse_src(r#"cmd{ echo "${x}" > out.txt }"#);
+        let ExprKind::CommandLiteral(CommandValue::Simple(command)) = expr.kind else {
+            panic!("expected command literal");
+        };
+        assert_eq!(command.program.as_lit_str(), Some("echo"));
+        assert_eq!(command.args.len(), 1);
+        assert!(command.redirection.stdout.is_some());
     }
 
     #[test]
