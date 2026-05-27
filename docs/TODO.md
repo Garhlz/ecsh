@@ -933,25 +933,27 @@ echo ${to_json(data)} | jq .name
 
 **本阶段要做的事**
 
-- [ ] 引入 `|>` 值传递操作符：`x |> f(a, b)` 等价于 `f(x, a, b)`
-- [ ] 实现 eager Array 版高阶函数：`map`、`filter`、`reduce`、`each`、`find`、`any`、`all`
-- [ ] 实现基础序列函数：`take`、`drop`、`join`、`split`、`contains`、`starts_with`、`ends_with`
+- [x] 引入 `|>` 值传递操作符：`x |> f(a, b)` 等价于 `f(x, a, b)`
+- [x] 实现 eager Array 版高阶函数：`map`、`filter`、`reduce`、`each`、`find`、`any`、`all`、`join`
+- [x] 实现基础数组工具原语：`slice(arr, start, end)`（半开区间）
+- [ ] 继续补自举序列函数：`take`、`drop`、`contains`、`starts_with`、`ends_with`
 - [ ] 补齐 text/value bridge：`stdin()`、`read_lines()`、`print(...)`、`write_lines(...)`
 - [ ] 补齐 JSON bridge：`from_json(...)`、`to_json(...)`
-- [ ] 建立小型标准库命名空间草案：`std.str`、`std.path`、`std.json`、`std.proc`、`std.iter`
+- [x] 建立小型标准库草案入口：`examples/ecscript/std_iter_draft.ecs`
+- [ ] 建立正式标准库命名空间：`std.str`、`std.path`、`std.json`、`std.proc`、`std.iter`
 - [ ] 先不做 lazy Iterator / Stream；只预留接口，不引入生命周期和消费语义复杂度
 
 **测试重点**
 
-- [ ] `lines(cmd{ ... }) |> filter(...) |> map(...)` 的常见脚本链路
-- [ ] `|>` 只传值，不启动进程、不读写 stdin/stdout
-- [ ] 高阶函数中的闭包捕获、错误传播和参数个数错误
+- [x] `lines(cmd{ ... }) |> filter(...) |> map(...)` 的常见脚本链路
+- [x] `|>` 只传值，不启动进程、不读写 stdin/stdout
+- [x] 高阶函数中的闭包捕获、错误传播和参数个数错误
 - [ ] JSON / text 转换失败时给出清晰运行时错误
 
 **完成标准**
 
-- [ ] 可以自然写出“命令输出 -> 行数组 -> 过滤/转换 -> 再展开给命令”的脚本
-- [ ] shell `|` 与 ecscript `|>` 的职责边界在实现和文档中都保持清楚
+- [x] 可以自然写出“命令输出 -> 行数组 -> 过滤/转换 -> 再展开给命令”的脚本
+- [x] shell `|` 与 ecscript `|>` 的职责边界在实现和文档中都保持清楚
 
 ### 阶段 10：模块、扩展点与交互脚本化
 

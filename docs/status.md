@@ -120,6 +120,31 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `cmd{ ... }` 仍不支持 `&&` / `||` / `;` / `&`
 - pipeline 中的 shell builtin 目前还不作为命令值执行桥的一部分
 
+### 阶段 9：值流与脚本标准库核心（进行中）
+
+阶段 9 当前已经落地的内容包括：
+
+- `|>` 值流语法糖：`x |> f(a, b)` 等价于 `f(x, a, b)`
+- eager Array 版高阶函数：
+  - `map`
+  - `filter`
+  - `reduce`
+  - `each`
+  - `any`
+  - `all`
+  - `find`
+  - `join`
+- 数组工具原语：`slice(arr, start, end)`，采用半开区间 `[start, end)`
+- 一份脚本级标准库草案：
+  - `examples/ecscript/std_iter_draft.ecs`
+
+当前阶段 9 仍然保留的边界：
+
+- 高阶函数当前只接受 `Array`
+- 还没有 lazy iterator / stream
+- 还没有正式模块化的 `std.iter`
+- `|>` 右侧当前必须是调用表达式
+
 ### 阶段 12：Shell 语义补完
 
 阶段 12 负责传统 shell 语义缺口，当前尚未开始的主要内容包括：
