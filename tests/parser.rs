@@ -1,4 +1,5 @@
-use ecsh::parser::parse_line;
+use ecsh::ecscript::value::CommandValue;
+use ecsh::parser::{parse_command_literal, parse_line};
 use ecsh::types::{
     Command, CommandStatus, OutputRedirection, ParsedJob, ParsedLine, Pipeline, Redirection,
     ShellState, ShellWord,
@@ -55,6 +56,28 @@ fn parses_simple_command_with_quotes() {
             r#"echo "hello world""#,
         )
     );
+}
+
+#[test]
+fn parses_command_literal_as_single_command() {
+    let parsed = parse_command_literal(r#"echo "${x}" > out.txt"#).unwrap();
+    let CommandValue::Simple(command) = parsed else {
+        panic!("expected single command literal");
+    };
+    assert_eq!(command.program.as_lit_str(), Some("echo"));
+    assert_eq!(command.args.len(), 1);
+    assert!(command.redirection.stdout.is_some());
+}
+
+#[test]
+fn parses_pipeline_in_command_literal() {
+    let parsed = parse_command_literal("echo hi | cat").unwrap();
+    let CommandValue::Pipeline(pipeline) = parsed else {
+        panic!("expected pipeline command literal");
+    };
+    assert_eq!(pipeline.commands.len(), 2);
+    assert_eq!(pipeline.commands[0].program.as_lit_str(), Some("echo"));
+    assert_eq!(pipeline.commands[1].program.as_lit_str(), Some("cat"));
 }
 
 #[test]

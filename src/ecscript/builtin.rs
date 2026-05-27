@@ -1,8 +1,10 @@
 use crate::ecscript::{
     error::{RuntimeError, RuntimeErrorKind},
     io_state,
-    value::{Builtin, Value, display_value},
+    value::{Builtin, BuiltinContext, Value, display_value},
 };
+use crate::executor::{capture_command_invocation, run_command_invocation};
+
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -12,10 +14,12 @@ use std::{
 
 pub fn lookup_builtin(name: &str) -> Option<Builtin> {
     match name {
+        "command" => Some(Builtin::CommandBuilder),
         "env" => Some(Builtin::Env),
         "range" => Some(Builtin::Range),
         "len" => Some(Builtin::Len),
         "to_json" => Some(Builtin::ToJson),
+        "from_json" => Some(Builtin::FromJson),
         "keys" => Some(Builtin::Keys),
         "values" => Some(Builtin::Values),
         "push" => Some(Builtin::Push),
@@ -24,12 +28,51 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
         "remove" => Some(Builtin::Remove),
         "print" => Some(Builtin::Print),
         "println" => Some(Builtin::Println),
+        "run" => Some(Builtin::Run),
+        "capture" => Some(Builtin::Capture),
+        "text" => Some(Builtin::Text),
+        "lines" => Some(Builtin::Lines),
+        "with_env" => Some(Builtin::WithEnv),
+        "with_cwd" => Some(Builtin::WithCwd),
         _ => None,
     }
 }
 
-pub fn run_builtin(builtin: Builtin, args: Vec<Value>, span: usize) -> Result<Value, RuntimeError> {
+pub fn run_builtin(
+    builtin: Builtin,
+    args: Vec<Value>,
+    span: usize,
+    ctx: BuiltinContext<'_>,
+) -> Result<Value, RuntimeError> {
     match builtin {
+        Builtin::CommandBuilder => {
+            // `command(program, arg1, ...)` 是纯语言侧的 argv-first builder。
+            // 它不解析 shell 语法，也不立即执行；只是把参数序列变成字面量命令值。
+            if args.is_empty() {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::ArityMismatch,
+                    "command expects at least 1 argument, got 0",
+                ));
+            }
+
+            let program = shell_word_from_value("command", &args[0], span)?;
+            let argv = args[1..]
+                .iter()
+                .map(|arg| shell_word_from_value("command", arg, span))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(Value::Command(crate::ecscript::value::CommandInvocation {
+                command: crate::ecscript::value::CommandValue::Simple(crate::types::Command {
+                    program,
+                    args: argv,
+                    redirection: crate::types::Redirection::default(),
+                }),
+                cwd_override: None,
+                env_override: None,
+                stdin_override: None,
+            }))
+        }
         Builtin::Env => {
             expect_arity(&args, 1, span, "env")?;
             let Value::String(name) = &args[0] else {
@@ -219,6 +262,24 @@ pub fn run_builtin(builtin: Builtin, args: Vec<Value>, span: usize) -> Result<Va
             let json = to_json_value(&args[0], span)?;
             Ok(Value::String(json.to_string()))
         }
+        Builtin::FromJson => {
+            expect_arity(&args, 1, span, "from_json")?;
+            let Value::String(text) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("from_json expects String, got {}", args[0].type_name()),
+                ));
+            };
+            let parsed: serde_json::Value = serde_json::from_str(text).map_err(|err| {
+                RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::ParseInExpr,
+                    format!("invalid JSON: {}", err),
+                )
+            })?;
+            from_json_value(&parsed, span)
+        }
         Builtin::Print => {
             let text = format_print_args(&args);
             write_stdout(&text, false, span)?;
@@ -229,6 +290,236 @@ pub fn run_builtin(builtin: Builtin, args: Vec<Value>, span: usize) -> Result<Va
             write_stdout(&text, true, span)?;
             Ok(Value::Nil)
         }
+        Builtin::Run => {
+            // `run(cmd)` 面向“直接执行”场景：继承当前终端，成功返回 `nil`，
+            // 非零退出码和信号终止都提升成语言层错误。
+            expect_arity(&args, 1, span, "run")?;
+            let Value::Command(command) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("run expects Command, got {}", args[0].type_name()),
+                ));
+            };
+            let Some(state) = ctx.shell_state.as_deref() else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::IoError,
+                    "run is not available in this context",
+                ));
+            };
+            let result = run_command_invocation(command, state).map_err(|err| {
+                RuntimeError::new(span, RuntimeErrorKind::IoError, err.to_string())
+            })?;
+            if result.code != 0 || result.signal.is_some() {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::IoError,
+                    format!(
+                        "command failed with code {}{}",
+                        result.code,
+                        result
+                            .signal
+                            .map(|signal| format!(" (signal {})", signal))
+                            .unwrap_or_default()
+                    ),
+                ));
+            }
+            Ok(Value::Nil)
+        }
+        Builtin::Capture => {
+            // `capture(cmd)` 面向“检查结果”场景：保留 stdout/stderr/code/signal，
+            // 非零退出码不自动报错，由调用者自己检查结果对象。
+            let result = capture_command_builtin("capture", &args, span, ctx)?;
+            Ok(command_result_object(result))
+        }
+        Builtin::Text => {
+            // `text(cmd)` 是 `capture(cmd)` 的便捷包装：要求命令成功，
+            // 然后直接返回 stdout 文本。
+            let result = capture_command_builtin("text", &args, span, ctx)?;
+            ensure_command_success(&result, span)?;
+            Ok(Value::String(result.stdout))
+        }
+        Builtin::Lines => {
+            // `lines(cmd)` 同样要求命令成功，但把 stdout 按行拆成字符串数组，
+            // 方便直接接到后续 value flow / 高阶函数处理。
+            let result = capture_command_builtin("lines", &args, span, ctx)?;
+            ensure_command_success(&result, span)?;
+            Ok(Value::Array(Rc::new(RefCell::new(
+                result
+                    .stdout
+                    .lines()
+                    .map(|line| Value::String(line.to_string()))
+                    .collect(),
+            ))))
+        }
+        Builtin::WithEnv => {
+            // `with_env(cmd, obj)` 返回派生后的命令值；
+            // 只更新命令值自己的环境覆盖，不修改当前 shell 进程环境。
+            expect_arity(&args, 2, span, "with_env")?;
+            let Value::Command(command) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "with_env expects Command as first argument, got {}",
+                        args[0].type_name()
+                    ),
+                ));
+            };
+            let Value::Object(env_obj) = &args[1] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "with_env expects Object as second argument, got {}",
+                        args[1].type_name()
+                    ),
+                ));
+            };
+
+            let mut derived = command.clone();
+            let mut env_override = derived.env_override.take().unwrap_or_default();
+            for (key, value) in env_obj.borrow().iter() {
+                let Value::String(text) = value else {
+                    return Err(RuntimeError::new(
+                        span,
+                        RuntimeErrorKind::TypeMismatch,
+                        format!(
+                            "with_env expects Object<String>; key '{}' has {}",
+                            key,
+                            value.type_name()
+                        ),
+                    ));
+                };
+                env_override.insert(key.clone(), text.clone());
+            }
+            derived.env_override = Some(env_override);
+            Ok(Value::Command(derived))
+        }
+        Builtin::WithCwd => {
+            // `with_cwd(cmd, path)` 也是不可变派生：返回一个带 cwd override 的新命令值。
+            expect_arity(&args, 2, span, "with_cwd")?;
+            let Value::Command(command) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "with_cwd expects Command as first argument, got {}",
+                        args[0].type_name()
+                    ),
+                ));
+            };
+            let Value::String(path) = &args[1] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "with_cwd expects String as second argument, got {}",
+                        args[1].type_name()
+                    ),
+                ));
+            };
+
+            let mut derived = command.clone();
+            derived.cwd_override = Some(path.clone());
+            Ok(Value::Command(derived))
+        }
+    }
+}
+
+fn capture_command_builtin(
+    builtin_name: &str,
+    args: &[Value],
+    span: usize,
+    ctx: BuiltinContext<'_>,
+) -> Result<crate::ecscript::value::CommandResult, RuntimeError> {
+    expect_arity(args, 1, span, builtin_name)?;
+    let Value::Command(command) = &args[0] else {
+        return Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::TypeMismatch,
+            format!(
+                "{} expects Command, got {}",
+                builtin_name,
+                args[0].type_name()
+            ),
+        ));
+    };
+    let Some(state) = ctx.shell_state else {
+        return Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::IoError,
+            format!("{builtin_name} is not available in this context"),
+        ));
+    };
+    capture_command_invocation(command, state)
+        .map_err(|err| RuntimeError::new(span, RuntimeErrorKind::IoError, err.to_string()))
+}
+
+fn ensure_command_success(
+    result: &crate::ecscript::value::CommandResult,
+    span: usize,
+) -> Result<(), RuntimeError> {
+    if result.code != 0 || result.signal.is_some() {
+        return Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::IoError,
+            format!(
+                "command failed with code {}{}",
+                result.code,
+                result
+                    .signal
+                    .map(|signal| format!(" (signal {})", signal))
+                    .unwrap_or_default()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn command_result_object(result: crate::ecscript::value::CommandResult) -> Value {
+    let mut fields = HashMap::new();
+    fields.insert("code".to_string(), Value::Int(result.code as i64));
+    fields.insert(
+        "signal".to_string(),
+        result
+            .signal
+            .map(|signal| Value::Int(signal as i64))
+            .unwrap_or(Value::Nil),
+    );
+    fields.insert("stdout".to_string(), Value::String(result.stdout));
+    fields.insert("stderr".to_string(), Value::String(result.stderr));
+    fields.insert(
+        "duration_ms".to_string(),
+        Value::Int(i64::try_from(result.duration_ms).unwrap_or(i64::MAX)),
+    );
+    fields.insert(
+        "ok".to_string(),
+        Value::Bool(result.code == 0 && result.signal.is_none()),
+    );
+    Value::Object(Rc::new(RefCell::new(fields)))
+}
+
+fn shell_word_from_value(
+    builtin_name: &str,
+    value: &Value,
+    span: usize,
+) -> Result<crate::types::ShellWord, RuntimeError> {
+    match value {
+        Value::String(text) => Ok(crate::types::ShellWord::lit(text.clone())),
+        Value::Int(num) => Ok(crate::types::ShellWord::lit(num.to_string())),
+        Value::Float(num) => Ok(crate::types::ShellWord::lit(num.to_string())),
+        Value::Bool(flag) => Ok(crate::types::ShellWord::lit(flag.to_string())),
+        Value::Nil => Ok(crate::types::ShellWord::lit("nil")),
+        other => Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::TypeMismatch,
+            format!(
+                "{builtin_name} only accepts String, Int, Float, Bool or Nil argv parts, got {}",
+                other.type_name()
+            ),
+        )),
     }
 }
 
@@ -259,6 +550,40 @@ fn expect_arity(
 fn to_json_value(value: &Value, span: usize) -> Result<serde_json::Value, RuntimeError> {
     let mut visiting = HashSet::new();
     to_json_value_inner(value, span, &mut visiting)
+}
+
+fn from_json_value(value: &serde_json::Value, span: usize) -> Result<Value, RuntimeError> {
+    match value {
+        serde_json::Value::Null => Ok(Value::Nil),
+        serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(int) = n.as_i64() {
+                Ok(Value::Int(int))
+            } else if let Some(float) = n.as_f64() {
+                Ok(Value::Float(float))
+            } else {
+                Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("unsupported JSON number {}", n),
+                ))
+            }
+        }
+        serde_json::Value::String(s) => Ok(Value::String(s.clone())),
+        serde_json::Value::Array(items) => Ok(Value::Array(Rc::new(RefCell::new(
+            items
+                .iter()
+                .map(|item| from_json_value(item, span))
+                .collect::<Result<Vec<_>, _>>()?,
+        )))),
+        serde_json::Value::Object(entries) => {
+            let mut map = HashMap::new();
+            for (key, value) in entries {
+                map.insert(key.clone(), from_json_value(value, span)?);
+            }
+            Ok(Value::Object(Rc::new(RefCell::new(map))))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -389,10 +714,18 @@ fn write_stdout(text: &str, newline: bool, span: usize) -> Result<(), RuntimeErr
 mod tests {
     use super::{format_print_args, run_builtin};
     use crate::ecscript::{
+        env::Environment,
         error::RuntimeErrorKind,
-        value::{Builtin, Value},
+        value::{Builtin, BuiltinContext, Value},
     };
     use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+    fn ctx() -> BuiltinContext<'static> {
+        BuiltinContext {
+            shell_state: None,
+            env: Box::leak(Box::new(Environment::new())),
+        }
+    }
 
     #[test]
     fn keys_are_sorted() {
@@ -401,7 +734,7 @@ mod tests {
             ("a".to_string(), Value::Int(1)),
         ])));
 
-        let result = run_builtin(Builtin::Keys, vec![Value::Object(obj)], 0).unwrap();
+        let result = run_builtin(Builtin::Keys, vec![Value::Object(obj)], 0, ctx()).unwrap();
         let Value::Array(keys) = result else {
             panic!("expected array");
         };
@@ -414,7 +747,8 @@ mod tests {
 
     #[test]
     fn env_reads_environment_variable() {
-        let result = run_builtin(Builtin::Env, vec![Value::String("PATH".into())], 0).unwrap();
+        let result =
+            run_builtin(Builtin::Env, vec![Value::String("PATH".into())], 0, ctx()).unwrap();
         assert!(matches!(result, Value::String(_)));
     }
 
@@ -424,6 +758,7 @@ mod tests {
             Builtin::Env,
             vec![Value::String("ECSH_TEST_MISSING_ENV_VAR".into())],
             0,
+            ctx(),
         )
         .unwrap();
         assert_eq!(result, Value::Nil);
@@ -431,14 +766,15 @@ mod tests {
 
     #[test]
     fn env_requires_string_argument() {
-        let err = run_builtin(Builtin::Env, vec![Value::Int(1)], 0).unwrap_err();
+        let err = run_builtin(Builtin::Env, vec![Value::Int(1)], 0, ctx()).unwrap_err();
         assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
         assert_eq!(err.message, "env expects String, got Int");
     }
 
     #[test]
     fn range_returns_closed_interval_array() {
-        let result = run_builtin(Builtin::Range, vec![Value::Int(1), Value::Int(4)], 0).unwrap();
+        let result =
+            run_builtin(Builtin::Range, vec![Value::Int(1), Value::Int(4)], 0, ctx()).unwrap();
         let Value::Array(values) = result else {
             panic!("expected array");
         };
@@ -450,7 +786,8 @@ mod tests {
 
     #[test]
     fn range_returns_empty_when_start_exceeds_end() {
-        let result = run_builtin(Builtin::Range, vec![Value::Int(4), Value::Int(1)], 0).unwrap();
+        let result =
+            run_builtin(Builtin::Range, vec![Value::Int(4), Value::Int(1)], 0, ctx()).unwrap();
         let Value::Array(values) = result else {
             panic!("expected array");
         };
@@ -459,13 +796,23 @@ mod tests {
 
     #[test]
     fn range_requires_int_arguments() {
-        let err =
-            run_builtin(Builtin::Range, vec![Value::Bool(true), Value::Int(1)], 0).unwrap_err();
+        let err = run_builtin(
+            Builtin::Range,
+            vec![Value::Bool(true), Value::Int(1)],
+            0,
+            ctx(),
+        )
+        .unwrap_err();
         assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
         assert_eq!(err.message, "range expects Int start, got Bool");
 
-        let err =
-            run_builtin(Builtin::Range, vec![Value::Int(1), Value::Bool(true)], 0).unwrap_err();
+        let err = run_builtin(
+            Builtin::Range,
+            vec![Value::Int(1), Value::Bool(true)],
+            0,
+            ctx(),
+        )
+        .unwrap_err();
         assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
         assert_eq!(err.message, "range expects Int end, got Bool");
     }
@@ -477,7 +824,7 @@ mod tests {
             ("a".to_string(), Value::Int(1)),
         ])));
 
-        let result = run_builtin(Builtin::Values, vec![Value::Object(obj)], 0).unwrap();
+        let result = run_builtin(Builtin::Values, vec![Value::Object(obj)], 0, ctx()).unwrap();
         let Value::Array(values) = result else {
             panic!("expected array");
         };
@@ -492,6 +839,7 @@ mod tests {
             Builtin::Insert,
             vec![Value::Array(arr), Value::Int(-1), Value::Int(2)],
             0,
+            ctx(),
         )
         .unwrap_err();
 
@@ -501,8 +849,13 @@ mod tests {
     #[test]
     fn remove_checks_out_of_bounds_index() {
         let arr = Rc::new(RefCell::new(vec![Value::Int(1)]));
-        let err =
-            run_builtin(Builtin::Remove, vec![Value::Array(arr), Value::Int(1)], 0).unwrap_err();
+        let err = run_builtin(
+            Builtin::Remove,
+            vec![Value::Array(arr), Value::Int(1)],
+            0,
+            ctx(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, RuntimeErrorKind::IndexOutOfBounds);
     }
@@ -514,6 +867,7 @@ mod tests {
             Builtin::Insert,
             vec![Value::Array(arr), Value::String("x".into()), Value::Int(2)],
             0,
+            ctx(),
         )
         .unwrap_err();
 
@@ -526,7 +880,7 @@ mod tests {
         let arr = Rc::new(RefCell::new(Vec::new()));
         arr.borrow_mut().push(Value::Array(arr.clone()));
 
-        let err = run_builtin(Builtin::ToJson, vec![Value::Array(arr)], 0).unwrap_err();
+        let err = run_builtin(Builtin::ToJson, vec![Value::Array(arr)], 0, ctx()).unwrap_err();
         assert_eq!(err.kind, RuntimeErrorKind::CircularReference);
         assert_eq!(
             err.message,
@@ -541,8 +895,175 @@ mod tests {
             ("a".to_string(), Value::Int(1)),
         ])));
 
-        let result = run_builtin(Builtin::ToJson, vec![Value::Object(obj)], 0).unwrap();
+        let result = run_builtin(Builtin::ToJson, vec![Value::Object(obj)], 0, ctx()).unwrap();
         assert_eq!(result, Value::String("{\"a\":1,\"b\":2}".into()));
+    }
+
+    #[test]
+    fn from_json_parses_object_and_array_values() {
+        let result = run_builtin(
+            Builtin::FromJson,
+            vec![Value::String("{\"a\":1,\"b\":[true,null]}".into())],
+            0,
+            ctx(),
+        )
+        .unwrap();
+
+        let Value::Object(obj) = result else {
+            panic!("expected object");
+        };
+        let obj = obj.borrow();
+        assert_eq!(obj.get("a"), Some(&Value::Int(1)));
+
+        let Value::Array(arr) = obj.get("b").cloned().expect("missing b") else {
+            panic!("expected array");
+        };
+        assert_eq!(*arr.borrow(), vec![Value::Bool(true), Value::Nil]);
+    }
+
+    #[test]
+    fn from_json_requires_string_argument() {
+        let err = run_builtin(Builtin::FromJson, vec![Value::Int(1)], 0, ctx()).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(err.message, "from_json expects String, got Int");
+    }
+
+    #[test]
+    fn from_json_reports_invalid_json() {
+        let err = run_builtin(
+            Builtin::FromJson,
+            vec![Value::String("{bad json}".into())],
+            0,
+            ctx(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::ParseInExpr);
+        assert!(err.message.starts_with("invalid JSON:"));
+    }
+
+    #[test]
+    fn command_builtin_builds_simple_command() {
+        let result = run_builtin(
+            Builtin::CommandBuilder,
+            vec![
+                Value::String("/bin/echo".into()),
+                Value::String("hello".into()),
+                Value::Int(42),
+                Value::Bool(true),
+            ],
+            0,
+            ctx(),
+        )
+        .unwrap();
+
+        let Value::Command(invocation) = result else {
+            panic!("expected command");
+        };
+        let crate::ecscript::value::CommandValue::Simple(command) = invocation.command else {
+            panic!("expected simple command");
+        };
+        assert_eq!(command.program.as_lit_str(), Some("/bin/echo"));
+        assert_eq!(command.args[0].as_lit_str(), Some("hello"));
+        assert_eq!(command.args[1].as_lit_str(), Some("42"));
+        assert_eq!(command.args[2].as_lit_str(), Some("true"));
+    }
+
+    #[test]
+    fn command_builtin_rejects_object_argument() {
+        let object = Value::Object(Rc::new(RefCell::new(HashMap::new())));
+        let err = run_builtin(
+            Builtin::CommandBuilder,
+            vec![Value::String("/bin/echo".into()), object],
+            0,
+            ctx(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(
+            err.message,
+            "command only accepts String, Int, Float, Bool or Nil argv parts, got Object"
+        );
+    }
+
+    #[test]
+    fn with_env_derives_command_with_merged_override() {
+        let command = Value::Command(crate::ecscript::value::CommandInvocation {
+            command: crate::ecscript::value::CommandValue::Simple(crate::types::Command {
+                program: crate::types::ShellWord::lit("printf"),
+                args: vec![crate::types::ShellWord::lit("ok")],
+                redirection: crate::types::Redirection::default(),
+            }),
+            cwd_override: None,
+            env_override: Some(std::collections::BTreeMap::from([(
+                "BASE".to_string(),
+                "1".to_string(),
+            )])),
+            stdin_override: None,
+        });
+        let env_obj = Value::Object(Rc::new(RefCell::new(HashMap::from([(
+            "EXTRA".to_string(),
+            Value::String("2".into()),
+        )]))));
+
+        let result = run_builtin(Builtin::WithEnv, vec![command, env_obj], 0, ctx()).unwrap();
+        let Value::Command(derived) = result else {
+            panic!("expected command");
+        };
+        let overrides = derived.env_override.expect("missing env override");
+        assert_eq!(overrides.get("BASE"), Some(&"1".to_string()));
+        assert_eq!(overrides.get("EXTRA"), Some(&"2".to_string()));
+    }
+
+    #[test]
+    fn with_env_rejects_non_string_values() {
+        let command = Value::Command(crate::ecscript::value::CommandInvocation {
+            command: crate::ecscript::value::CommandValue::Simple(crate::types::Command {
+                program: crate::types::ShellWord::lit("printf"),
+                args: vec![crate::types::ShellWord::lit("ok")],
+                redirection: crate::types::Redirection::default(),
+            }),
+            cwd_override: None,
+            env_override: None,
+            stdin_override: None,
+        });
+        let env_obj = Value::Object(Rc::new(RefCell::new(HashMap::from([(
+            "EXTRA".to_string(),
+            Value::Int(2),
+        )]))));
+
+        let err = run_builtin(Builtin::WithEnv, vec![command, env_obj], 0, ctx()).unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+        assert_eq!(
+            err.message,
+            "with_env expects Object<String>; key 'EXTRA' has Int"
+        );
+    }
+
+    #[test]
+    fn with_cwd_derives_command_with_override() {
+        let command = Value::Command(crate::ecscript::value::CommandInvocation {
+            command: crate::ecscript::value::CommandValue::Simple(crate::types::Command {
+                program: crate::types::ShellWord::lit("pwd"),
+                args: vec![],
+                redirection: crate::types::Redirection::default(),
+            }),
+            cwd_override: None,
+            env_override: None,
+            stdin_override: None,
+        });
+
+        let result = run_builtin(
+            Builtin::WithCwd,
+            vec![command, Value::String("/tmp".into())],
+            0,
+            ctx(),
+        )
+        .unwrap();
+        let Value::Command(derived) = result else {
+            panic!("expected command");
+        };
+        assert_eq!(derived.cwd_override.as_deref(), Some("/tmp"));
     }
 
     #[test]
@@ -559,7 +1080,7 @@ mod tests {
     #[test]
     fn env_returns_nil_for_missing_var() {
         let var = format!("ECSH_TEST_NONEXIST_{}", std::process::id());
-        let result = run_builtin(Builtin::Env, vec![Value::String(var)], 0).unwrap();
+        let result = run_builtin(Builtin::Env, vec![Value::String(var)], 0, ctx()).unwrap();
         assert_eq!(result, Value::Nil);
     }
 
@@ -570,6 +1091,7 @@ mod tests {
             Builtin::Env,
             vec![Value::String("ECSH_TEST_RUNTIME_VAR2".into())],
             0,
+            ctx(),
         )
         .unwrap();
         assert_eq!(result, Value::String("runtime".into()));
@@ -578,13 +1100,14 @@ mod tests {
 
     #[test]
     fn env_rejects_wrong_type() {
-        let err = run_builtin(Builtin::Env, vec![Value::Int(1)], 0).unwrap_err();
+        let err = run_builtin(Builtin::Env, vec![Value::Int(1)], 0, ctx()).unwrap_err();
         assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
     }
 
     #[test]
     fn range_produces_inclusive_range() {
-        let result = run_builtin(Builtin::Range, vec![Value::Int(0), Value::Int(3)], 0).unwrap();
+        let result =
+            run_builtin(Builtin::Range, vec![Value::Int(0), Value::Int(3)], 0, ctx()).unwrap();
         let Value::Array(arr) = result else {
             panic!("expected array")
         };
@@ -596,7 +1119,8 @@ mod tests {
 
     #[test]
     fn range_single_element_when_start_equals_end() {
-        let result = run_builtin(Builtin::Range, vec![Value::Int(5), Value::Int(5)], 0).unwrap();
+        let result =
+            run_builtin(Builtin::Range, vec![Value::Int(5), Value::Int(5)], 0, ctx()).unwrap();
         let Value::Array(arr) = result else {
             panic!("expected array")
         };
@@ -605,7 +1129,8 @@ mod tests {
 
     #[test]
     fn range_reversed_returns_empty() {
-        let result = run_builtin(Builtin::Range, vec![Value::Int(5), Value::Int(0)], 0).unwrap();
+        let result =
+            run_builtin(Builtin::Range, vec![Value::Int(5), Value::Int(0)], 0, ctx()).unwrap();
         let Value::Array(arr) = result else {
             panic!("expected array")
         };

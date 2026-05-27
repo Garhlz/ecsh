@@ -1,7 +1,9 @@
-use crate::ecscript::ast::Stmt;
+use crate::ecscript::{ast::Stmt, env::Environment};
+use crate::types::ShellState;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Nil,
@@ -13,6 +15,7 @@ pub enum Value {
     Object(Rc<RefCell<HashMap<String, Value>>>),
     Function(Rc<Function>),
     Builtin(Builtin),
+    Command(CommandInvocation),
 }
 
 impl Value {
@@ -27,6 +30,7 @@ impl Value {
             Value::Object(_) => "Object",
             Value::Builtin(_) => "Builtin",
             Value::Function(_) => "Function",
+            Value::Command(_) => "Command",
         }
     }
 }
@@ -67,35 +71,51 @@ pub fn validate_array_index(
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Builtin {
+    CommandBuilder,
     Env,
     Range,
     Len,
     Keys,
     Values,
     ToJson,
+    FromJson,
     Print,
     Println,
     Push,
     Pop,
     Insert,
     Remove,
+    Run,
+    Capture,
+    Text,
+    Lines,
+    WithEnv,
+    WithCwd,
 }
 
 impl Builtin {
     pub fn name(&self) -> &'static str {
         match self {
+            Builtin::CommandBuilder => "command",
             Builtin::Env => "env",
             Builtin::Range => "range",
             Builtin::Len => "len",
             Builtin::Keys => "keys",
             Builtin::Values => "values",
             Builtin::ToJson => "to_json",
+            Builtin::FromJson => "from_json",
             Builtin::Print => "print",
             Builtin::Println => "println",
             Builtin::Push => "push",
             Builtin::Pop => "pop",
             Builtin::Insert => "insert",
             Builtin::Remove => "remove",
+            Builtin::Run => "run",
+            Builtin::Capture => "capture",
+            Builtin::Text => "text",
+            Builtin::Lines => "lines",
+            Builtin::WithEnv => "with_env",
+            Builtin::WithCwd => "with_cwd",
         }
     }
 }
@@ -121,9 +141,38 @@ enum VisitKey {
     Object(*const RefCell<HashMap<String, Value>>),
 }
 
+/// 命令调用的环境/条件
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandInvocation {
+    pub command: CommandValue,
+    pub cwd_override: Option<String>,
+    pub env_override: Option<BTreeMap<String, String>>,
+    pub stdin_override: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CommandValue {
+    Simple(crate::types::Command),
+    Pipeline(crate::types::Pipeline),
+}
+
 pub fn repr_value(value: &Value) -> String {
     let mut visiting = HashSet::new();
     repr_value_inner(value, &mut visiting)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandResult {
+    pub code: i32,
+    pub signal: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u128,
+}
+
+pub struct BuiltinContext<'a> {
+    pub shell_state: Option<&'a ShellState>,
+    pub env: &'a Environment<'a>,
 }
 
 pub fn display_value(value: &Value) -> String {
@@ -183,6 +232,18 @@ fn repr_value_inner(value: &Value, visiting: &mut HashSet<VisitKey>) -> String {
             None => "<lambda>".to_string(),
         },
         Value::Builtin(builtin) => format!("<builtin {}>", builtin.name()),
+        Value::Command(invocation) => match &invocation.command {
+            CommandValue::Simple(command) => format!("<cmd {}>", command),
+            CommandValue::Pipeline(pipeline) => {
+                let rendered = pipeline
+                    .commands
+                    .iter()
+                    .map(|command| command.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                format!("<cmd {}>", rendered)
+            }
+        },
     }
 }
 

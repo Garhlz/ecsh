@@ -9,12 +9,15 @@
 //! 所有二元操作符采用左结合，通过 rposition 从右向左找到分割点来递归拆分。
 //! 错误统一通过 `ParseError` 返回。
 
+use crate::ecscript::Environment;
 use crate::ecscript::error::ParseError;
+use crate::ecscript::value::CommandValue;
 use crate::lexer::tokenize;
 use crate::types::{
     Command, OutputRedirection, ParsedJob, ParsedLine, Pipeline, Redirection, ShellState,
     ShellWord, Token,
 };
+use std::collections::HashMap;
 use std::rc::Rc;
 
 fn err(msg: impl Into<String>) -> ParseError {
@@ -153,6 +156,40 @@ fn parse_tokens(tokens: &[Token]) -> Result<ParsedLine, ParseError> {
 
     // ── 基础情况：单条命令 ──
     Ok(ParsedLine::Command(parse_tokens_to_command(tokens)?))
+}
+
+/// 解析 `cmd{ ... }` 内部的受限 shell 命令字面量。
+///
+/// 当前支持单命令、重定向和 pipeline，不支持 `&&`、`||`、`;`、`&`。
+pub fn parse_command_literal(src: &str) -> Result<CommandValue, ParseError> {
+    let state = ShellState {
+        last_status: crate::types::CommandStatus::success(),
+        interactive: false,
+        shell_pgid: None,
+        shell_terminal_fd: None,
+        jobs: Vec::new(),
+        next_job_id: 1,
+        current_fg_pgid: None,
+        script_env: Environment::new(),
+        aliases: HashMap::new(),
+        traps: HashMap::new(),
+        command_history: Vec::new(),
+    };
+    let tokens = tokenize(src, &state)?;
+    if tokens.is_empty() {
+        return Err(err("empty command literal"));
+    }
+    if tokens.iter().any(|tok| {
+        matches!(
+            tok, Token::AndIf | Token::OrIf | Token::Ampersand | Token::Semicolon
+        )
+    }) {
+        return Err(err("command literals do not support &&, ||, ;, or background &"));
+    }
+    if tokens.iter().any(|tok| matches!(tok, Token::Pipe)) {
+        return Ok(CommandValue::Pipeline(parse_pipeline(&tokens)?));
+    }
+    Ok(CommandValue::Simple(parse_tokens_to_command(&tokens)?))
 }
 
 fn parse_tokens_to_command(tokens: &[Token]) -> Result<Command, ParseError> {

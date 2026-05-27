@@ -56,6 +56,13 @@ fn run_ecsh_file_output(path: &std::path::Path) -> Output {
         .expect("failed to run ecsh script file")
 }
 
+fn example_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("ecscript")
+        .join(name)
+}
+
 fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("ecsh-{}-{}", std::process::id(), name))
 }
@@ -327,6 +334,28 @@ fn smoke_runs_ecscript_file_via_ecsh() {
 }
 
 #[test]
+fn smoke_runs_example_ecscript_files_via_ecsh() {
+    let cases = [
+        ("loop_and_accumulate.ecs", "sum"),
+        ("closures_and_state.ecs", "snapshots"),
+        ("objects_and_collections.ecs", "stat-keys"),
+        ("env_and_json.ecs", "patched-range"),
+    ];
+
+    for (name, marker) in cases {
+        let output = run_ecsh_file_output(&example_path(name));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(output.status.success(), "{name} failed, stderr: {stderr}");
+        assert!(
+            stdout.lines().any(|line| line == marker),
+            "{name} missing marker `{marker}`\nstdout:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn smoke_formats_ecscript_file_errors_via_ecsh() {
     let path = temp_path("stage7-script-error.ecs");
     std::fs::write(&path, "let x = add(1, 2;\n").expect("failed to write script");
@@ -397,7 +426,6 @@ fn smoke_supports_type_which_and_history() {
 }
 
 #[test]
-#[test]
 fn smoke_ecscript_range_builtin() {
     let output = run_ecsh_output(
         "let nums = range(0, 3); println(nums[0], nums[1], nums[2], nums[3]); exit;",
@@ -417,4 +445,117 @@ fn smoke_ecscript_env_builtin() {
 fn smoke_ecscript_nil_for_missing_env() {
     let result = run_ecsh("let x = env(\"ECSH_NOEXIST_VAR\"); println(x == nil); exit\n");
     assert!(result.contains("true"));
+}
+
+#[test]
+fn smoke_ecscript_text_and_lines_execute_command_literals() {
+    let output = run_ecsh(
+        r#"println(text(cmd{ printf "hello" }))
+println(lines(cmd{ printf "a\nb\n" }))
+exit
+"#,
+    );
+
+    assert!(output.lines().any(|line| line == "hello"));
+    assert!(output.lines().any(|line| line == "[\"a\", \"b\"]"));
+}
+
+#[test]
+fn smoke_ecscript_capture_returns_command_result() {
+    let output = run_ecsh(
+        r#"let result = capture(cmd{ sh -c "printf out; printf err 1>&2; exit 3" })
+println(result.code, result.stdout, result.stderr, result.ok)
+println(result)
+exit
+"#,
+    );
+
+    assert!(output.lines().any(|line| line == "3 out err false"));
+    assert!(output.contains("{code: 3, duration_ms:"));
+    assert!(output.contains("ok: false"));
+    assert!(output.contains("signal: nil"));
+    assert!(output.contains("stderr: \"err\""));
+    assert!(output.contains("stdout: \"out\""));
+}
+
+#[test]
+fn smoke_ecscript_run_executes_command_literal() {
+    let path = temp_path("cmd-run-out");
+    let output = run_ecsh(&format!(
+        "run(cmd{{ sh -c \"echo hi\" > {} }})\ncat {}\nexit\n",
+        path.display(),
+        path.display()
+    ));
+
+    assert!(output.lines().any(|line| line == "hi"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn smoke_ecscript_pipeline_command_literal_executes() {
+    let output = run_ecsh(
+        r#"println(text(cmd{ printf "foo" | tr o O }))
+exit
+"#,
+    );
+
+    assert!(output.lines().any(|line| line == "fOO"));
+}
+
+#[test]
+fn smoke_ecscript_command_builder_executes() {
+    let output = run_ecsh(
+        r#"println(text(command("/bin/echo", "builder-ok", 7, true)))
+exit
+"#,
+    );
+
+    assert!(output.lines().any(|line| line == "builder-ok 7 true"));
+}
+
+#[test]
+fn smoke_ecscript_command_literal_supports_pure_output_builtin() {
+    let output = run_ecsh(
+        r#"println(text(cmd{ status }))
+exit
+"#,
+    );
+
+    assert!(output.lines().any(|line| line == "0"));
+}
+
+#[test]
+fn smoke_ecscript_from_json_parses_command_output() {
+    let output = run_ecsh(
+        r#"let data = from_json(text(cmd{ printf "{\"name\":\"ecsh\",\"nums\":[1,2,3]}" }))
+println(data.name, data.nums[1])
+exit
+"#,
+    );
+
+    assert!(output.lines().any(|line| line == "ecsh 2"));
+}
+
+#[test]
+fn smoke_ecscript_with_env_derives_command_value() {
+    let output = run_ecsh(
+        r#"let proc = with_env(cmd{ sh -c 'printf %s "$ECSH_CMD_BRIDGE"' }, { ECSH_CMD_BRIDGE: "bridge-ok" })
+println(text(proc))
+exit
+"#,
+    );
+
+    assert!(output.lines().any(|line| line == "bridge-ok"));
+}
+
+#[test]
+fn smoke_ecscript_with_cwd_derives_command_value() {
+    let output = run_ecsh(
+        r#"let proc = with_cwd(cmd{ /bin/pwd }, "/tmp")
+println(text(proc))
+exit
+"#,
+    );
+
+    assert!(output.lines().any(|line| line == "/tmp"));
 }

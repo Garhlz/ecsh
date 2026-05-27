@@ -9,8 +9,9 @@ use crate::ecscript::{
     env::Environment,
     error::{EvalResult, RuntimeError, RuntimeErrorKind},
     func::{call_function, free_vars},
-    value::{Binding, Function, Value},
+    value::{Binding, BuiltinContext, CommandInvocation, Function, Value},
 };
+use crate::types::ShellState;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecFlow {
     Normal,
@@ -19,10 +20,24 @@ pub enum ExecFlow {
     Return { value: Option<Value>, span: usize },
 }
 
+#[derive(Clone, Copy)]
+struct EvalContext<'a> {
+    shell_state: Option<&'a ShellState>,
+}
+
 /// 把解析好的语句ast解析运行，返回执行流
 pub fn eval_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<ExecFlow> {
+    eval_script_with_ctx(stmts, env, None)
+}
+
+pub fn eval_script_with_ctx(
+    stmts: &[Stmt],
+    env: &Environment<'_>,
+    shell_state: Option<&ShellState>,
+) -> EvalResult<ExecFlow> {
+    let ctx = EvalContext { shell_state };
     for stmt in stmts {
-        match eval_stmt(stmt, env)? {
+        match eval_stmt_with_ctx(stmt, env, ctx)? {
             ExecFlow::Normal => continue,
             ExecFlow::Break(span) => {
                 return Err(RuntimeError::new(
@@ -52,12 +67,21 @@ pub fn eval_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<ExecFlow
 
 /// 执行顶层脚本，并在最后一条语句是表达式语句时返回它的值。
 pub fn eval_top_level_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResult<Option<Value>> {
+    eval_top_level_script_with_ctx(stmts, env, None)
+}
+
+pub fn eval_top_level_script_with_ctx(
+    stmts: &[Stmt],
+    env: &Environment<'_>,
+    shell_state: Option<&ShellState>,
+) -> EvalResult<Option<Value>> {
+    let ctx = EvalContext { shell_state };
     let Some((last, prefix)) = stmts.split_last() else {
         return Ok(None);
     };
 
     for stmt in prefix {
-        match eval_stmt(stmt, env)? {
+        match eval_stmt_with_ctx(stmt, env, ctx)? {
             ExecFlow::Normal => {}
             ExecFlow::Break(span) => {
                 return Err(RuntimeError::new(
@@ -84,8 +108,8 @@ pub fn eval_top_level_script(stmts: &[Stmt], env: &Environment<'_>) -> EvalResul
     }
 
     match &last.kind {
-        StmtKind::ExprStmt { expr } => Ok(Some(eval_expr(expr, env)?)),
-        _ => match eval_stmt(last, env)? {
+        StmtKind::ExprStmt { expr } => Ok(Some(eval_expr_with_ctx(expr, env, ctx)?)),
+        _ => match eval_stmt_with_ctx(last, env, ctx)? {
             ExecFlow::Normal => Ok(None),
             ExecFlow::Break(span) => Err(RuntimeError::new(
                 span,
@@ -115,45 +139,60 @@ pub fn eval_stmt(
     env: &Environment<'_>,
     // captures: Option<Rc<Function>>,
 ) -> Result<ExecFlow, RuntimeError> {
+    eval_stmt_with_ctx(
+        stmt,
+        env,
+        EvalContext {
+            shell_state: None,
+        },
+    )
+}
+
+fn eval_stmt_with_ctx(
+    stmt: &crate::ecscript::ast::Stmt,
+    env: &Environment<'_>,
+    ctx: EvalContext<'_>,
+) -> Result<ExecFlow, RuntimeError> {
     let span = stmt.span;
     match &stmt.kind {
         StmtKind::Let { name, expr } => {
-            let value = eval_expr(expr, env)?;
+            let value = eval_expr_with_ctx(expr, env, ctx)?;
             env.insert(name.clone(), Binding::Direct(value), span)?;
         }
         StmtKind::Assign { target, expr } => {
-            let value = eval_expr(expr, env)?;
-            assign_target(target, value, env, span)?
+            let value = eval_expr_with_ctx(expr, env, ctx)?;
+            assign_target(target, value, env, span, ctx)?
         }
         StmtKind::CompoundAssign { target, op, expr } => {
-            let target = resolve_assign_target(target, env, span)?;
+            let target = resolve_assign_target(target, env, span, ctx)?;
             let left = target.load(span)?;
-            let right = eval_expr(expr, env)?;
+            let right = eval_expr_with_ctx(expr, env, ctx)?;
             let value = eval_compound_assign(*op, left, right, span)?;
             target.store(value, span)?;
         }
         StmtKind::ExprStmt { expr } => {
-            eval_expr(expr, env)?;
+            eval_expr_with_ctx(expr, env, ctx)?;
         }
-        StmtKind::Block { stmts } => return eval_block(stmts, env),
+        StmtKind::Block { stmts } => return eval_block_with_ctx(stmts, env, ctx),
         StmtKind::If {
             cond,
             then_body,
             else_body,
         } => {
-            let cond_var = expect_bool(eval_expr(cond, env)?, span, "if condition")?;
+            let cond_var = expect_bool(eval_expr_with_ctx(cond, env, ctx)?, span, "if condition")?;
             if cond_var {
-                return eval_block(then_body, env);
+                return eval_block_with_ctx(then_body, env, ctx);
             } else {
-                return eval_block(else_body, env);
+                return eval_block_with_ctx(else_body, env, ctx);
             }
         }
         StmtKind::While { cond, body } => loop {
-            let cond_var = expect_bool(eval_expr(cond, env)?, span, "while condition")?;
+            let cond_var =
+                expect_bool(eval_expr_with_ctx(cond, env, ctx)?, span, "while condition")?;
             if !cond_var {
                 break;
             }
-            match eval_block(body, env)? {
+            match eval_block_with_ctx(body, env, ctx)? {
                 ExecFlow::Break(_) => break,
                 ExecFlow::Continue(_) => continue,
                 ExecFlow::Normal => {}
@@ -165,14 +204,14 @@ pub fn eval_stmt(
             iterable,
             body,
         } => {
-            let coll = eval_expr(iterable, env)?;
+            let coll = eval_expr_with_ctx(iterable, env, ctx)?;
             match coll {
                 Value::Array(arr) => {
                     let items: Vec<Value> = arr.borrow().clone();
                     for value in items {
                         let new_env = Environment::new_child(env);
                         new_env.insert(var.clone(), Binding::Direct(value), span)?;
-                        match eval_block(body, &new_env)? {
+                        match eval_block_with_ctx(body, &new_env, ctx)? {
                             ExecFlow::Break(_) => break,
                             ExecFlow::Continue(_) => continue,
                             ExecFlow::Normal => {}
@@ -186,7 +225,7 @@ pub fn eval_stmt(
                     for key in keys {
                         let new_env = Environment::new_child(env);
                         new_env.insert(var.clone(), Binding::Direct(Value::String(key)), span)?;
-                        match eval_block(body, &new_env)? {
+                        match eval_block_with_ctx(body, &new_env, ctx)? {
                             ExecFlow::Break(_) => break,
                             ExecFlow::Continue(_) => continue,
                             ExecFlow::Normal => {}
@@ -212,8 +251,12 @@ pub fn eval_stmt(
                 end,
                 inclusive,
             } = range;
-            let start = expect_int(eval_expr(start, env)?, span, "for range start")?;
-            let end = expect_int(eval_expr(end, env)?, span, "for range end")?;
+            let start = expect_int(
+                eval_expr_with_ctx(start, env, ctx)?,
+                span,
+                "for range start",
+            )?;
+            let end = expect_int(eval_expr_with_ctx(end, env, ctx)?, span, "for range end")?;
             let iterator: Box<dyn Iterator<Item = i64>> = if *inclusive {
                 Box::new(start..=end)
             } else {
@@ -222,7 +265,7 @@ pub fn eval_stmt(
             for i in iterator {
                 let new_env = Environment::new_child(env);
                 new_env.insert(var.clone(), Binding::Direct(Value::Int(i)), span)?;
-                match eval_block(body, &new_env)? {
+                match eval_block_with_ctx(body, &new_env, ctx)? {
                     ExecFlow::Break(_) => break,
                     ExecFlow::Continue(_) => continue,
                     ExecFlow::Normal => {}
@@ -263,7 +306,7 @@ pub fn eval_stmt(
         }
         StmtKind::Return { value } => {
             if let Some(return_expr) = value {
-                let return_value = eval_expr(return_expr, env)?;
+                let return_value = eval_expr_with_ctx(return_expr, env, ctx)?;
                 return Ok(ExecFlow::Return {
                     value: Some(return_value),
                     span,
@@ -276,13 +319,14 @@ pub fn eval_stmt(
     Ok(ExecFlow::Normal)
 }
 
-fn eval_block(
+fn eval_block_with_ctx(
     stmts: &[crate::ecscript::ast::Stmt],
     env: &Environment<'_>,
+    ctx: EvalContext<'_>,
 ) -> Result<ExecFlow, RuntimeError> {
     let new_env = Environment::new_child(env);
     for stmt in stmts {
-        match eval_stmt(stmt, &new_env)? {
+        match eval_stmt_with_ctx(stmt, &new_env, ctx)? {
             ExecFlow::Normal => continue,
             flow => return Ok(flow),
         };
@@ -392,6 +436,7 @@ fn resolve_assign_target<'a>(
     target: &AssignTarget,
     env: &'a Environment<'a>,
     span: usize,
+    ctx: EvalContext<'_>,
 ) -> EvalResult<ResolvedAssignTarget<'a>> {
     match target {
         AssignTarget::Name(name) => Ok(ResolvedAssignTarget::Name {
@@ -399,7 +444,7 @@ fn resolve_assign_target<'a>(
             env,
         }),
         AssignTarget::Field { object, field } => {
-            let base_val = eval_expr(object, env)?;
+            let base_val = eval_expr_with_ctx(object, env, ctx)?;
             let Value::Object(obj) = base_val else {
                 return Err(RuntimeError::new(
                     span,
@@ -417,8 +462,8 @@ fn resolve_assign_target<'a>(
             })
         }
         AssignTarget::Index { object, index } => {
-            let base_val = eval_expr(object, env)?;
-            let index_val = eval_expr(index, env)?;
+            let base_val = eval_expr_with_ctx(object, env, ctx)?;
+            let index_val = eval_expr_with_ctx(index, env, ctx)?;
 
             match (base_val, index_val) {
                 (Value::Array(arr), Value::Int(i)) => {
@@ -476,8 +521,9 @@ fn assign_target(
     value: Value,
     env: &Environment<'_>,
     span: usize,
+    ctx: EvalContext<'_>,
 ) -> EvalResult<()> {
-    let target = resolve_assign_target(target, env, span)?;
+    let target = resolve_assign_target(target, env, span, ctx)?;
     target.store(value, span)
 }
 
@@ -497,6 +543,20 @@ fn eval_compound_assign(
 }
 
 pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
+    eval_expr_with_ctx(
+        expr,
+        env,
+        EvalContext {
+            shell_state: None,
+        },
+    )
+}
+
+fn eval_expr_with_ctx(
+    expr: &Expr,
+    env: &Environment<'_>,
+    ctx: EvalContext<'_>,
+) -> EvalResult<Value> {
     let span = expr.span;
     match &expr.kind {
         ExprKind::Literal(lit) => match lit {
@@ -509,7 +569,7 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
         ExprKind::Variable(name) => env.get(name, span),
         ExprKind::Prefix(oper, right) => match oper {
             PrefixOper::Neg => {
-                let val = eval_expr(right, env)?;
+                let val = eval_expr_with_ctx(right, env, ctx)?;
                 if let Value::Int(int_val) = val {
                     Ok(Value::Int(-int_val))
                 } else if let Value::Float(float_val) = val {
@@ -523,7 +583,7 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
                 }
             }
             PrefixOper::Not => {
-                let val = eval_expr(right, env)?;
+                let val = eval_expr_with_ctx(right, env, ctx)?;
                 if let Value::Bool(bool_val) = val {
                     Ok(Value::Bool(!bool_val))
                 } else {
@@ -536,12 +596,12 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
             }
         },
         ExprKind::Infix(left, oper, right) => {
-            let left_val = eval_expr(left, env)?;
+            let left_val = eval_expr_with_ctx(left, env, ctx)?;
             match oper {
-                InfixOper::And => eval_and_short_circuit(left_val, right, env, span),
-                InfixOper::Or => eval_or_short_circuit(left_val, right, env, span),
+                InfixOper::And => eval_and_short_circuit(left_val, right, env, span, ctx),
+                InfixOper::Or => eval_or_short_circuit(left_val, right, env, span, ctx),
                 _ => {
-                    let right_val = eval_expr(right, env)?;
+                    let right_val = eval_expr_with_ctx(right, env, ctx)?;
                     match oper {
                         InfixOper::Add => eval_add(left_val, right_val, span),
                         InfixOper::Sub => eval_sub(left_val, right_val, span),
@@ -562,7 +622,7 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
         ExprKind::Array(vec_expr) => {
             let mut values = Vec::new();
             for expr in vec_expr {
-                let val = eval_expr(expr, env)?;
+                let val = eval_expr_with_ctx(expr, env, ctx)?;
                 values.push(val);
             }
             let arr_val = Value::Array(Rc::new(RefCell::new(values)));
@@ -571,14 +631,14 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
         ExprKind::Object(hashmap_expr) => {
             let mut hash_map = HashMap::new();
             for (name, value) in hashmap_expr {
-                let right_val = eval_expr(value, env)?;
+                let right_val = eval_expr_with_ctx(value, env, ctx)?;
                 hash_map.insert(name.clone(), right_val);
             }
             Ok(Value::Object(Rc::new(RefCell::new(hash_map))))
         }
         ExprKind::Index(base, index_expr) => {
-            let base_val = eval_expr(base, env)?;
-            let index_val = eval_expr(index_expr, env)?;
+            let base_val = eval_expr_with_ctx(base, env, ctx)?;
+            let index_val = eval_expr_with_ctx(index_expr, env, ctx)?;
 
             match (base_val, index_val) {
                 (Value::Array(arr), Value::Int(i)) => {
@@ -639,7 +699,7 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
             }
         }
         ExprKind::Field(obj, name) => {
-            let obj_val = eval_expr(obj, env)?;
+            let obj_val = eval_expr_with_ctx(obj, env, ctx)?;
             let Value::Object(obj) = obj_val else {
                 return Err(RuntimeError::new(
                     span,
@@ -657,10 +717,10 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
             })
         }
         ExprKind::Call(name_expr, args_expr) => {
-            let callee = eval_expr(name_expr, env)?;
+            let callee = eval_expr_with_ctx(name_expr, env, ctx)?;
             let mut args = Vec::new();
             for arg_expr in args_expr {
-                let arg = eval_expr(arg_expr, env)?;
+                let arg = eval_expr_with_ctx(arg_expr, env, ctx)?;
                 args.push(arg);
             }
 
@@ -672,7 +732,15 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
                         return Ok(Value::Nil);
                     }
                 }
-                Value::Builtin(builtin) => run_builtin(builtin, args, span),
+                Value::Builtin(builtin) => run_builtin(
+                    builtin,
+                    args,
+                    span,
+                    BuiltinContext {
+                        shell_state: ctx.shell_state,
+                        env,
+                    },
+                ),
                 other => Err(RuntimeError::new(
                     span,
                     RuntimeErrorKind::NotCallable,
@@ -707,6 +775,12 @@ pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
 
             Ok(Value::Function(Rc::new(func)))
         }
+        ExprKind::CommandLiteral(command) => Ok(Value::Command(CommandInvocation {
+            command: command.clone(),
+            cwd_override: None,
+            env_override: None,
+            stdin_override: None,
+        })),
     }
 }
 
@@ -942,11 +1016,12 @@ fn eval_and_short_circuit(
     right: &Expr,
     env: &Environment<'_>,
     span: usize,
+    ctx: EvalContext<'_>,
 ) -> EvalResult<Value> {
     match left {
         Value::Bool(false) => Ok(Value::Bool(false)),
         Value::Bool(true) => {
-            let right = eval_expr(right, env)?;
+            let right = eval_expr_with_ctx(right, env, ctx)?;
             match right {
                 Value::Bool(value) => Ok(Value::Bool(value)),
                 _ => Err(RuntimeError::new(
@@ -972,11 +1047,12 @@ fn eval_or_short_circuit(
     right: &Expr,
     env: &Environment<'_>,
     span: usize,
+    ctx: EvalContext<'_>,
 ) -> EvalResult<Value> {
     match left {
         Value::Bool(true) => Ok(Value::Bool(true)),
         Value::Bool(false) => {
-            let right = eval_expr(right, env)?;
+            let right = eval_expr_with_ctx(right, env, ctx)?;
             match right {
                 Value::Bool(value) => Ok(Value::Bool(value)),
                 _ => Err(RuntimeError::new(

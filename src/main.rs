@@ -3,7 +3,7 @@
 use ecsh::diagnostics::print_error;
 use ecsh::ecscript::{
     Environment, ParseError, RuntimeError, RuntimeErrorKind, Stmt, Value, display_value,
-    eval_top_level_script, parse_top_level_script, repl_output_needs_newline,
+    eval_top_level_script_with_ctx, parse_top_level_script, repl_output_needs_newline,
     reset_repl_output_state, run_script_file as run_ecscript_file,
 };
 use ecsh::executor::{init_shell_job_control, reap_background_jobs, run_command, run_pipeline};
@@ -313,7 +313,8 @@ fn run_top_level_input(
         }
         TopLevelInput::Ecscript(stmts) => {
             reset_repl_output_state();
-            if let Some(value) = eval_top_level_script(&stmts, &state.script_env)?
+            if let Some(value) =
+                eval_top_level_script_with_ctx(&stmts, &state.script_env, Some(&*state))?
                 && !matches!(value, Value::Nil)
             {
                 println!("{}", display_value(&value));

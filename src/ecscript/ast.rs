@@ -1,3 +1,4 @@
+use super::value::CommandValue;
 /// 语句内容（不含位置信息），可直接 derive PartialEq。
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
@@ -149,6 +150,8 @@ pub enum ExprKind {
         params: Vec<String>,
         body: Vec<Stmt>,
     },
+
+    CommandLiteral(CommandValue),
 }
 
 #[derive(Debug, Clone, PartialEq)]

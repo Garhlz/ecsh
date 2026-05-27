@@ -232,6 +232,9 @@ fn visit_expr(expr: &Expr, stack: &Vec<HashSet<String>>, free_set: &mut HashSet<
             // 内层 lambda 里的 x 不属于外层函数的自由变量，而属于内层 lambda 的自由变量
             return;
         }
+        ExprKind::CommandLiteral(_) => {
+            return;
+        }
         ExprKind::Literal(_) => {
             // 字面量当然无需理会
             return;
