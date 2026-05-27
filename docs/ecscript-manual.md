@@ -17,8 +17,9 @@
 - 数组 / 对象字面量
 - 字段访问、索引访问
 - 字段赋值、索引赋值
-- 全局 builtin：`env` / `range` / `len` / `print` / `println` / `push` / `pop` / `insert` / `remove` / `keys` / `values` / `to_json` / `from_json`
+- 全局 builtin：`env` / `range` / `len` / `print` / `println` / `push` / `pop` / `insert` / `remove` / `slice` / `keys` / `values` / `to_json` / `from_json`
 - 命令桥：`cmd{ ... }` / `command(...)` / `run` / `capture` / `text` / `lines` / `with_env` / `with_cwd`
+- 值流原语：`map` / `filter` / `reduce` / `each` / `any` / `all` / `find` / `join`
 - `if / else if / else`
 - `while`
 - `for in`：遍历数组 / 对象 key / 区间
@@ -48,6 +49,7 @@
 - `ecsh` 已经会在运行时调用 `ecscript` 表达式求值，支撑 `${expr}` 和 `${...arr}`
 - `ecsh` 顶层输入已经接入“shell 模式 / script 模式”分派，`.ecs` 文件、`source` / `.`、`.ecshrc` 都复用同一套 ecscript 文件执行入口
 - `ecscript` 现在也可以通过 `cmd{ ... }` 结构化命令字面量进入 shell 命令桥，再由 `run` / `capture` / `text` / `lines` 消费执行
+- `ecscript` 现在支持 `|>` 值流语法糖：`x |> f(a, b)` 等价于 `f(x, a, b)`
 - 命令桥当前也支持单命令纯输出 shell builtin；pipeline 内 builtin 仍未接通
 
 ### 已知边界（非 bug）
@@ -186,6 +188,7 @@ let pattern = r"\d+\.\d+";
 | 算术 | `+` `-` `*` `/` `%` |
 | 比较 | `==` `!=` `<` `>` `<=` `>=` |
 | 逻辑 | `&&` `\|\|` `!` |
+| 值流 | `\|>` |
 
 单独的 `&` 或 `|` 会报错并提示使用 `&&` 或 `||`。
 
@@ -347,6 +350,7 @@ block 仍然是 statement block，不是 expression block。
 | 比较 | `==` `!=` `<` `>` `<=` `>=` | 左结合 |
 | 逻辑与 | `&&` | 左结合 |
 | 逻辑或 | `\|\|` | 左结合 |
+| 值流 | `\|>` | 左结合 |
 | 区间 | `..` `..=` | 左结合 |
 
 示例：
@@ -589,6 +593,7 @@ for i in 0..=3 { ... }
 
 ```ecs
 range(0, 3)   // => [0, 1, 2, 3]
+slice(range(0, 5), 1, 4) // => [1, 2, 3]
 ```
 
 ### 9.5 builtin
@@ -604,9 +609,18 @@ range(0, 3)   // => [0, 1, 2, 3]
 | `pop(arr)` | 弹出尾元素 | 空数组返回 `nil` |
 | `insert(arr, i, v)` | 在位置 `i` 插入 | `i == len` 合法 |
 | `remove(arr, i)` | 删除并返回位置 `i` 的元素 | 越界报错 |
+| `slice(arr, start, end)` | 返回半开区间子数组 | 结果是 `arr[start..end)` |
 | `keys(obj)` | 返回对象 key 数组 | 按 key 排序 |
 | `values(obj)` | 返回对象 value 数组 | 顺序与排序后的 key 一致 |
 | `to_json(x)` | 转成 JSON 字符串 | 对象 key 排序；检测循环引用 |
+| `map(arr, func)` | 对数组逐项映射 | 缺失 `return` 视为 `nil` |
+| `filter(arr, func)` | 只保留谓词为 `true` 的元素 | 回调必须返回 `Bool` |
+| `reduce(arr, init, func)` | 左折叠 | 回调接收 `(acc, x)` |
+| `each(arr, func)` | 逐项执行回调 | 返回 `nil` |
+| `any(arr, func)` | 存在量词 | 回调必须返回 `Bool` |
+| `all(arr, func)` | 全称量词 | 回调必须返回 `Bool` |
+| `find(arr, func)` | 返回首个匹配元素 | 没有匹配时返回 `nil` |
+| `join(arr, sep)` | 按 display 文本连接数组元素 | `sep` 必须是 `String` |
 
 ---
 

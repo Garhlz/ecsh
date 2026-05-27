@@ -45,6 +45,7 @@ cargo test
 - `ecscript` stage 1-6：表达式、语句、数组/对象、控制流、函数/闭包、独立解释器入口、源码定位错误格式化、`env()` / `range()`
 - 阶段 7：`ecsh` 顶层脚本模式、`ecsh file.ecs`、`source` / `.`、`.ecshrc` 已接通
 - 阶段 8：`cmd{ ... }` 命令字面量、`command(...)` builder、`run` / `capture` / `text` / `lines`、`from_json`、`with_env` / `with_cwd` 已接通；单命令纯输出 builtin 也可走命令桥
+- 阶段 9（进行中）：`|>` 值流语法糖、`map` / `filter` / `reduce` / `each` / `any` / `all` / `find` / `join`、`slice`
 - 阶段 7.5：shell 诊断与交互收口已完成，当前已具备结构化 `ParseError`、续行读取和 shell parse 错误定位输出
 
 当前仍未完成：
@@ -91,6 +92,7 @@ println(fact(5));
 println(text(cmd{ printf "hello" }));
 println(text(command("/bin/echo", "builder", 7, true)));
 println(from_json(text(cmd{ printf "{\"ok\":true}" })).ok);
+println(range(1, 5) |> filter((x) => x > 2) |> map((x) => x * 10) |> join(","));
 ```
 
 ## 文档
