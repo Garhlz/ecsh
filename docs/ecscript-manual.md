@@ -17,7 +17,8 @@
 - 数组 / 对象字面量
 - 字段访问、索引访问
 - 字段赋值、索引赋值
-- 全局 builtin：`env` / `range` / `len` / `print` / `println` / `push` / `pop` / `insert` / `remove` / `keys` / `values` / `to_json`
+- 全局 builtin：`env` / `range` / `len` / `print` / `println` / `push` / `pop` / `insert` / `remove` / `keys` / `values` / `to_json` / `from_json`
+- 命令桥：`cmd{ ... }` / `command(...)` / `run` / `capture` / `text` / `lines` / `with_env` / `with_cwd`
 - `if / else if / else`
 - `while`
 - `for in`：遍历数组 / 对象 key / 区间
@@ -35,7 +36,6 @@
 
 当前未实现：
 
-- shell 集成后的正式脚本入口
 - block value / 尾表达式返回值
 - 模块系统
 - 字符串插值 / 多行字符串等更完整的字符串系统
@@ -47,6 +47,8 @@
 - `ecscript` 已经可以独立运行：REPL、文件执行、`-e`、stdin 都可用
 - `ecsh` 已经会在运行时调用 `ecscript` 表达式求值，支撑 `${expr}` 和 `${...arr}`
 - `ecsh` 顶层输入已经接入“shell 模式 / script 模式”分派，`.ecs` 文件、`source` / `.`、`.ecshrc` 都复用同一套 ecscript 文件执行入口
+- `ecscript` 现在也可以通过 `cmd{ ... }` 结构化命令字面量进入 shell 命令桥，再由 `run` / `capture` / `text` / `lines` 消费执行
+- 命令桥当前也支持单命令纯输出 shell builtin；pipeline 内 builtin 仍未接通
 
 ### 已知边界（非 bug）
 

@@ -86,7 +86,7 @@ echo ${env("HOME")}  # → /home/elaine（强取环境变量）
 
 **兼容性取舍**：`ecsh` 不以 bash 语法兼容为硬约束。`${expr}` 优先服务 ecscript 表达式嵌入，环境变量通过 `env("NAME")` 或后续 `std.env.get("NAME")` 显式访问。
 
-**argv 展开暂缓**：普通 shell word 里不急着支持 `${...arr}`。复合值进入 shell 时先使用显式转换，例如 `${join(files, " ")}`、`${to_json(obj)}`，后续有 `|>` 后可以写成 `${files |> join(" ")}`。真正的多 argv 展开优先放在命令构造层处理，例如 `cmd("rustfmt", ...files)`。
+**argv 展开暂缓**：普通 shell word 里不急着支持 `${...arr}`。复合值进入 shell 时先使用显式转换，例如 `${join(files, " ")}`、`${to_json(obj)}`，后续有 `|>` 后可以写成 `${files |> join(" ")}`。真正的多 argv 展开优先放在命令构造层处理，例如后续的 `command("rustfmt", ...files)` 一类 builder。
 
 ### 块语法：`{}`
 
@@ -146,7 +146,7 @@ echo Hello $HOME ${x + 1}
   → argv: ["echo", "Hello", "/home/elaine", "11"]
 ```
 
-多 argv 展开暂不放进 `ShellWord` 的目标模型。需要展开参数时，优先在 `cmd(...)` 这类命令值构造函数里使用 `...args`。
+多 argv 展开暂不放进 `ShellWord` 的目标模型。需要展开参数时，优先放在命令值构造层；若后续确有需要，再引入 `command(...)` 这类 builder 并在其中使用 `...args`。
 
 ---
 
@@ -799,7 +799,7 @@ echo ${to_json(data)} | jq .name
 **后续可继续做**
 - [ ] 语法收紧：将 `$[expr]` 迁移为 `${expr}`，`$[]` 作为过渡兼容语法再评估是否移除
 - [ ] 环境变量强制读取从 `${VAR}` 迁移到 `${env("VAR")}` / 未来 `std.env.get("VAR")`
-- [ ] 将 shell word 里的 `$[...arr]` / `${...arr}` 从目标语法中降级为后续可评估糖；多 argv 展开优先放在 `cmd("x", ...args)` 这类命令构造入口
+- [ ] 将 shell word 里的 `$[...arr]` / `${...arr}` 从目标语法中降级为后续可评估糖；多 argv 展开优先放在命令值构造层，必要时再引入 `command("x", ...args)` 一类入口
 - [ ] 调用参数展开 `...expr` grammar
 - [x] `launch.rs` 前的执行路径已统一接入运行时展开（包含 builtin / external / pipeline / redirection）
 - [x] $[...arr] spread 的端到端验证（旧语法）
@@ -873,7 +873,7 @@ echo ${to_json(data)} | jq .name
 - [x] **更多内置命令** — `type`、`which`、`history` 已接入
 - [ ] **更多内置命令** — `read`、`shift`
 
-### 阶段 8：命令值与结构化执行桥
+### 阶段 8：命令值与结构化执行桥（进行中）
 
 **目标**：把 `ecscript -> shell` 的方向补成稳定接口。这个阶段不追求让语言吞掉 shell，而是提供结构化命令值、明确的执行函数和可检查的命令结果。
 
@@ -881,29 +881,51 @@ echo ${to_json(data)} | jq .name
 
 这一阶段的 ROI 高于继续补传统 shell 语义：它直接决定 `ecscript` 是否能成为可用的 shell 脚本语言，而不只是 shell 里的表达式求值器。
 
-**本阶段要做的事**
+**本阶段实现顺序**
 
-- [ ] 新增 `Value::Command` / `Value::CommandResult`，命令值按 argv / cwd / env / stdin 等结构保存
-- [ ] 实现 `cmd(...)` 函数：以 argv-first 方式构造命令值，避免字符串拼接和 quoting 问题
-- [ ] 实现 `cmd{ ... }` 结构化命令字面量：内部走 shell lexer/parser，外部仍是 ecscript AST
-- [ ] 实现 `run(cmd)`：继承当前终端执行，返回状态对象
-- [ ] 实现 `capture(cmd)`：捕获 stdout / stderr / code / signal / duration
-- [ ] 实现 `text(cmd)`、`lines(cmd)`、`json(cmd)`：覆盖最常见的脚本消费方式
-- [ ] 实现 `with_env(cmd, obj)`、`with_cwd(cmd, path)`：以不可变派生方式调整命令值
-- [ ] 明确命令失败和语言错误的边界：非零退出码不是 `RuntimeError`，除非调用的是显式失败即报错的 API
+### 第一批：最小闭环
+
+- [x] 新增 `Value::Command`，命令值按 argv / cwd / env / stdin 等结构保存
+- [x] 内部保留 `CommandResult` 结构，供执行桥收集 `code` / `signal` / `stdout` / `stderr` / `duration`
+- [x] 实现 `cmd{ ... }` 结构化命令字面量：内部走 shell lexer/parser，外部仍是 ecscript AST
+- [x] `cmd{ ... }` 当前支持单条命令、重定向和 pipeline；仍不支持 `&&` / `||` / `;` / `&`
+- [x] 实现 `run(cmd)`：继承当前终端执行
+- [x] 实现 `capture(cmd)`：捕获 stdout / stderr / code / signal / duration
+- [x] 明确命令失败和语言错误的边界：
+      进程启动失败属于 `RuntimeError`；
+      `capture(cmd)` 的非零退出码保留为普通结果；
+      `run(cmd)` / `text(cmd)` / `lines(cmd)` 的非零退出码提升成语言错误
+
+### 第二批：高频消费接口
+
+- [x] 实现 `text(cmd)`、`lines(cmd)`：覆盖最常见的脚本消费方式
+- [x] `run(cmd)` 默认失败即报错；`capture(cmd)` 返回普通对象结果
+- [x] 推荐 JSON 命令消费组合：`from_json(text(cmd{ ... }))`
+
+### 第三批：派生与扩展
+
+- [x] 实现 `with_env(cmd, obj)`、`with_cwd(cmd, path)`：以不可变派生方式调整命令值
+- [x] 对需要动态拼 argv 的场景，提供与 `cmd{}` 不撞名的 builder：`command(...)`
+
+**暂不做**
+
+- [ ] 不提供同名 `cmd()` 函数，避免和 `cmd{ ... }` 同时占用 `cmd` 这一语义入口
+- [ ] 不让 `cmd{ ... }` 自动执行；它只构造命令值
 
 **测试重点**
 
-- [ ] `cmd("git", "status")` 不经过 shell 字符串解析
-- [ ] `cmd{ git status --short }` 能得到结构化命令值
-- [ ] `text(...)` / `lines(...)` / `json(...)` 的成功和失败路径
-- [ ] `with_env` / `with_cwd` 不污染当前 shell 全局状态
-- [ ] `run(cmd{ false })` 的退出码作为普通结果返回
+- [x] `cmd{ git status --short }` 能得到结构化命令值
+- [x] `cmd{ ... }` 在 `&&` / `||` / `;` / `&` 子集外给出明确 parse error
+- [x] `text(...)` / `lines(...)` 的成功和失败路径
+- [x] `with_env` / `with_cwd` 不污染当前 shell 全局状态
+- [x] `capture(cmd{ false })` 的退出码作为普通结果返回
+- [x] `run(cmd{ false })` 的失败即报错路径
 
 **完成标准**
 
-- [ ] `ecscript` 可以用结构化方式运行外部命令、读取输出、检查状态
-- [ ] `cmd{}`、`cmd("x", ...args)` 和 shell word 展开规则能够自然配合
+- [x] `ecscript` 可以用结构化方式运行外部命令、读取输出、检查状态
+- [x] `cmd{}` 与 shell word 展开规则能够自然配合
+- [x] `command(...)` 作为 builder 与 `cmd{}` 分工清楚，不复用同名入口
 
 ### 阶段 9：值流与脚本标准库核心
 
@@ -970,17 +992,33 @@ complete("git", func(ctx) {
 - [ ] 可以用 `.ecs` 模块实现一个最小 zoxide / direnv / starship adapter 原型
 - [ ] 用户配置可以写成：`use zoxide as zoxide; zoxide.init()`
 
-### 阶段 11：外部命令元数据与适配层
+### 阶段 11：调用元信息与外部命令适配层
 
-**目标**：借鉴 Nushell extern 和 fish completion，把外部命令从“PATH 里的黑盒程序”逐步纳入 `ecsh` 的 help、completion 和脚本工具链。
+**目标**：借鉴 Nushell extern 和 fish completion，把外部命令从“PATH 里的黑盒程序”逐步纳入 `ecsh` 的 help、completion 和脚本工具链；同时在不引入完整类型系统的前提下，为 builtin、命令桥和扩展点补上一层统一的调用元信息与参数 shape。
 
 **本阶段要做的事**
 
+- [ ] 设计最小 `Shape` / `CallableMeta` 模型：
+      名称、参数个数、参数名、参数 shape、返回 shape、summary
+- [ ] 先只做内部元数据，不新增语言表面语法
+- [ ] 先覆盖现有 ecscript builtin：
+      `env`、`range`、`len`、`to_json`、`keys`、`values`、`push`、`pop`、`insert`、`remove`、`print`、`println`
+- [ ] 用统一元数据生成更清楚的 arity/type mismatch 错误，而不是每个 builtin 各自手写文案
+- [ ] 为命令桥预留 shape：
+      `run(cmd)`、`capture(cmd)`、`text(cmd)`、`lines(cmd)`、`with_env(cmd, obj)`、`with_cwd(cmd, path)`
+- [ ] 为 shell 扩展点预留 shape：
+      `hook(name, func)`、`complete(name, func)`、`prompt(func)`、`bind(key, func)`
 - [ ] 设计 `external(...)` / `extern(...)` 元数据对象
 - [ ] 支持为外部命令声明 subcommand、flag、参数补全和简短 help
 - [ ] 将 extern 元数据接入 `type` / `which` / `help` / completion
 - [ ] 为常见工具写 adapter 示例：`git`、`cargo`、`zoxide`、`direnv`
 - [ ] 支持按模块加载 extern 描述，避免硬编码进 shell 本体
+
+**推荐的 shape 粒度**
+
+- [ ] 值种类级：`Int`、`Float`、`Bool`、`String`、`Nil`、`Array`、`Object`、`Function`、`Command`、`CommandResult`
+- [ ] 结构约束级：`Array<String>`、`CompletionContext`、`CompletionItem`、`HookContext`
+- [ ] 暂不做接口 / trait / protocol；先不引入行为类型系统
 
 **示例形态**
 
@@ -996,8 +1034,11 @@ pub let git = external({
 
 **完成标准**
 
+- [ ] 现有 ecscript builtin 已经有统一的参数 shape 描述
+- [ ] 新增 API 不再需要散落的手写 usage/type error 文案
 - [ ] 外部命令可以拥有脚本定义的补全和 help 信息
 - [ ] adapter 仍然只是模块能力，不改变 `execvp` 的基础执行模型
+- [ ] 这套元数据能自然扩展到命令桥、completion 和 extern/adapter，而无需先引入完整类型系统
 
 ### 阶段 12：Shell 语义补完
 
@@ -1105,15 +1146,15 @@ let calc = "result: ${1 + 2}"    # → "result: 3"
 ### 五、命令值与运行函数
 
 ```sh
-let c = cmd("gcc", "-O2", "main.c")
+let c = command("gcc", "-O2", "main.c")
 let r = run(c)
 # r = { code: 0, stdout: "", stderr: "", ok: true }
 ```
 
-- `cmd(...)` 构造结构化命令值，不直接执行
+- `command(...)` 仅作为后续可选 builder，构造结构化命令值，不直接执行
 - `run(cmd)` / `capture(cmd)` / `text(cmd)` / `lines(cmd)` 负责执行与结果转换
 - 命令值默认按 argv 结构保存，避免字符串拼接和 shell quoting 问题
-- 数组展开：`cmd("echo", ...args)` 属于命令构造层的 argv 展开，不属于普通 shell word 插值
+- 数组展开：`command("echo", ...args)` 属于命令构造层的 argv 展开，不属于普通 shell word 插值
 - 需要 shell 管道、重定向或复杂命令编排时，优先使用后续的 `cmd{ ... }` 结构化命令字面量
 
 ### 六、`for` 循环语义
@@ -1187,7 +1228,7 @@ let files = lines(cmd{ git ls-files })
 - `cmd{ ... }` 只构造命令值，不立即执行
 - `cmd{ ... }` 内部走 shell lexer/parser，外部仍是 `ecscript` AST
 - 初始版本可以只支持单条命令，后续再扩展到 pipeline / redirection
-- 内部 shell word 继续沿用 `${expr}` 表达式桥接；多 argv 展开优先由 `cmd("x", ...args)` 处理
+- 内部 shell word 继续沿用 `${expr}` 表达式桥接；多 argv 展开优先由后续可选的 `command("x", ...args)` 处理
 - 返回值应是结构化对象，而不是字符串
 
 概念上，`cmd{}` 是第三个桥接点：
@@ -1202,7 +1243,8 @@ let files = lines(cmd{ git ls-files })
 - `capture(cmd)`：捕获 stdout/stderr/code
 - `text(cmd)`：返回 stdout 字符串
 - `lines(cmd)`：返回 stdout 行数组
-- `json(cmd)`：将 stdout 解析为 JSON 值
+- `command(program, arg1, ...)`：以 argv-first 方式程序化构造命令值
+- `from_json(text(cmd{ ... }))`：将 stdout 解析为 JSON 值
 - `with_env(cmd, obj)` / `with_cwd(cmd, path)`：派生命令值
 
 ### `|>`：ecscript 内部值流
@@ -1244,7 +1286,7 @@ let targets =
     |> filter(func(x) { ends_with(x, ".rs") })
     |> filter(func(x) { !contains(x, "target/") })
 
-run(cmd("rustfmt", ...targets))
+run(cmd{ rustfmt ${...targets} })
 ```
 
 这条链路保持了清晰边界：
@@ -1252,7 +1294,7 @@ run(cmd("rustfmt", ...targets))
 - `cmd{ ... }` 从语言进入 shell 命令值
 - `lines(...)` 把命令 stdout 显式转换为 `Array<String>`
 - `|>` 在语言内部处理值
-- `cmd("rustfmt", ...targets)` 再把值数组显式展开回 shell argv
+- 如后续确有需要，可通过 `command("rustfmt", ...targets)` 这类 builder 把值数组显式展开回 shell argv
 
 后续 Iterator / Stream 可以作为第二阶段设计：
 
