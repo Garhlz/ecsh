@@ -559,3 +559,15 @@ exit
 
     assert!(output.lines().any(|line| line == "/tmp"));
 }
+
+#[test]
+fn smoke_ecscript_pipe_forward_chains_array_functions() {
+    let output = run_ecsh(
+        r#"let xs = range(1, 5)
+println(xs |> filter((x) => x > 2) |> map((x) => x * 10) |> join(","))
+exit
+"#,
+    );
+
+    assert!(output.lines().any(|line| line == "30,40,50"));
+}

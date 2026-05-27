@@ -1,5 +1,6 @@
 use crate::ecscript::{
     error::{RuntimeError, RuntimeErrorKind},
+    func::call_function,
     io_state,
     value::{Builtin, BuiltinContext, Value, display_value},
 };
@@ -26,6 +27,7 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
         "pop" => Some(Builtin::Pop),
         "insert" => Some(Builtin::Insert),
         "remove" => Some(Builtin::Remove),
+        "slice" => Some(Builtin::Slice),
         "print" => Some(Builtin::Print),
         "println" => Some(Builtin::Println),
         "run" => Some(Builtin::Run),
@@ -34,6 +36,14 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
         "lines" => Some(Builtin::Lines),
         "with_env" => Some(Builtin::WithEnv),
         "with_cwd" => Some(Builtin::WithCwd),
+        "map" => Some(Builtin::Map),
+        "filter" => Some(Builtin::Filter),
+        "reduce" => Some(Builtin::Reduce),
+        "each" => Some(Builtin::Each),
+        "any" => Some(Builtin::Any),
+        "all" => Some(Builtin::All),
+        "find" => Some(Builtin::Find),
+        "join" => Some(Builtin::Join),
         _ => None,
     }
 }
@@ -140,13 +150,7 @@ pub fn run_builtin(
                 ));
             }
 
-            let Value::Array(arr) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("push expects Array, got {}", args[0].type_name()),
-                ));
-            };
+            let arr = expect_array(&args[0], span, "push")?;
 
             let mut arr_b = arr.borrow_mut();
             for arg in &args[1..] {
@@ -158,13 +162,7 @@ pub fn run_builtin(
         }
         Builtin::Pop => {
             expect_arity(&args, 1, span, "pop")?;
-            let Value::Array(arr) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("pop expects Array, got {}", args[0].type_name()),
-                ));
-            };
+            let arr = expect_array(&args[0], span, "pop")?;
 
             let mut arr_b = arr.borrow_mut();
             Ok(arr_b.pop().unwrap_or(Value::Nil))
@@ -172,13 +170,7 @@ pub fn run_builtin(
         Builtin::Insert => {
             expect_arity(&args, 3, span, "insert")?;
 
-            let Value::Array(arr) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("insert expects Array, got {}", args[0].type_name()),
-                ));
-            };
+            let arr = expect_array(&args[0], span, "insert")?;
 
             let Value::Int(index) = &args[1] else {
                 return Err(RuntimeError::new(
@@ -196,13 +188,7 @@ pub fn run_builtin(
         Builtin::Remove => {
             expect_arity(&args, 2, span, "remove")?;
 
-            let Value::Array(arr) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("remove expects Array, got {}", args[0].type_name()),
-                ));
-            };
+            let arr = expect_array(&args[0], span, "remove")?;
 
             let Value::Int(index) = &args[1] else {
                 return Err(RuntimeError::new(
@@ -219,6 +205,40 @@ pub fn run_builtin(
             drop(arr_b);
 
             Ok(val)
+        }
+        Builtin::Slice => {
+            expect_arity(&args, 3, span, "slice")?;
+
+            let arr = expect_array(&args[0], span, "slice")?;
+            let Value::Int(start) = &args[1] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("slice expects Int start, got {}", args[1].type_name()),
+                ));
+            };
+            let Value::Int(end) = &args[2] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("slice expects Int end, got {}", args[2].type_name()),
+                ));
+            };
+
+            let values = arr.borrow();
+            let start = checked_array_index(*start, values.len(), true, span, "slice")?;
+            let end = checked_array_index(*end, values.len(), true, span, "slice")?;
+            if start > end {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::IndexOutOfBounds,
+                    format!("slice start {} exceeds end {}", start, end),
+                ));
+            }
+
+            Ok(Value::Array(Rc::new(RefCell::new(
+                values[start..end].to_vec(),
+            ))))
         }
         Builtin::Keys => {
             expect_arity(&args, 1, span, "keys")?;
@@ -425,6 +445,191 @@ pub fn run_builtin(
             derived.cwd_override = Some(path.clone());
             Ok(Value::Command(derived))
         }
+        Builtin::Map => {
+            expect_arity(&args, 2, span, "map")?;
+
+            let arr = expect_array(&args[0], span, "map")?;
+
+            let func = expect_function(&args[1], span, "map")?;
+
+            // 先复制一份当前数组内容，再逐项调用回调。
+            // 这样 `map` 的遍历边界很清楚，也避免把 `RefCell` 借用跨过整个回调执行过程。
+            let items = arr.borrow().clone();
+
+            let mut result = Vec::with_capacity(items.len());
+
+            for value in items {
+                let mapped =
+                    call_function(func.clone(), &vec![value], ctx.env, span)?.unwrap_or(Value::Nil);
+                result.push(mapped);
+            }
+
+            Ok(Value::Array(Rc::new(RefCell::new(result))))
+        }
+        Builtin::Filter => {
+            expect_arity(&args, 2, span, "filter")?;
+
+            let arr = expect_array(&args[0], span, "filter")?;
+
+            let func = expect_function(&args[1], span, "filter")?;
+
+            let items = arr.borrow().clone();
+
+            let mut result = Vec::new();
+
+            for value in items {
+                let bool_value = call_function(func.clone(), &vec![value.clone()], ctx.env, span)?
+                    .unwrap_or(Value::Nil);
+
+                let Value::Bool(b) = bool_value else {
+                    return Err(RuntimeError::new(
+                        span,
+                        RuntimeErrorKind::TypeMismatch,
+                        format!(
+                            "filter function expect bool, got {}",
+                            bool_value.type_name()
+                        ),
+                    ));
+                };
+                if b {
+                    result.push(value);
+                }
+            }
+
+            Ok(Value::Array(Rc::new(RefCell::new(result))))
+        }
+        Builtin::Reduce => {
+            expect_arity(&args, 3, span, "reduce")?;
+            let arr = expect_array(&args[0], span, "reduce")?;
+
+            let initial = &args[1];
+
+            let func = expect_function(&args[2], span, "reduce")?;
+
+            let items = arr.borrow().clone();
+
+            let mut acc = initial.clone();
+
+            for item in items {
+                acc = call_function(func.clone(), &vec![acc, item], ctx.env, span)?
+                    .unwrap_or(Value::Nil);
+            }
+
+            Ok(acc)
+        }
+        Builtin::Each => {
+            expect_arity(&args, 2, span, "each")?;
+
+            let arr = expect_array(&args[0], span, "each")?;
+
+            let func = expect_function(&args[1], span, "each")?;
+
+            let items = arr.borrow().clone();
+
+            for item in items {
+                let _ = call_function(func.clone(), &vec![item], ctx.env, span)?;
+            }
+            Ok(Value::Nil)
+        }
+        Builtin::Any => {
+            expect_arity(&args, 2, span, "any")?;
+
+            let arr = expect_array(&args[0], span, "any")?;
+
+            let func = expect_function(&args[1], span, "any")?;
+
+            let items = arr.borrow().clone();
+
+            for item in items {
+                let b =
+                    call_function(func.clone(), &vec![item], ctx.env, span)?.unwrap_or(Value::Nil);
+                let Value::Bool(b) = b else {
+                    return Err(RuntimeError::new(
+                        span,
+                        RuntimeErrorKind::TypeMismatch,
+                        format!("any function expect bool, got {}", b.type_name()),
+                    ));
+                };
+                if b {
+                    return Ok(Value::Bool(true));
+                }
+            }
+
+            return Ok(Value::Bool(false));
+        }
+        Builtin::All => {
+            expect_arity(&args, 2, span, "all")?;
+
+            let arr = expect_array(&args[0], span, "all")?;
+
+            let func = expect_function(&args[1], span, "all")?;
+
+            let items = arr.borrow().clone();
+
+            for item in items {
+                let b =
+                    call_function(func.clone(), &vec![item], ctx.env, span)?.unwrap_or(Value::Nil);
+                let Value::Bool(b) = b else {
+                    return Err(RuntimeError::new(
+                        span,
+                        RuntimeErrorKind::TypeMismatch,
+                        format!("all function expect bool, got {}", b.type_name()),
+                    ));
+                };
+                if !b {
+                    return Ok(Value::Bool(false));
+                }
+            }
+
+            return Ok(Value::Bool(true));
+        }
+        Builtin::Find => {
+            expect_arity(&args, 2, span, "find")?;
+
+            let arr = expect_array(&args[0], span, "find")?;
+
+            let func = expect_function(&args[1], span, "find")?;
+
+            let items = arr.borrow().clone();
+
+            for item in items {
+                let matched = call_function(func.clone(), &vec![item.clone()], ctx.env, span)?
+                    .unwrap_or(Value::Nil);
+                let Value::Bool(matched) = matched else {
+                    return Err(RuntimeError::new(
+                        span,
+                        RuntimeErrorKind::TypeMismatch,
+                        format!("find function expect bool, got {}", matched.type_name()),
+                    ));
+                };
+                if matched {
+                    return Ok(item);
+                }
+            }
+            Ok(Value::Nil)
+        }
+        Builtin::Join => {
+            expect_arity(&args, 2, span, "join")?;
+
+            let arr = expect_array(&args[0], span, "join")?;
+
+            let Value::String(sep) = &args[1] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("join expects String separator, got {}", args[1].type_name()),
+                ));
+            };
+
+            let items = arr.borrow();
+
+            let text = items
+                .iter()
+                .map(display_value)
+                .collect::<Vec<_>>()
+                .join(sep);
+            Ok(Value::String(text))
+        }
     }
 }
 
@@ -545,6 +750,36 @@ fn expect_arity(
     } else {
         Ok(())
     }
+}
+
+fn expect_array(
+    arg: &Value,
+    span: usize,
+    builtin_name: &str,
+) -> Result<Rc<RefCell<Vec<Value>>>, RuntimeError> {
+    let Value::Array(arr) = arg else {
+        return Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::TypeMismatch,
+            format!("{} expects Array, got {}", builtin_name, arg.type_name()),
+        ));
+    };
+    Ok(arr.clone())
+}
+
+fn expect_function(
+    arg: &Value,
+    span: usize,
+    builtin_name: &str,
+) -> Result<Rc<crate::ecscript::value::Function>, RuntimeError> {
+    let Value::Function(func) = arg else {
+        return Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::TypeMismatch,
+            format!("{} expects function, got {}", builtin_name, arg.type_name()),
+        ));
+    };
+    Ok(func.clone())
 }
 
 fn to_json_value(value: &Value, span: usize) -> Result<serde_json::Value, RuntimeError> {
@@ -939,6 +1174,65 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind, RuntimeErrorKind::ParseInExpr);
         assert!(err.message.starts_with("invalid JSON:"));
+    }
+
+    #[test]
+    fn slice_returns_half_open_subarray() {
+        let arr = Rc::new(RefCell::new(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+            Value::Int(4),
+        ]));
+        let result = run_builtin(
+            Builtin::Slice,
+            vec![Value::Array(arr), Value::Int(1), Value::Int(3)],
+            0,
+            ctx(),
+        )
+        .unwrap();
+        let Value::Array(arr) = result else {
+            panic!("expected array");
+        };
+        assert_eq!(*arr.borrow(), vec![Value::Int(2), Value::Int(3)]);
+    }
+
+    #[test]
+    fn slice_rejects_start_after_end() {
+        let arr = Rc::new(RefCell::new(vec![Value::Int(1), Value::Int(2)]));
+        let err = run_builtin(
+            Builtin::Slice,
+            vec![Value::Array(arr), Value::Int(2), Value::Int(1)],
+            0,
+            ctx(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, RuntimeErrorKind::IndexOutOfBounds);
+        assert_eq!(err.message, "slice start 2 exceeds end 1");
+    }
+
+    #[test]
+    fn map_treats_missing_return_as_nil() {
+        let items = Rc::new(RefCell::new(vec![Value::Int(1), Value::Int(2)]));
+        let func = Rc::new(crate::ecscript::value::Function {
+            name: None,
+            params: vec!["x".into()],
+            stmts: vec![],
+            captures: HashMap::new(),
+        });
+
+        let result = run_builtin(
+            Builtin::Map,
+            vec![Value::Array(items), Value::Function(func)],
+            0,
+            ctx(),
+        )
+        .unwrap();
+
+        let Value::Array(mapped) = result else {
+            panic!("expected array");
+        };
+        assert_eq!(*mapped.borrow(), vec![Value::Nil, Value::Nil]);
     }
 
     #[test]

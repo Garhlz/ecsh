@@ -106,6 +106,20 @@ fn ecscript_runs_success_examples() {
             ][..],
         ),
         ("env_and_json.ecs", &["HOME", "payload", "patched-range", "[3,99,5,6]"][..]),
+        (
+            "std_iter_draft.ecs",
+            &[
+                "3",
+                "15",
+                "120",
+                "1",
+                "5",
+                "true",
+                "[1, 2, 3]",
+                "[3, 4, 5]",
+                "[5, 4, 3, 2, 1]",
+            ][..],
+        ),
     ];
 
     for (name, expected_lines) in cases {

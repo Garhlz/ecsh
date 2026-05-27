@@ -139,13 +139,7 @@ pub fn eval_stmt(
     env: &Environment<'_>,
     // captures: Option<Rc<Function>>,
 ) -> Result<ExecFlow, RuntimeError> {
-    eval_stmt_with_ctx(
-        stmt,
-        env,
-        EvalContext {
-            shell_state: None,
-        },
-    )
+    eval_stmt_with_ctx(stmt, env, EvalContext { shell_state: None })
 }
 
 fn eval_stmt_with_ctx(
@@ -543,13 +537,7 @@ fn eval_compound_assign(
 }
 
 pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
-    eval_expr_with_ctx(
-        expr,
-        env,
-        EvalContext {
-            shell_state: None,
-        },
-    )
+    eval_expr_with_ctx(expr, env, EvalContext { shell_state: None })
 }
 
 fn eval_expr_with_ctx(
@@ -615,6 +603,7 @@ fn eval_expr_with_ctx(
                         InfixOper::Le => eval_le(left_val, right_val, span),
                         InfixOper::Ge => eval_ge(left_val, right_val, span),
                         InfixOper::And | InfixOper::Or => unreachable!(),
+                        _ => unreachable!(),
                     }
                 }
             }

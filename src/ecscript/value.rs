@@ -85,12 +85,21 @@ pub enum Builtin {
     Pop,
     Insert,
     Remove,
+    Slice,
     Run,
     Capture,
     Text,
     Lines,
     WithEnv,
     WithCwd,
+    Map,
+    Filter,
+    Reduce,
+    Each,
+    Any,
+    All,
+    Find,
+    Join,
 }
 
 impl Builtin {
@@ -110,12 +119,21 @@ impl Builtin {
             Builtin::Pop => "pop",
             Builtin::Insert => "insert",
             Builtin::Remove => "remove",
+            Builtin::Slice => "slice",
             Builtin::Run => "run",
             Builtin::Capture => "capture",
             Builtin::Text => "text",
             Builtin::Lines => "lines",
             Builtin::WithEnv => "with_env",
             Builtin::WithCwd => "with_cwd",
+            Builtin::Map => "map",
+            Builtin::Filter => "filter",
+            Builtin::Reduce => "reduce",
+            Builtin::Each => "each",
+            Builtin::Any => "any",
+            Builtin::All => "all",
+            Builtin::Find => "find",
+            Builtin::Join => "join",
         }
     }
 }

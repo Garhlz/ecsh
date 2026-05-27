@@ -81,6 +81,8 @@ pub enum Operator {
     AndAnd, // &&
     OrOr,   // ||
     Bang,   // !
+
+    PipeForward, // |>
 }
 
 impl Operator {
@@ -100,6 +102,7 @@ impl Operator {
             Operator::AndAnd => "&&",
             Operator::OrOr => "||",
             Operator::Bang => "!",
+            Operator::PipeForward => "|>",
         }
     }
 
@@ -129,6 +132,7 @@ impl Operator {
             Operator::AndAnd => Some((30, 30, InfixOper::And)),
             Operator::OrOr => Some((20, 20, InfixOper::Or)),
 
+            Operator::PipeForward => Some((10, 10, InfixOper::PipeForward)),
             _ => None,
         }
     }
@@ -713,6 +717,14 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                         start,
                         offset,
                     )
+                } else if chars.next_if_eq(&'>').is_some() {
+                    offset += '>'.len_utf8();
+                    push_token(
+                        &mut tokens,
+                        TokenKind::Operator(Operator::PipeForward),
+                        start,
+                        offset,
+                    )
                 } else {
                     return Err(ParseError::new(
                         offset,
@@ -1025,7 +1037,7 @@ mod tests {
     #[test]
     fn eq_eq_lexes_as_equality_operator() {
         assert_kinds(
-            "== != <= >= && || ! = += -= *= /= %=",
+            "== != <= >= && || |> ! = += -= *= /= %=",
             vec![
                 op(Operator::EqEq),
                 op(Operator::NotEq),
@@ -1033,6 +1045,7 @@ mod tests {
                 op(Operator::GtEq),
                 op(Operator::AndAnd),
                 op(Operator::OrOr),
+                op(Operator::PipeForward),
                 op(Operator::Bang),
                 delimiter(Delimiter::Eq),
                 delimiter(Delimiter::PlusEq),
