@@ -1,7 +1,7 @@
 use crate::ecscript::error::ParseError;
 use crate::parser::parse_command_literal;
 
-use crate::ecscript::ast::{Expr, ExprKind, Literal, RangeExpr, Stmt, StmtKind};
+use crate::ecscript::ast::{Expr, ExprKind, InfixOper, Literal, RangeExpr, Stmt, StmtKind};
 use crate::ecscript::lexer::{Delimiter, Token, TokenKind};
 use crate::ecscript::parser::expect_block;
 
@@ -365,10 +365,15 @@ fn pratt_parser(state: &mut TokenStream<'_>, min_bp: u8) -> Result<Expr, ParseEr
                     }
                     state.consume();
                     let right = pratt_parser(state, right_bp)?;
-                    left = Expr {
-                        kind: ExprKind::Infix(Box::new(left), infix_oper, Box::new(right)),
-                        span: op_span,
-                    };
+
+                    if matches!(infix_oper, InfixOper::PipeForward) {
+                        left = desugar_pipe_forward(left, right, op_span)?;
+                    } else {
+                        left = Expr {
+                            kind: ExprKind::Infix(Box::new(left), infix_oper, Box::new(right)),
+                            span: op_span,
+                        };
+                    }
                 } else {
                     break;
                 }
@@ -520,6 +525,22 @@ fn parse_lambda(
     }
 }
 
+fn desugar_pipe_forward(left: Expr, right: Expr, span: usize) -> Result<Expr, ParseError> {
+    if let ExprKind::Call(name, mut args) = right.kind {
+        args.insert(0, left);
+        let desugar_call = ExprKind::Call(name, args);
+        Ok(Expr {
+            kind: desugar_call,
+            span,
+        })
+    } else {
+        Err(ParseError::new(
+            span,
+            "|> expects a call expression on the right-hand side",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_expr;
@@ -609,6 +630,13 @@ mod tests {
                     .map(|(key, value)| (key.to_string(), value))
                     .collect(),
             ),
+            span: 0,
+        }
+    }
+
+    fn call(callee: Expr, args: Vec<Expr>) -> Expr {
+        Expr {
+            kind: ExprKind::Call(Box::new(callee), args),
             span: 0,
         }
     }
@@ -779,6 +807,47 @@ mod tests {
                 InfixOper::Or,
                 infix(lit_bool(false), InfixOper::And, lit_bool(true)),
             ),
+        );
+    }
+
+    #[test]
+    fn pipe_forward_desugars_to_call() {
+        assert_parse("x |> f()", call(var("f"), vec![var("x")]));
+        assert_parse(
+            "x |> f(1, 2)",
+            call(var("f"), vec![var("x"), lit_int(1), lit_int(2)]),
+        );
+    }
+
+    #[test]
+    fn pipe_forward_has_lower_precedence_than_arithmetic_and_logical_ops() {
+        assert_parse(
+            "1 + 2 |> f()",
+            call(
+                var("f"),
+                vec![infix(lit_int(1), InfixOper::Add, lit_int(2))],
+            ),
+        );
+        assert_parse(
+            "true || false |> f()",
+            call(
+                var("f"),
+                vec![infix(lit_bool(true), InfixOper::Or, lit_bool(false))],
+            ),
+        );
+    }
+
+    #[test]
+    fn pipe_forward_requires_call_expression_on_right() {
+        assert_parse_error(
+            "x |> f",
+            4,
+            "|> expects a call expression on the right-hand side",
+        );
+        assert_parse_error(
+            "x |> y + 1",
+            4,
+            "|> expects a call expression on the right-hand side",
         );
     }
 

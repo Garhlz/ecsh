@@ -189,4 +189,6 @@ pub enum InfixOper {
     // 逻辑运算符
     And, // &&
     Or,  // ||
+
+    PipeForward,
 }

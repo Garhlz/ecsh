@@ -1,0 +1,66 @@
+func count(xs, pred) {
+    return xs |> filter(pred) |> len()
+}
+
+func sum(xs) {
+    return xs |> reduce(0, (acc, x) => acc+x)
+}
+
+func product(xs) {
+    return xs |> reduce(1, (acc, x) => acc * x)
+}
+
+func first(xs) {
+    if len(xs) >= 1 {
+        return xs[0]
+    } else {
+        return nil
+    }
+}
+
+func last(xs) {
+    if len(xs) >= 1 {
+        return xs[len(xs) - 1]
+    } else {
+        return nil
+    }
+}
+
+func contains(xs, target) {
+    return xs |> any((x) => x == target)
+}
+
+func none(xs, pred) {
+    return !(xs |> any(pred))
+}
+
+func take(xs, n) {
+    return slice(xs, 0, n)
+}
+
+func drop(xs, n) {
+    return slice(xs, n, len(xs))
+}
+
+func reverse(xs) {
+    let out = []
+    let i = len(xs) - 1
+    while i >= 0 {
+        push(out, xs[i])
+        i -= 1
+    }
+    return out
+}
+
+let xs = range(1, 5)
+
+println(count(xs, (x) => x > 2))
+println(sum(xs))
+println(product(xs))
+println(first(xs))
+println(last(xs))
+println(contains(xs, 3))
+println(none(xs, (x) => x < 0))
+println(take(xs, 3))
+println(drop(xs, 2))
+println(reverse(xs))
