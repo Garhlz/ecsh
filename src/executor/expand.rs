@@ -140,7 +140,34 @@ fn expand_shell_word(word: &ShellWord, env: &ExpandEnv<'_>) -> ShellResult<Vec<S
         }
     }
 
+    expand_tilde_prefix(word, &mut result);
     Ok(result)
+}
+
+/// 最小 tilde 展开：只处理字面量开头的 `~` / `~/...`。
+///
+/// 这里刻意不展开：
+/// - `~user`
+/// - 由 `${expr}` / `$(cmd)` 生成的 `~`
+fn expand_tilde_prefix(word: &ShellWord, result: &mut [String]) {
+    let Some(WordFragment::Lit(first)) = word.fragments.first() else {
+        return;
+    };
+    if !(first == "~" || first.starts_with("~/")) {
+        return;
+    }
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let Some(first_word) = result.first_mut() else {
+        return;
+    };
+
+    if first_word == "~" {
+        *first_word = home;
+    } else if let Some(suffix) = first_word.strip_prefix("~/") {
+        *first_word = format!("{home}/{suffix}");
+    }
 }
 
 /// shell 展开里的字符串保持原样，其余值沿用 ecscript 的 repr 文本化规则。
@@ -314,6 +341,36 @@ mod tests {
             script_env: &state.script_env,
         };
         assert_eq!(expand_shell_word(&word, &env).unwrap(), vec!["hello"]);
+    }
+
+    #[test]
+    fn expands_tilde_to_home_for_literal_word() {
+        let state = state();
+        let old_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", "/tmp/ecsh-home") };
+
+        let word = ShellWord::lit("~/demo");
+        let env = ExpandEnv {
+            script_env: &state.script_env,
+        };
+        let expanded = expand_shell_word(&word, &env).unwrap();
+        assert_eq!(expanded, vec!["/tmp/ecsh-home/demo"]);
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn does_not_expand_tilde_user_form() {
+        let state = state();
+        let word = ShellWord::lit("~elaine");
+        let env = ExpandEnv {
+            script_env: &state.script_env,
+        };
+        let expanded = expand_shell_word(&word, &env).unwrap();
+        assert_eq!(expanded, vec!["~elaine"]);
     }
 
     #[test]

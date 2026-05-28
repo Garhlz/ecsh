@@ -6,6 +6,7 @@ mod eval;
 mod func;
 mod io_state;
 pub mod lexer;
+mod module;
 mod parser;
 mod pratt;
 pub mod value;
@@ -19,7 +20,8 @@ pub use self::ast::Stmt;
 pub use self::env::Environment;
 pub use self::error::{ParseError, RuntimeError, RuntimeErrorKind};
 pub use self::eval::{
-    eval_script, eval_script_with_ctx, eval_top_level_script, eval_top_level_script_with_ctx,
+    eval_module, eval_script, eval_script_with_ctx, eval_top_level_script,
+    eval_top_level_script_with_ctx,
 };
 pub use self::value::{Value, display_value, repr_value};
 
@@ -140,9 +142,22 @@ pub fn eval_expr_src(src: &str, env: &Environment<'_>) -> error::EvalResult<Valu
 }
 
 pub fn run_script_source(src: &str, env: &Environment<'_>) -> Result<(), InterpreterError> {
+    run_script_source_with_stdin(src, env, None)
+}
+
+/// 执行一段脚本源码，并可选附带一份“脚本标准输入文本”。
+///
+/// 这份文本只服务 `stdin()` / `read_lines()` 这类 text/value bridge，
+/// 不会自动变成命令桥里的 `stdin_override`。
+pub fn run_script_source_with_stdin(
+    src: &str,
+    env: &Environment<'_>,
+    stdin_text: Option<&str>,
+) -> Result<(), InterpreterError> {
     let tokens = lexer::tokenize(src)?;
     let stmts = parser::parse_script(&tokens)?;
-    eval::eval_script(&stmts, env)?;
+    let ctx = eval::EvalContext::plain(None, stdin_text, None, None);
+    eval::eval_script_with_io_ctx(&stmts, env, ctx)?;
     Ok(())
 }
 
@@ -150,12 +165,39 @@ pub fn run_script_file(
     path: impl AsRef<Path>,
     env: &Environment<'_>,
 ) -> Result<(), ScriptFileError> {
+    run_script_file_with_stdin(path, env, None)
+}
+
+/// 读取并执行脚本文件，同时把外部提供的 stdin 文本快照传进 evaluator。
+///
+/// 这样文件模式下的 `stdin()` / `read_lines()` 就能消费管道输入或重定向输入，
+/// 而不必在 builtin 内再做阻塞读取。
+pub fn run_script_file_with_stdin(
+    path: impl AsRef<Path>,
+    env: &Environment<'_>,
+    stdin_text: Option<&str>,
+) -> Result<(), ScriptFileError> {
     let path = path.as_ref();
     let source = fs::read_to_string(path).map_err(|err| ScriptFileError::Read {
         path: path.to_path_buf(),
         err,
     })?;
-    run_script_source(&source, env).map_err(|err| ScriptFileError::Script { source, err })
+    let tokens = lexer::tokenize(&source).map_err(|err| ScriptFileError::Script {
+        source: source.clone(),
+        err: InterpreterError::Parse(err),
+    })?;
+    let stmts = parser::parse_script(&tokens).map_err(|err| ScriptFileError::Script {
+        source: source.clone(),
+        err: InterpreterError::Parse(err),
+    })?;
+    let loader = module::ModuleLoader::new();
+    let ctx = eval::EvalContext::plain(None, stdin_text, path.parent(), Some(&loader));
+    eval::eval_script_with_io_ctx(&stmts, env, ctx)
+        .map(|_| ())
+        .map_err(|err| ScriptFileError::Script {
+            source,
+            err: InterpreterError::Runtime(err),
+        })
 }
 
 pub fn parse_top_level_script(src: &str) -> Option<Result<Vec<Stmt>, ParseError>> {
@@ -218,7 +260,16 @@ pub fn parse_top_level_script(src: &str) -> Option<Result<Vec<Stmt>, ParseError>
 fn starts_with_top_level_keyword(src: &str) -> bool {
     let trimmed = src.trim_start();
     [
-        "let", "if", "while", "for", "continue", "break", "func", "return",
+        "let",
+        "if",
+        "while",
+        "for",
+        "continue",
+        "break",
+        "func",
+        "return",
+        "use",
+        "pub",
     ]
     .into_iter()
     .any(|keyword| {

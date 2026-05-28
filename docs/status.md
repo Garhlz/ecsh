@@ -53,7 +53,7 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `if` / `while` / `for in`
 - `break` / `continue` / `return`
 - 命名函数、lambda、闭包、自由变量捕获
-- builtin：`env`、`range`、`len`、`push`、`pop`、`insert`、`remove`、`keys`、`values`、`to_json`、`from_json`、`print`、`println`
+- builtin：`env`、`cwd`、`join_path`、`stdin`、`read_lines`、`write_lines`、`range`、`len`、`push`、`pop`、`insert`、`remove`、`keys`、`values`、`to_json`、`from_json`、`print`、`println`
 - 命令桥 builtin：`run`、`capture`、`text`、`lines`、`with_env`、`with_cwd`
 - 独立解释器入口：REPL / 文件执行 / `-e` / stdin
 - parse/runtime 错误的偏移定位和源码格式化
@@ -111,6 +111,8 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `text(cmd)` / `lines(cmd)`：基于 `capture(cmd)` 的高频消费接口
 - `command(...)`：argv-first 的程序化命令值 builder
 - `from_json(text(cmd{ ... }))`：命令输出到 JSON 值的推荐组合方式
+- `stdin()` / `read_lines()` / `write_lines(...)`：text/value bridge 已补齐，格式转换继续通过显式组合完成
+  - 典型组合：`from_json(stdin())`、`write_lines(read_lines())`
 - `with_env(cmd, obj)` / `with_cwd(cmd, path)`：以不可变派生方式调整命令值
 - `cmd{ a | b }` pipeline 子集
 - 单命令纯输出 shell builtin：如 `pwd` / `env` / `status` / `help`
@@ -162,7 +164,7 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 以下 `ecscript` 能力仍未实现：
 
 - block value / 尾表达式返回值
-- 模块系统
+- 搜索路径 / 命名导入
 - 字符串插值
 - 多行字符串
 
@@ -178,6 +180,21 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `pub let` / `pub func`
 - 模块缓存
 - hook / completion / prompt / bind
+
+阶段 10 当前已经起步：
+
+- 文件级模块导入：`use ./foo.ecs as foo`
+- 导出可见性：`pub let` / `pub func`
+- 模块求值结果会映射成普通对象命名空间，成员访问继续复用 `foo.bar`
+
+当前边界：
+
+- `use` 只支持相对路径 / 绝对路径文件导入
+- `use` 当前只在文件执行上下文可用：`.ecs` 文件、`source` / `.`, `.ecshrc`
+- 交互 REPL 里没有“当前模块目录”，因此会报错
+- 已支持最小模块缓存：同一路径模块只初始化一次
+- 已支持循环导入检测
+- 还没有搜索路径、命名导入、`pub use`
 
 ### 2. 调用元信息与外部命令适配层
 

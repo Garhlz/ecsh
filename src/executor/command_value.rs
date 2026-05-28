@@ -23,8 +23,8 @@ use crate::builtin::{builtin_kind, is_builtin_allowed_in_pipeline, run_builtin};
 use crate::ecscript::value::{CommandInvocation, CommandResult, CommandValue};
 use crate::types::{Command, OutputRedirection, Pipeline, ShellResult, ShellState};
 
-use super::expand;
 use super::builtins::run_builtin_with_redirection;
+use super::expand;
 
 /// 经过 shell word 展开后的可执行命令。
 ///

@@ -27,14 +27,28 @@ pub fn parse_script(tokens: &[Token]) -> Result<Vec<Stmt>, ParseError> {
 fn parse_stmt(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     match state.peek().kind.clone() {
         TokenKind::Keyword(keyword) => match keyword {
-            Keyword::Let => parse_let(state),
+            Keyword::Let => parse_let(state, false),
             Keyword::If => parse_if(state),
             Keyword::While => parse_while(state),
             Keyword::For => parse_for(state),
+            Keyword::Use => parse_use(state),
             Keyword::Break => parse_break(state),
             Keyword::Continue => parse_continue(state),
             Keyword::Return => parse_return(state),
-            Keyword::Func => parse_func(state),
+            Keyword::Func => parse_func(state, false),
+            Keyword::Pub => {
+                state.consume();
+                if matches!(state.peek().kind, TokenKind::Keyword(Keyword::Let)) {
+                    parse_let(state, true)
+                } else if matches!(state.peek().kind, TokenKind::Keyword(Keyword::Func)) {
+                    parse_func(state, true)
+                } else {
+                    Err(ParseError::new(
+                        state.current_offset(),
+                        "expect 'let' or 'func' after 'pub'",
+                    ))
+                }
+            }
             _ => Err(ParseError::new(
                 state.current_offset(),
                 "unexpected 'in' or 'else' at first place of top level".to_string(),
@@ -111,7 +125,7 @@ fn assignment_kind(token_kind: &TokenKind) -> Option<AssignmentKind> {
     }
 }
 
-fn parse_let(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+fn parse_let(state: &mut TokenStream<'_>, public: bool) -> Result<Stmt, ParseError> {
     let span = state.current_offset();
     state.consume(); // consume Let
     let TokenKind::Identifier(name) = state.peek().kind.clone() else {
@@ -142,9 +156,71 @@ fn parse_let(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
         kind: StmtKind::Let {
             name,
             expr: right_value,
+            public,
         },
         span,
     })
+}
+
+fn parse_use(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+    let span = state.current_offset();
+    state.consume(); // consume 'use'
+
+    let mut path = String::new();
+    while !matches!(
+        state.peek().kind,
+        TokenKind::Keyword(Keyword::As) | TokenKind::EOF
+    ) {
+        path.push_str(&use_path_token_text(state.peek())?);
+        state.consume();
+    }
+
+    if path.is_empty() {
+        return Err(ParseError::new(
+            state.current_offset(),
+            "expected module path after 'use'",
+        ));
+    }
+
+    if !matches!(state.peek().kind, TokenKind::Keyword(Keyword::As)) {
+        return Err(ParseError::new(
+            state.current_offset(),
+            "expected 'as' after module path",
+        ));
+    }
+    state.consume(); // consume 'as'
+
+    let TokenKind::Identifier(alias) = state.peek().kind.clone() else {
+        return Err(ParseError::new(
+            state.current_offset(),
+            format!(
+                "expected alias identifier after 'as', found {}",
+                state.peek().kind.describe()
+            ),
+        ));
+    };
+    state.consume();
+    expect_semicolon(state)?;
+
+    Ok(Stmt {
+        kind: StmtKind::Use { path, alias },
+        span,
+    })
+}
+
+fn use_path_token_text(token: &Token) -> Result<String, ParseError> {
+    match &token.kind {
+        TokenKind::Identifier(name) => Ok(name.clone()),
+        TokenKind::String(text) => Ok(text.clone()),
+        TokenKind::Delimiter(Delimiter::Dot) => Ok(".".into()),
+        TokenKind::Delimiter(Delimiter::DotDot) => Ok("..".into()),
+        TokenKind::Operator(crate::ecscript::lexer::Operator::Slash) => Ok("/".into()),
+        TokenKind::Operator(crate::ecscript::lexer::Operator::Minus) => Ok("-".into()),
+        other => Err(ParseError::new(
+            token.start,
+            format!("invalid token {} in module path", other.describe()),
+        )),
+    }
 }
 
 fn parse_block(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
@@ -298,7 +374,7 @@ fn parse_for(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
 }
 
 /// 这里parse出来的是函数声明的语句
-fn parse_func(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
+fn parse_func(state: &mut TokenStream<'_>, public: bool) -> Result<Stmt, ParseError> {
     let span = state.current_offset();
     state.consume(); // "func" token
     let TokenKind::Identifier(name) = state.peek().kind.clone() else {
@@ -354,7 +430,12 @@ fn parse_func(state: &mut TokenStream<'_>) -> Result<Stmt, ParseError> {
     let body = expect_block(state, "func")?;
 
     Ok(Stmt {
-        kind: StmtKind::FuncDeclare { name, params, body },
+        kind: StmtKind::FuncDeclare {
+            name,
+            params,
+            body,
+            public,
+        },
         span,
     })
 }
@@ -498,6 +579,7 @@ mod tests {
                 kind: StmtKind::Let {
                     name: "x".into(),
                     expr: lit_int(42),
+                    public: false,
                 },
                 span: 0
             }]
@@ -530,6 +612,7 @@ mod tests {
                 kind: StmtKind::Let {
                     name: "x".into(),
                     expr: lit_int(42),
+                    public: false,
                 },
                 span: 0
             }]
@@ -942,6 +1025,21 @@ mod tests {
         let stmts = parse_src("while true { 1; }");
         assert_eq!(stmts.len(), 1);
         assert!(matches!(stmts[0].kind, StmtKind::While { .. }));
+    }
+
+    #[test]
+    fn parses_use_with_relative_path_and_alias() {
+        let stmts = parse_src("use ./foo.ecs as foo");
+        assert_eq!(
+            stmts,
+            vec![Stmt {
+                kind: StmtKind::Use {
+                    path: "./foo.ecs".into(),
+                    alias: "foo".into(),
+                },
+                span: 0,
+            }]
+        );
     }
 
     #[test]

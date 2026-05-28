@@ -44,14 +44,15 @@ cargo test
 - shell 运行时展开：`$VAR`、`${expr}`、`${env("VAR")}`、`$(cmd)`、`${...arr}`
 - `ecscript` stage 1-6：表达式、语句、数组/对象、控制流、函数/闭包、独立解释器入口、源码定位错误格式化、`env()` / `range()`
 - 阶段 7：`ecsh` 顶层脚本模式、`ecsh file.ecs`、`source` / `.`、`.ecshrc` 已接通
-- 阶段 8：`cmd{ ... }` 命令字面量、`command(...)` builder、`run` / `capture` / `text` / `lines`、`from_json`、`with_env` / `with_cwd` 已接通；单命令纯输出 builtin 也可走命令桥
+- 阶段 8：`cmd{ ... }` 命令字面量、`command(...)` builder、`run` / `capture` / `text` / `lines`、`stdin` / `read_lines` / `write_lines`、`from_json` / `to_json`、`with_env` / `with_cwd` 已接通；单命令纯输出 builtin 也可走命令桥
 - 阶段 9（进行中）：`|>` 值流语法糖、`map` / `filter` / `reduce` / `each` / `any` / `all` / `find` / `join`、`slice`
+- 阶段 10（起步）：文件级模块 MVP 已接通 `pub let` / `pub func` 与 `use ./foo.ecs as foo`
 - 阶段 7.5：shell 诊断与交互收口已完成，当前已具备结构化 `ParseError`、续行读取和 shell parse 错误定位输出
 
 当前仍未完成：
 
 - 阶段 12：here-doc、glob、subshell、更完整的作业控制与执行语义
-- `ecscript` 的 block value、模块系统、字符串插值、多行字符串
+- `ecscript` 的 block value、模块缓存/搜索路径、字符串插值、多行字符串
 
 更完整的进度说明见 [docs/status.md](/home/elaine/work/projects/ecsh/docs/status.md)。
 
@@ -93,6 +94,33 @@ println(text(cmd{ printf "hello" }));
 println(text(command("/bin/echo", "builder", 7, true)));
 println(from_json(text(cmd{ printf "{\"ok\":true}" })).ok);
 println(range(1, 5) |> filter((x) => x > 2) |> map((x) => x * 10) |> join(","));
+println(read_lines() |> map((x) => "[" + x + "]") |> join(","));
+println(cwd());
+println(join_path("/tmp", "ecsh"));
+```
+
+模块 MVP 的当前写法：
+
+```ecs
+// foo.ecs
+let hidden = 1
+pub let visible = hidden + 1
+
+// main.ecs
+use ./foo.ecs as foo
+println(foo.visible)
+```
+
+text/value / JSON bridge 的推荐用法：
+
+```ecs
+let raw = stdin();                    // 整份输入文本
+let lines = read_lines();             // 按行读成 Array<String>
+write_lines(lines);                   // 再逐行写回 stdout
+
+let obj = from_json(stdin());         // JSON 文本 -> 语言值
+println(to_json(obj));                // 语言值 -> JSON 文本
+println(from_json(text(cmd{ printf "{\"ok\":true}" })).ok);
 ```
 
 ## 文档
@@ -137,6 +165,10 @@ docs/
 
 - `if` 仍是语句，不是表达式
 - `1..10` / `1..=10` 只在 `for` 语句里合法；需要值时使用 `range(start, end)`
-- 没有模块系统
+- 模块系统当前只支持文件级 `use ./foo.ecs as foo`
+- `use` 当前只在文件执行上下文里可用：`.ecs` 文件、`source` / `.`, `.ecshrc`
+- 交互 REPL 中当前还不能直接 `use ./foo.ecs as foo`
+- 已支持按规范化绝对路径的模块缓存与循环导入检测
+- 还没有搜索路径、命名导入与 `pub use`
 - 没有字符串插值和多行字符串
 - block 还没有值语义

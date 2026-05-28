@@ -10,6 +10,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     io::{self, Write},
+    path::PathBuf,
     rc::Rc,
 };
 
@@ -17,6 +18,9 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
     match name {
         "command" => Some(Builtin::CommandBuilder),
         "env" => Some(Builtin::Env),
+        "cwd" => Some(Builtin::Cwd),
+        "stdin" => Some(Builtin::Stdin),
+        "read_lines" => Some(Builtin::ReadLines),
         "range" => Some(Builtin::Range),
         "len" => Some(Builtin::Len),
         "to_json" => Some(Builtin::ToJson),
@@ -44,6 +48,8 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
         "all" => Some(Builtin::All),
         "find" => Some(Builtin::Find),
         "join" => Some(Builtin::Join),
+        "join_path" => Some(Builtin::JoinPath),
+        "write_lines" => Some(Builtin::WriteLines),
         _ => None,
     }
 }
@@ -97,6 +103,36 @@ pub fn run_builtin(
                 Ok(value) => Value::String(value),
                 Err(_) => Value::Nil,
             })
+        }
+        Builtin::Cwd => {
+            expect_arity(&args, 0, span, "cwd")?;
+            let cwd = std::env::current_dir().map_err(|err| {
+                RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::IoError,
+                    format!("cwd failed: {}", err),
+                )
+            })?;
+            Ok(Value::String(cwd.to_string_lossy().into_owned()))
+        }
+        Builtin::Stdin => {
+            // `stdin()` 返回当前脚本输入文本的整份快照。
+            // 它不主动阻塞读取，而是消费执行入口预先提供的输入。
+            expect_arity(&args, 0, span, "stdin")?;
+            Ok(Value::String(
+                ctx.stdin_text.unwrap_or_default().to_string(),
+            ))
+        }
+        Builtin::ReadLines => {
+            // `read_lines()` 是 `stdin()` 的按行视图，方便直接接数组高阶函数。
+            expect_arity(&args, 0, span, "read_lines")?;
+            let lines = ctx
+                .stdin_text
+                .unwrap_or_default()
+                .lines()
+                .map(|line| Value::String(line.to_string()))
+                .collect::<Vec<_>>();
+            Ok(Value::Array(Rc::new(RefCell::new(lines))))
         }
         Builtin::Range => {
             expect_arity(&args, 2, span, "range")?;
@@ -630,6 +666,43 @@ pub fn run_builtin(
                 .join(sep);
             Ok(Value::String(text))
         }
+        Builtin::JoinPath => {
+            expect_arity(&args, 2, span, "join_path")?;
+            let Value::String(left) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "join_path expects String left path, got {}",
+                        args[0].type_name()
+                    ),
+                ));
+            };
+            let Value::String(right) = &args[1] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "join_path expects String right path, got {}",
+                        args[1].type_name()
+                    ),
+                ));
+            };
+
+            let joined = PathBuf::from(left).join(right);
+            Ok(Value::String(joined.to_string_lossy().into_owned()))
+        }
+        Builtin::WriteLines => {
+            // `write_lines(xs)` 把数组元素按 display 文本逐项输出到 stdout，
+            // 每项独占一行，作为 text/value bridge 的反向出口。
+            expect_arity(&args, 1, span, "write_lines")?;
+            let arr = expect_array(&args[0], span, "write_lines")?;
+            let items = arr.borrow().clone();
+            for item in items {
+                write_stdout(&display_value(&item), true, span)?;
+            }
+            Ok(Value::Nil)
+        }
     }
 }
 
@@ -959,6 +1032,7 @@ mod tests {
         BuiltinContext {
             shell_state: None,
             env: Box::leak(Box::new(Environment::new())),
+            stdin_text: None,
         }
     }
 
@@ -1004,6 +1078,61 @@ mod tests {
         let err = run_builtin(Builtin::Env, vec![Value::Int(1)], 0, ctx()).unwrap_err();
         assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
         assert_eq!(err.message, "env expects String, got Int");
+    }
+
+    #[test]
+    fn cwd_returns_current_directory_string() {
+        let result = run_builtin(Builtin::Cwd, vec![], 0, ctx()).unwrap();
+        let Value::String(cwd) = result else {
+            panic!("expected string");
+        };
+        assert!(!cwd.is_empty());
+        assert!(std::path::Path::new(&cwd).is_absolute());
+    }
+
+    #[test]
+    fn stdin_and_read_lines_use_builtin_context_input() {
+        let env = Box::leak(Box::new(Environment::new()));
+        let ctx = BuiltinContext {
+            shell_state: None,
+            env,
+            stdin_text: Some("a\nb\n"),
+        };
+
+        let stdin = run_builtin(Builtin::Stdin, vec![], 0, ctx).unwrap();
+        assert_eq!(stdin, Value::String("a\nb\n".into()));
+
+        let ctx = BuiltinContext {
+            shell_state: None,
+            env,
+            stdin_text: Some("a\nb\n"),
+        };
+        let lines = run_builtin(Builtin::ReadLines, vec![], 0, ctx).unwrap();
+        let Value::Array(lines) = lines else {
+            panic!("expected array");
+        };
+        assert_eq!(
+            *lines.borrow(),
+            vec![Value::String("a".into()), Value::String("b".into())]
+        );
+    }
+
+    #[test]
+    fn join_path_uses_platform_path_joining() {
+        let result = run_builtin(
+            Builtin::JoinPath,
+            vec![Value::String("/tmp".into()), Value::String("ecsh".into())],
+            0,
+            ctx(),
+        )
+        .unwrap();
+        let Value::String(path) = result else {
+            panic!("expected string");
+        };
+        assert_eq!(
+            std::path::PathBuf::from(path),
+            std::path::PathBuf::from("/tmp").join("ecsh")
+        );
     }
 
     #[test]

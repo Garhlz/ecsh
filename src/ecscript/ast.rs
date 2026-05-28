@@ -5,6 +5,7 @@ pub enum StmtKind {
     Let {
         name: String,
         expr: Expr,
+        public: bool,
     },
     Assign {
         target: AssignTarget,
@@ -44,6 +45,11 @@ pub enum StmtKind {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+        public: bool,
+    },
+    Use {
+        path: String,
+        alias: String,
     },
 
     // break continue也是完整的语句
