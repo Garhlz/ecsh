@@ -41,6 +41,9 @@ pub enum Keyword {
     Func,
     Return,
     Cmd,
+    Use,
+    Pub,
+    As,
 }
 
 impl Keyword {
@@ -55,6 +58,8 @@ impl Keyword {
                 | Keyword::Break
                 | Keyword::Func
                 | Keyword::Return
+                | Keyword::Use
+                | Keyword::Pub
         )
     }
 }
@@ -214,6 +219,9 @@ impl TokenKind {
             TokenKind::Keyword(Keyword::Func) => "keyword 'func'".to_string(),
             TokenKind::Keyword(Keyword::Return) => "keyword 'return'".to_string(),
             TokenKind::Keyword(Keyword::Cmd) => "keyword 'cmd'".to_string(),
+            TokenKind::Keyword(Keyword::Use) => "keyword 'use'".to_string(),
+            TokenKind::Keyword(Keyword::As) => "keyword 'as'".to_string(),
+            TokenKind::Keyword(Keyword::Pub) => "keyword 'pub'".to_string(),
         }
     }
 
@@ -400,6 +408,24 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                     "return" => push_token(
                         &mut tokens,
                         TokenKind::Keyword(Keyword::Return),
+                        start,
+                        offset,
+                    ),
+                    "use" => push_token(
+                        &mut tokens,
+                        TokenKind::Keyword(Keyword::Use),
+                        start,
+                        offset,
+                    ),
+                    "pub" => push_token(
+                        &mut tokens,
+                        TokenKind::Keyword(Keyword::Pub),
+                        start,
+                        offset,
+                    ),
+                    "as" => push_token(
+                        &mut tokens,
+                        TokenKind::Keyword(Keyword::As),
                         start,
                         offset,
                     ),

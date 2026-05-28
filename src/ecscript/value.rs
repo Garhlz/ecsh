@@ -73,6 +73,9 @@ pub fn validate_array_index(
 pub enum Builtin {
     CommandBuilder,
     Env,
+    Cwd,
+    Stdin,
+    ReadLines,
     Range,
     Len,
     Keys,
@@ -100,6 +103,8 @@ pub enum Builtin {
     All,
     Find,
     Join,
+    JoinPath,
+    WriteLines,
 }
 
 impl Builtin {
@@ -107,6 +112,9 @@ impl Builtin {
         match self {
             Builtin::CommandBuilder => "command",
             Builtin::Env => "env",
+            Builtin::Cwd => "cwd",
+            Builtin::Stdin => "stdin",
+            Builtin::ReadLines => "read_lines",
             Builtin::Range => "range",
             Builtin::Len => "len",
             Builtin::Keys => "keys",
@@ -134,6 +142,8 @@ impl Builtin {
             Builtin::All => "all",
             Builtin::Find => "find",
             Builtin::Join => "join",
+            Builtin::JoinPath => "join_path",
+            Builtin::WriteLines => "write_lines",
         }
     }
 }
@@ -191,6 +201,7 @@ pub struct CommandResult {
 pub struct BuiltinContext<'a> {
     pub shell_state: Option<&'a ShellState>,
     pub env: &'a Environment<'a>,
+    pub stdin_text: Option<&'a str>,
 }
 
 pub fn display_value(value: &Value) -> String {

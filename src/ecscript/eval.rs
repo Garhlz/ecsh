@@ -1,4 +1,9 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    path::Path,
+    rc::Rc,
+};
 
 use crate::ecscript::{
     ast::{
@@ -9,6 +14,7 @@ use crate::ecscript::{
     env::Environment,
     error::{EvalResult, RuntimeError, RuntimeErrorKind},
     func::{call_function, free_vars},
+    module::{ModuleLoader, load_module},
     value::{Binding, BuiltinContext, CommandInvocation, Function, Value},
 };
 use crate::types::ShellState;
@@ -21,8 +27,43 @@ pub enum ExecFlow {
 }
 
 #[derive(Clone, Copy)]
-struct EvalContext<'a> {
-    shell_state: Option<&'a ShellState>,
+pub(crate) struct EvalContext<'a> {
+    pub(crate) shell_state: Option<&'a ShellState>,
+    pub(crate) stdin_text: Option<&'a str>,
+    pub(crate) current_module_dir: Option<&'a Path>,
+    pub(crate) module_loader: Option<&'a ModuleLoader>,
+    module_exports: Option<&'a RefCell<HashSet<String>>>,
+}
+
+impl<'a> EvalContext<'a> {
+    pub(crate) fn plain(
+        shell_state: Option<&'a ShellState>,
+        stdin_text: Option<&'a str>,
+        current_module_dir: Option<&'a Path>,
+        module_loader: Option<&'a ModuleLoader>,
+    ) -> Self {
+        Self {
+            shell_state,
+            stdin_text,
+            current_module_dir,
+            module_loader,
+            module_exports: None,
+        }
+    }
+
+    fn for_module(
+        exports: &'a RefCell<HashSet<String>>,
+        current_module_dir: Option<&'a Path>,
+        module_loader: Option<&'a ModuleLoader>,
+    ) -> Self {
+        Self {
+            shell_state: None,
+            stdin_text: None,
+            current_module_dir,
+            module_loader,
+            module_exports: Some(exports),
+        }
+    }
 }
 
 /// 把解析好的语句ast解析运行，返回执行流
@@ -35,7 +76,15 @@ pub fn eval_script_with_ctx(
     env: &Environment<'_>,
     shell_state: Option<&ShellState>,
 ) -> EvalResult<ExecFlow> {
-    let ctx = EvalContext { shell_state };
+    let ctx = EvalContext::plain(shell_state, None, None, None);
+    eval_script_with_io_ctx(stmts, env, ctx)
+}
+
+pub(crate) fn eval_script_with_io_ctx(
+    stmts: &[Stmt],
+    env: &Environment<'_>,
+    ctx: EvalContext<'_>,
+) -> EvalResult<ExecFlow> {
     for stmt in stmts {
         match eval_stmt_with_ctx(stmt, env, ctx)? {
             ExecFlow::Normal => continue,
@@ -75,7 +124,15 @@ pub fn eval_top_level_script_with_ctx(
     env: &Environment<'_>,
     shell_state: Option<&ShellState>,
 ) -> EvalResult<Option<Value>> {
-    let ctx = EvalContext { shell_state };
+    let ctx = EvalContext::plain(shell_state, None, None, None);
+    eval_top_level_script_with_io_ctx(stmts, env, ctx)
+}
+
+pub(crate) fn eval_top_level_script_with_io_ctx(
+    stmts: &[Stmt],
+    env: &Environment<'_>,
+    ctx: EvalContext<'_>,
+) -> EvalResult<Option<Value>> {
     let Some((last, prefix)) = stmts.split_last() else {
         return Ok(None);
     };
@@ -139,7 +196,70 @@ pub fn eval_stmt(
     env: &Environment<'_>,
     // captures: Option<Rc<Function>>,
 ) -> Result<ExecFlow, RuntimeError> {
-    eval_stmt_with_ctx(stmt, env, EvalContext { shell_state: None })
+    eval_stmt_with_ctx(stmt, env, EvalContext::plain(None, None, None, None))
+}
+
+/// 在独立模块环境中执行脚本，并把 `pub` 绑定收集成模块对象返回。
+///
+/// 这层只负责：
+/// - 复用普通语句执行逻辑
+/// - 记录哪些绑定被声明为 `pub`
+/// - 在执行结束后从模块环境中取出最终值
+///
+/// 它暂时不负责：
+/// - 文件读取
+/// - 路径解析
+/// - 模块缓存
+/// - `use ... as ...` 语法
+pub fn eval_module(stmts: &[Stmt]) -> EvalResult<Value> {
+    eval_module_in_dir(stmts, None, None)
+}
+
+pub(crate) fn eval_module_in_dir(
+    stmts: &[Stmt],
+    current_module_dir: Option<&Path>,
+    module_loader: Option<&ModuleLoader>,
+) -> EvalResult<Value> {
+    let env = Environment::new();
+    // 在eval_stmt_with_ctx函数中，带有pub的let/func语句会向ctx中携带的export 集合插入相应的变量名
+    let exports = RefCell::new(HashSet::new());
+    let ctx = EvalContext::for_module(&exports, current_module_dir, module_loader);
+
+    for stmt in stmts {
+        match eval_stmt_with_ctx(stmt, &env, ctx)? {
+            ExecFlow::Normal => {}
+            ExecFlow::Break(span) => {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::BreakOutsideLoop,
+                    "break outside loop",
+                ));
+            }
+            ExecFlow::Continue(span) => {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::ContinueOutsideLoop,
+                    "continue outside loop",
+                ));
+            }
+            ExecFlow::Return { span, .. } => {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::ReturnOutsideFunction,
+                    "return outside function",
+                ));
+            }
+        }
+    }
+
+    let mut object = HashMap::new();
+    for name in exports.into_inner() {
+        // 从eval之后的env中获取这个name最后对应的值，如果是函数，已经捕获了提升了的自由变量
+        if let Ok(value) = env.get(&name, 0) {
+            object.insert(name, value);
+        }
+    }
+    Ok(Value::Object(Rc::new(RefCell::new(object))))
 }
 
 fn eval_stmt_with_ctx(
@@ -149,9 +269,12 @@ fn eval_stmt_with_ctx(
 ) -> Result<ExecFlow, RuntimeError> {
     let span = stmt.span;
     match &stmt.kind {
-        StmtKind::Let { name, expr } => {
+        StmtKind::Let { name, expr, public } => {
             let value = eval_expr_with_ctx(expr, env, ctx)?;
             env.insert(name.clone(), Binding::Direct(value), span)?;
+            if *public {
+                record_module_export(ctx, name);
+            }
         }
         StmtKind::Assign { target, expr } => {
             let value = eval_expr_with_ctx(expr, env, ctx)?;
@@ -267,7 +390,12 @@ fn eval_stmt_with_ctx(
                 }
             }
         }
-        StmtKind::FuncDeclare { name, params, body } => {
+        StmtKind::FuncDeclare {
+            name,
+            params,
+            body,
+            public,
+        } => {
             let mut captures = HashMap::new();
 
             // 解析ast收集自由变量
@@ -290,6 +418,13 @@ fn eval_stmt_with_ctx(
             let func_val = Value::Function(Rc::new(func));
 
             env.insert(name.clone(), Binding::Direct(func_val), span)?;
+            if *public {
+                record_module_export(ctx, name);
+            }
+        }
+        StmtKind::Use { path, alias } => {
+            let module = load_module(path, span, ctx)?;
+            env.insert(alias.clone(), Binding::Direct(module), span)?;
         }
 
         StmtKind::Break => {
@@ -311,6 +446,12 @@ fn eval_stmt_with_ctx(
         }
     }
     Ok(ExecFlow::Normal)
+}
+
+fn record_module_export(ctx: EvalContext<'_>, name: &str) {
+    if let Some(exports) = ctx.module_exports {
+        exports.borrow_mut().insert(name.to_string());
+    }
 }
 
 fn eval_block_with_ctx(
@@ -537,7 +678,7 @@ fn eval_compound_assign(
 }
 
 pub fn eval_expr(expr: &Expr, env: &Environment<'_>) -> EvalResult<Value> {
-    eval_expr_with_ctx(expr, env, EvalContext { shell_state: None })
+    eval_expr_with_ctx(expr, env, EvalContext::plain(None, None, None, None))
 }
 
 fn eval_expr_with_ctx(
@@ -728,6 +869,7 @@ fn eval_expr_with_ctx(
                     BuiltinContext {
                         shell_state: ctx.shell_state,
                         env,
+                        stdin_text: ctx.stdin_text,
                     },
                 ),
                 other => Err(RuntimeError::new(
@@ -1583,15 +1725,22 @@ mod tests {
 
 #[cfg(test)]
 mod stmt_tests {
-    use super::{ExecFlow, eval_expr, eval_script};
+    use super::{
+        EvalContext, ExecFlow, ModuleLoader, eval_expr, eval_module, eval_script,
+        eval_script_with_io_ctx,
+    };
     use crate::ecscript::{
-        ast::{AssignTarget, Expr, ExprKind, Literal, Stmt, StmtKind},
+        ast::{AssignTarget, Expr, ExprKind, InfixOper, Literal, Stmt, StmtKind},
         env::Environment,
         error::{RuntimeError, RuntimeErrorKind},
         lexer::tokenize,
         parser::parse_script,
         pratt::parse_expr,
         value::Value,
+    };
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
     };
 
     fn eval_script_src(src: &str, env: &Environment<'_>) -> Result<ExecFlow, RuntimeError> {
@@ -1607,6 +1756,16 @@ mod stmt_tests {
         }
     }
 
+    fn temp_script_dir(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("ecsh-{name}-{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
     // ── let 语句 ──────────────────────────────────────────
 
     #[test]
@@ -1614,6 +1773,157 @@ mod stmt_tests {
         let env = Environment::new();
         eval_script_src("let x = 42;", &env).unwrap();
         assert_eq!(env.get("x", 0), Ok(Value::Int(42)));
+    }
+
+    #[test]
+    fn eval_module_collects_pub_bindings_into_object() {
+        let stmts = vec![
+            Stmt {
+                kind: StmtKind::Let {
+                    name: "name".into(),
+                    expr: Expr {
+                        kind: ExprKind::Literal(Literal::String("ecs".into())),
+                        span: 0,
+                    },
+                    public: true,
+                },
+                span: 0,
+            },
+            Stmt {
+                kind: StmtKind::FuncDeclare {
+                    name: "add".into(),
+                    params: vec!["a".into(), "b".into()],
+                    body: vec![Stmt {
+                        kind: StmtKind::Return {
+                            value: Some(Expr {
+                                kind: ExprKind::Infix(
+                                    Box::new(Expr {
+                                        kind: ExprKind::Variable("a".into()),
+                                        span: 0,
+                                    }),
+                                    InfixOper::Add,
+                                    Box::new(Expr {
+                                        kind: ExprKind::Variable("b".into()),
+                                        span: 0,
+                                    }),
+                                ),
+                                span: 0,
+                            }),
+                        },
+                        span: 0,
+                    }],
+                    public: true,
+                },
+                span: 0,
+            },
+        ];
+        let module = eval_module(&stmts).unwrap();
+        let Value::Object(module) = module else {
+            panic!("expected object");
+        };
+        let module = module.borrow();
+        assert_eq!(module.get("name"), Some(&Value::String("ecs".into())));
+        assert!(matches!(module.get("add"), Some(Value::Function(_))));
+    }
+
+    #[test]
+    fn eval_module_keeps_private_bindings_internal() {
+        let stmts = vec![
+            Stmt {
+                kind: StmtKind::Let {
+                    name: "hidden".into(),
+                    expr: lit_int(1),
+                    public: false,
+                },
+                span: 0,
+            },
+            Stmt {
+                kind: StmtKind::Let {
+                    name: "visible".into(),
+                    expr: Expr {
+                        kind: ExprKind::Infix(
+                            Box::new(Expr {
+                                kind: ExprKind::Variable("hidden".into()),
+                                span: 0,
+                            }),
+                            InfixOper::Add,
+                            Box::new(lit_int(1)),
+                        ),
+                        span: 0,
+                    },
+                    public: true,
+                },
+                span: 0,
+            },
+        ];
+        let module = eval_module(&stmts).unwrap();
+        let Value::Object(module) = module else {
+            panic!("expected object");
+        };
+        let module = module.borrow();
+        assert_eq!(module.get("visible"), Some(&Value::Int(2)));
+        assert!(!module.contains_key("hidden"));
+    }
+
+    #[test]
+    fn eval_script_use_imports_module_object_from_relative_path() {
+        let dir = temp_script_dir("module-import");
+        let module_path = dir.join("foo.ecs");
+        fs::write(
+            &module_path,
+            "let hidden = 1\npub let visible = hidden + 1\n",
+        )
+        .unwrap();
+
+        let env = Environment::new();
+        let tokens = tokenize("use ./foo.ecs as foo\nlet value = foo.visible\n").unwrap();
+        let stmts = parse_script(&tokens).unwrap();
+        let loader = ModuleLoader::new();
+        let ctx = EvalContext::plain(None, None, Some(&dir), Some(&loader));
+        eval_script_with_io_ctx(&stmts, &env, ctx).unwrap();
+
+        assert_eq!(env.get("value", 0), Ok(Value::Int(2)));
+        let Value::Object(foo) = env.get("foo", 0).unwrap() else {
+            panic!("expected imported module object");
+        };
+        assert_eq!(foo.borrow().get("visible"), Some(&Value::Int(2)));
+        assert!(!foo.borrow().contains_key("hidden"));
+    }
+
+    #[test]
+    fn eval_script_use_reuses_cached_module_object() {
+        let dir = temp_script_dir("module-cache");
+        let module_path = dir.join("foo.ecs");
+        fs::write(&module_path, "pub let xs = []\n").unwrap();
+
+        let env = Environment::new();
+        let tokens = tokenize(
+            "use ./foo.ecs as a\nuse ./foo.ecs as b\npush(a.xs, 1)\nlet size = len(b.xs)\n",
+        )
+        .unwrap();
+        let stmts = parse_script(&tokens).unwrap();
+        let loader = ModuleLoader::new();
+        let ctx = EvalContext::plain(None, None, Some(&dir), Some(&loader));
+        eval_script_with_io_ctx(&stmts, &env, ctx).unwrap();
+
+        assert_eq!(env.get("size", 0), Ok(Value::Int(1)));
+    }
+
+    #[test]
+    fn eval_script_use_reports_circular_import() {
+        let dir = temp_script_dir("module-cycle");
+        fs::write(dir.join("a.ecs"), "use ./b.ecs as b\npub let a = 1\n").unwrap();
+        fs::write(dir.join("b.ecs"), "use ./a.ecs as a\npub let b = 1\n").unwrap();
+
+        let env = Environment::new();
+        let tokens = tokenize("use ./a.ecs as a\n").unwrap();
+        let stmts = parse_script(&tokens).unwrap();
+        let loader = ModuleLoader::new();
+        let ctx = EvalContext::plain(None, None, Some(&dir), Some(&loader));
+        let err = eval_script_with_io_ctx(&stmts, &env, ctx).unwrap_err();
+
+        assert_eq!(err.kind, RuntimeErrorKind::CircularReference);
+        assert!(err.message.contains("circular module import detected"));
     }
 
     #[test]

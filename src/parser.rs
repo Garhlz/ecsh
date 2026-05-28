@@ -181,10 +181,13 @@ pub fn parse_command_literal(src: &str) -> Result<CommandValue, ParseError> {
     }
     if tokens.iter().any(|tok| {
         matches!(
-            tok, Token::AndIf | Token::OrIf | Token::Ampersand | Token::Semicolon
+            tok,
+            Token::AndIf | Token::OrIf | Token::Ampersand | Token::Semicolon
         )
     }) {
-        return Err(err("command literals do not support &&, ||, ;, or background &"));
+        return Err(err(
+            "command literals do not support &&, ||, ;, or background &",
+        ));
     }
     if tokens.iter().any(|tok| matches!(tok, Token::Pipe)) {
         return Ok(CommandValue::Pipeline(parse_pipeline(&tokens)?));

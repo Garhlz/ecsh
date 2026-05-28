@@ -5,6 +5,7 @@ use ecsh::ecscript::{
     Environment, ParseError, RuntimeError, RuntimeErrorKind, Stmt, Value, display_value,
     eval_top_level_script_with_ctx, parse_top_level_script, repl_output_needs_newline,
     reset_repl_output_state, run_script_file as run_ecscript_file,
+    run_script_file_with_stdin as run_ecscript_file_with_stdin,
 };
 use ecsh::executor::{init_shell_job_control, reap_background_jobs, run_command, run_pipeline};
 use ecsh::input::{InputLine, ShellInput};
@@ -13,7 +14,11 @@ use ecsh::prompt::build_prompt;
 use ecsh::shell_error::format_shell_parse_error;
 use ecsh::types::{CommandFlow, CommandStatus, ParsedJob, ParsedLine, ShellState};
 use std::collections::HashMap;
-use std::{env, path::Path};
+use std::{
+    env,
+    io::{self, IsTerminal, Read},
+    path::Path,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match script_file_arg()? {
@@ -40,14 +45,29 @@ fn script_file_arg() -> Result<Option<String>, Box<dyn std::error::Error>> {
 
 fn run_script_file(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
     let env = Environment::new();
+    let stdin_text = read_optional_stdin_text()?;
 
-    match run_ecscript_file(path, &env) {
+    match run_ecscript_file_with_stdin(path, &env, stdin_text.as_deref()) {
         Ok(()) => Ok(()),
         Err(err) => {
             print_error(err.format_for_user());
             Ok(())
         }
     }
+}
+
+/// 文件模式下，如果当前进程 stdin 不是终端，就一次性读成文本快照。
+///
+/// 这样 `.ecs` 脚本里的 `stdin()` / `read_lines()` 可以消费这份输入，
+/// 同时不会影响交互 REPL 的输入循环。
+fn read_optional_stdin_text() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if io::stdin().is_terminal() {
+        return Ok(None);
+    }
+
+    let mut text = String::new();
+    io::stdin().read_to_string(&mut text)?;
+    Ok(Some(text))
 }
 
 /// 初始化输入与全局状态，然后进入交互主循环。

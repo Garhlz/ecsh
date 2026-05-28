@@ -937,8 +937,9 @@ echo ${to_json(data)} | jq .name
 - [x] 实现 eager Array 版高阶函数：`map`、`filter`、`reduce`、`each`、`find`、`any`、`all`、`join`
 - [x] 实现基础数组工具原语：`slice(arr, start, end)`（半开区间）
 - [ ] 继续补自举序列函数：`take`、`drop`、`contains`、`starts_with`、`ends_with`
-- [ ] 补齐 text/value bridge：`stdin()`、`read_lines()`、`print(...)`、`write_lines(...)`
-- [ ] 补齐 JSON bridge：`from_json(...)`、`to_json(...)`
+- [x] 补齐 text/value bridge：`stdin()`、`read_lines()`、`print(...)`、`write_lines(...)`
+- [x] 补齐 JSON bridge：`from_json(...)`、`to_json(...)`
+- [x] 当前格式转换保持显式组合：文本桥负责 `stdin/read_lines/write_lines`，结构化桥继续使用 `from_json(text(...))` / `to_json(...)`，暂不引入额外格式协议
 - [x] 建立小型标准库草案入口：`examples/ecscript/std_iter_draft.ecs`
 - [ ] 建立正式标准库命名空间：`std.str`、`std.path`、`std.json`、`std.proc`、`std.iter`
 - [ ] 先不做 lazy Iterator / Stream；只预留接口，不引入生命周期和消费语义复杂度
@@ -959,16 +960,35 @@ echo ${to_json(data)} | jq .name
 
 **目标**：让 `ecscript` 成为 shell 的扩展语言，而不是只用于普通脚本计算。这个阶段重点借鉴 fish 的事件模型和 Nushell / Elvish 的模块组织方式。
 
-**本阶段要做的事**
+**优先级排序**
 
-- [ ] 实现文件级模块：`use ./foo.ecs as foo`
-- [ ] 实现 `pub let` / `pub func`：模块内部默认私有，公开绑定进入模块对象
-- [ ] 实现模块缓存：同一路径模块只初始化一次
-- [ ] 明确 `use` 语义：只加载模块并返回命名空间对象，不自动注册全局副作用
+### 第一批：模块 MVP（最高优先级）
+
+- [x] 实现文件级模块：`use ./foo.ecs as foo`
+- [x] 实现 `pub let` / `pub func`：模块内部默认私有，公开绑定进入模块对象
+- [x] 实现模块缓存：同一路径模块只初始化一次
+- [x] 明确 `use` 语义：只加载模块并返回命名空间对象，不自动注册全局副作用
+- [x] 明确模块求值环境：
+      `use` 在独立模块环境中执行，导出结果映射成普通对象命名空间
+- [x] 先只支持相对路径模块，不做搜索路径和包管理
+- [ ] 决定是否支持交互 REPL 中的 `use`，或继续保持“仅文件上下文可用”
+
+### 第二批：最小 shell 扩展点（高优先级）
+
 - [ ] 实现最小 hook API：`before_prompt`、`after_cd`、`preexec`、`postexec`
+- [ ] 预留 prompt API：`prompt(func(ctx) { ... })`
+- [ ] 先让 `prompt` / `hook` 只接受 `ecscript` 函数值，不引入额外 DSL
+- [ ] 明确 hook 的返回值约定和错误传播规则：
+      返回 `nil` 为“无动作”，异常则以受控方式中断当前扩展点
+
+### 第三批：交互增强（次高优先级）
+
 - [ ] 实现 completion API：`complete(name, func(ctx) { ... })`
 - [ ] 预留 key binding API：`bind(key, func(ctx) { ... })`
-- [ ] 预留 prompt API：`prompt(func(ctx) { ... })`
+- [ ] 为 completion 增加结构化候选对象：
+      `{ value, display, desc, kind }`
+- [ ] 补一个最小交互扩展示例：
+      `use git_complete as git; git.init()`
 
 **推荐上下文对象**
 
@@ -988,9 +1008,14 @@ complete("git", func(ctx) {
 - [ ] 模块副作用必须显式调用 `init()`，不因 `use` 自动发生
 - [ ] completion 返回结构化对象：`{ value, display, desc, kind }`
 - [ ] prompt / completion / hook 都复用 `ecscript` 函数值，不再引入配置字符串 DSL
+- [ ] `source` 与 `use` 的语义继续分离：
+      `source` 修改当前会话；`use` 返回模块对象
+- [ ] 在模块系统稳定前，不把 shell builtin 或 extern metadata 硬塞进模块 loader
 
 **完成标准**
 
+- [ ] 可以先写出最小模块：
+      `use ./foo.ecs as foo; foo.init()`
 - [ ] 可以用 `.ecs` 模块实现一个最小 zoxide / direnv / starship adapter 原型
 - [ ] 用户配置可以写成：`use zoxide as zoxide; zoxide.init()`
 

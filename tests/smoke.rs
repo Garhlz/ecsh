@@ -356,6 +356,29 @@ fn smoke_runs_example_ecscript_files_via_ecsh() {
 }
 
 #[test]
+fn smoke_runs_module_imports_via_ecsh_file_mode() {
+    let dir = temp_path("stage10-module");
+    std::fs::create_dir_all(&dir).expect("failed to create module dir");
+    let main_path = dir.join("main.ecs");
+    let foo_path = dir.join("foo.ecs");
+    std::fs::write(&foo_path, "let hidden = 1\npub let visible = hidden + 1\n")
+        .expect("failed to write foo module");
+    std::fs::write(&main_path, "use ./foo.ecs as foo\nprintln(foo.visible)\n")
+        .expect("failed to write main script");
+
+    let output = run_ecsh_file_output(&main_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(stdout.lines().any(|line| line == "2"), "stdout was:\n{stdout}");
+
+    let _ = std::fs::remove_file(main_path);
+    let _ = std::fs::remove_file(foo_path);
+    let _ = std::fs::remove_dir(dir);
+}
+
+#[test]
 fn smoke_formats_ecscript_file_errors_via_ecsh() {
     let path = temp_path("stage7-script-error.ecs");
     std::fs::write(&path, "let x = add(1, 2;\n").expect("failed to write script");
@@ -439,6 +462,19 @@ fn smoke_ecscript_env_builtin() {
     let output = run_ecsh_output("let x = env(\"PATH\"); println(len(x) > 0); exit;");
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("true"));
+}
+
+#[test]
+fn smoke_ecscript_cwd_and_join_path_builtins() {
+    let output = run_ecsh(
+        r#"println(cwd())
+println(join_path("/tmp", "ecsh"))
+exit
+"#,
+    );
+
+    assert!(output.lines().next().is_some_and(|line| line.starts_with('/')));
+    assert!(output.lines().any(|line| line == "/tmp/ecsh"));
 }
 
 #[test]

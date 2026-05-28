@@ -17,7 +17,7 @@
 - 数组 / 对象字面量
 - 字段访问、索引访问
 - 字段赋值、索引赋值
-- 全局 builtin：`env` / `range` / `len` / `print` / `println` / `push` / `pop` / `insert` / `remove` / `slice` / `keys` / `values` / `to_json` / `from_json`
+- 全局 builtin：`env` / `cwd` / `join_path` / `stdin` / `read_lines` / `write_lines` / `range` / `len` / `print` / `println` / `push` / `pop` / `insert` / `remove` / `slice` / `keys` / `values` / `to_json` / `from_json`
 - 命令桥：`cmd{ ... }` / `command(...)` / `run` / `capture` / `text` / `lines` / `with_env` / `with_cwd`
 - 值流原语：`map` / `filter` / `reduce` / `each` / `any` / `all` / `find` / `join`
 - `if / else if / else`
@@ -38,7 +38,7 @@
 当前未实现：
 
 - block value / 尾表达式返回值
-- 模块系统
+- 搜索路径、命名导入、`pub use`
 - 字符串插值 / 多行字符串等更完整的字符串系统
 
 ### 与 ecsh 的当前关系
@@ -51,6 +51,7 @@
 - `ecscript` 现在也可以通过 `cmd{ ... }` 结构化命令字面量进入 shell 命令桥，再由 `run` / `capture` / `text` / `lines` 消费执行
 - `ecscript` 现在支持 `|>` 值流语法糖：`x |> f(a, b)` 等价于 `f(x, a, b)`
 - 命令桥当前也支持单命令纯输出 shell builtin；pipeline 内 builtin 仍未接通
+- 文件级模块 MVP 已接通：`.ecs` 文件里可以 `use ./foo.ecs as foo`
 
 ### 已知边界（非 bug）
 
@@ -61,6 +62,8 @@
 3. **自由变量 vs builtin 同名。** 如果 lambda 内部要调用 builtin `push`，而外层有同名的局部变量（如 `let push = ...`），则 builtin 可能被遮蔽。避免给闭包变量起 builtin 同名。
 
 4. **带源码行的错误展示目前还是显式 API。** 错误对象内部仍只保存 byte offset；如果调用方想拿到 `line:column + 源码行 + ^` 的格式，需要显式调用 `format_with_source(src)`。
+
+5. **`use` 当前只在文件执行上下文可用。** 模块路径需要相对当前脚本文件目录解析，所以交互 REPL 中暂时不能直接 `use ./foo.ecs as foo`。
 
 ---
 
@@ -305,6 +308,31 @@ let no_args = () => 42;
 ```
 
 括号内参数可选。`=>` 后可跟单表达式（不需要 `return`）或 block。
+
+### 3.4 模块语法（MVP）
+
+当前最小模块语法包括：
+
+```ecs
+pub let name = "ecs"
+
+pub func add(a, b) {
+    return a + b
+}
+
+use ./foo.ecs as foo
+println(foo.name)
+```
+
+规则：
+
+- 模块内部默认私有
+- 只有 `pub let` / `pub func` 进入导出对象
+- `use ./foo.ecs as foo` 会把导入结果绑定为普通对象 `foo`
+- `foo.bar` 只是普通字段访问，不是特殊命名空间语法
+- 当前不支持 `pub use`、命名导入或搜索路径
+- 同一路径模块当前会复用同一个缓存对象
+- `a -> b -> a` 这类循环导入当前会报错
 
 ---
 
@@ -601,6 +629,8 @@ slice(range(0, 5), 1, 4) // => [1, 2, 3]
 | 名字 | 语义 | 备注 |
 |------|------|------|
 | `env(name)` | 读取环境变量 | `name` 必须是 `String`，不存在时返回 `nil` |
+| `cwd()` | 返回当前工作目录 | 返回绝对路径字符串 |
+| `join_path(a, b)` | 按平台规则拼接两段路径 | 参数都必须是 `String` |
 | `range(start, end)` | 生成闭区间整数数组 | `start` / `end` 必须是 `Int` |
 | `len(x)` | 返回长度 | 支持 `Array` / `Object` / `String` |
 | `print(v...)` | 输出一个或多个值 | 参数之间用空格分隔，不自动换行 |
@@ -612,7 +642,11 @@ slice(range(0, 5), 1, 4) // => [1, 2, 3]
 | `slice(arr, start, end)` | 返回半开区间子数组 | 结果是 `arr[start..end)` |
 | `keys(obj)` | 返回对象 key 数组 | 按 key 排序 |
 | `values(obj)` | 返回对象 value 数组 | 顺序与排序后的 key 一致 |
+| `stdin()` | 读取当前脚本输入文本 | 文件执行和管道输入场景返回完整文本；交互 REPL 默认空字符串 |
+| `read_lines()` | 按行读取当前脚本输入 | 基于 `stdin()` 的文本桥，返回 `Array<String>` |
+| `write_lines(xs)` | 将数组逐项按行写到 stdout | 使用元素的 display 文本，每项自动换行 |
 | `to_json(x)` | 转成 JSON 字符串 | 对象 key 排序；检测循环引用 |
+| `from_json(text)` | 把 JSON 字符串解析成语言值 | 失败时报 `ParseInExpr` |
 | `map(arr, func)` | 对数组逐项映射 | 缺失 `return` 视为 `nil` |
 | `filter(arr, func)` | 只保留谓词为 `true` 的元素 | 回调必须返回 `Bool` |
 | `reduce(arr, init, func)` | 左折叠 | 回调接收 `(acc, x)` |
@@ -621,6 +655,48 @@ slice(range(0, 5), 1, 4) // => [1, 2, 3]
 | `all(arr, func)` | 全称量词 | 回调必须返回 `Bool` |
 | `find(arr, func)` | 返回首个匹配元素 | 没有匹配时返回 `nil` |
 | `join(arr, sep)` | 按 display 文本连接数组元素 | `sep` 必须是 `String` |
+
+### 9.x bridge 常见组合
+
+text/value bridge 的最小用法：
+
+```ecs
+let text = stdin();
+let lines = read_lines();
+
+println(text);
+println(lines);
+write_lines(lines);
+```
+
+目录/路径相关的最小用法：
+
+```ecs
+println(cwd());
+println(join_path("/tmp", "ecsh"));
+```
+
+说明：
+
+- `stdin()` 返回整份输入文本
+- `read_lines()` 返回 `Array<String>`
+- `write_lines(xs)` 适合把一组文本行重新送回 stdout
+
+JSON bridge 推荐继续显式组合：
+
+```ecs
+let data = from_json(stdin());
+println(to_json(data));
+
+let payload = from_json(text(cmd{ printf "{\"ok\":true}" }));
+println(payload.ok);
+```
+
+这里的设计原则是：
+
+- 文本桥只负责文本和数组行视图
+- JSON 桥只负责文本和结构化值互转
+- 先通过显式组合完成格式转换，不额外引入 `json(cmd)` 或更重的格式协议
 
 ---
 

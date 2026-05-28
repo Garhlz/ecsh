@@ -81,7 +81,7 @@ pub fn free_vars(
 
 fn visit_stmt(stmt: &Stmt, stack: &mut Vec<HashSet<String>>, free_set: &mut HashSet<String>) {
     match &stmt.kind {
-        StmtKind::Let { name, expr } => {
+        StmtKind::Let { name, expr, .. } => {
             visit_expr(expr, stack, free_set);
             declare(name, stack);
         }
@@ -164,6 +164,9 @@ fn visit_stmt(stmt: &Stmt, stack: &mut Vec<HashSet<String>>, free_set: &mut Hash
         StmtKind::FuncDeclare { name, .. } => {
             // 内层函数声明，实际上和let的意义一样
             declare(name, stack);
+        }
+        StmtKind::Use { .. } => {
+            return;
         }
         StmtKind::Break => {
             return;

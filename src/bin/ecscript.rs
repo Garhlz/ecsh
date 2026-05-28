@@ -1,13 +1,14 @@
 use ecsh::{
     diagnostics::print_error,
     ecscript::{
-        Interpreter, InterpreterError, Value, error::ParseError, repl_output_needs_newline,
-        repr_value, reset_repl_output_state,
+        Environment, Interpreter, InterpreterError, Value, error::ParseError,
+        repl_output_needs_newline, repr_value, reset_repl_output_state,
+        run_script_file_with_stdin,
     },
 };
 use rustyline::{DefaultEditor, error::ReadlineError};
 use std::{
-    env, fs,
+    env,
     io::{self, IsTerminal, Read},
     process,
 };
@@ -58,9 +59,26 @@ fn run() -> Result<(), CliError> {
         }
         InputMode::Eval(source) => run_source(&source),
         InputMode::File(path) => {
-            let source = fs::read_to_string(&path)
-                .map_err(|err| CliError::Other(format!("failed to read '{}': {}", path, err)))?;
-            run_source(&source)
+            let stdin_text = if io::stdin().is_terminal() {
+                None
+            } else {
+                let mut text = String::new();
+                io::stdin()
+                    .read_to_string(&mut text)
+                    .map_err(|err| CliError::Other(format!("failed to read stdin: {}", err)))?;
+                Some(text)
+            };
+            let env = Environment::new();
+            run_script_file_with_stdin(&path, &env, stdin_text.as_deref()).map_err(|err| {
+                match err {
+                    ecsh::ecscript::ScriptFileError::Read { path, err } => {
+                        CliError::Other(format!("failed to read '{}': {}", path.display(), err))
+                    }
+                    ecsh::ecscript::ScriptFileError::Script { source, err } => {
+                        CliError::Script { source, err }
+                    }
+                }
+            })
         }
     }
 }
