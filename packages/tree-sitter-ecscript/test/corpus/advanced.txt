@@ -1,0 +1,108 @@
+==================
+Object field and index access
+==================
+let obj = {name: "ecsh", nums: [1, 2, 3]}
+obj.name
+obj[0]
+
+---
+
+(source_file
+  (let_statement
+    name: (variable_identifier
+      (variable_identifier))
+    value: (expression
+      (primary_expression
+        (object
+          (object_entry
+            key: (property_identifier
+              (property_identifier))
+            value: (expression
+              (primary_expression
+                (string))))
+          (object_entry
+            key: (property_identifier
+              (property_identifier))
+            value: (expression
+              (primary_expression
+                (array
+                  (expression
+                    (primary_expression
+                      (integer)))
+                  (expression
+                    (primary_expression
+                      (integer)))
+                  (expression
+                    (primary_expression
+                      (integer)))))))))))
+  (newline)
+  (expression_statement
+    (expression
+      (postfix_expression
+        (field_expression
+          object: (primary_expression
+            (identifier))
+          field: (property_identifier
+            (property_identifier))))))
+  (newline)
+  (expression_statement
+    (expression
+      (postfix_expression
+        (index_expression
+          object: (primary_expression
+            (identifier))
+          index: (expression
+            (primary_expression
+              (integer)))))))
+  (newline))
+
+==================
+For with range and lambda
+==================
+for i in 0..=3 {
+  println(i)
+}
+let f = (x) => x * 2
+
+---
+
+(source_file
+  (for_statement
+    name: (variable_identifier
+      (variable_identifier))
+    iterable: (expression
+      (range_expression
+        left: (primary_expression
+          (integer))
+        right: (primary_expression
+          (integer))))
+    body: (statement_block
+      (newline)
+      (expression_statement
+        (expression
+          (postfix_expression
+            (call_expression
+              function: (primary_expression
+                (identifier))
+              arguments: (argument_list
+                (expression
+                  (primary_expression
+                    (identifier))))))))
+      (newline)))
+  (newline)
+  (let_statement
+    name: (variable_identifier
+      (variable_identifier))
+    value: (expression
+      (primary_expression
+        (lambda_expression
+          (parameter_list
+            (variable_identifier
+              (variable_identifier)))
+          body: (expression
+            (multiplicative_expression
+              left: (primary_expression
+                (identifier))
+              right: (primary_expression
+                (integer))))))))
+  (newline))
