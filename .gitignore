@@ -11,4 +11,4 @@ packages/tree-sitter-ecscript/node_modules/
 packages/vscode-ecscript/node_modules/
 packages/vscode-ecscript/dist/
 packages/vscode-ecscript/assets/
-packages/vscode-ecscript/vscode-ecscript-0.1.0.vsix
+packages/vscode-ecscript/*.vsix

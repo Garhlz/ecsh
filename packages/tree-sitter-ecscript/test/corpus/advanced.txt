@@ -57,6 +57,72 @@ obj[0]
   (newline))
 
 ==================
+For with inclusive range
+==================
+for i in 0..=3 {
+  println(i)
+}
+
+---
+
+(source_file
+  (for_statement
+    name: (variable_identifier
+      (variable_identifier))
+    iterable: (for_range_expression
+      left: (primary_expression
+        (integer))
+      right: (primary_expression
+        (integer)))
+    body: (statement_block
+      (newline)
+      (expression_statement
+        (expression
+          (postfix_expression
+            (call_expression
+              function: (primary_expression
+                (identifier))
+              arguments: (argument_list
+                (expression
+                  (primary_expression
+                    (identifier))))))))
+      (newline)))
+  (newline))
+
+==================
+For with exclusive range
+==================
+for i in 1..10 {
+  println(i)
+}
+
+---
+
+(source_file
+  (for_statement
+    name: (variable_identifier
+      (variable_identifier))
+    iterable: (for_range_expression
+      left: (primary_expression
+        (integer))
+      right: (primary_expression
+        (integer)))
+    body: (statement_block
+      (newline)
+      (expression_statement
+        (expression
+          (postfix_expression
+            (call_expression
+              function: (primary_expression
+                (identifier))
+              arguments: (argument_list
+                (expression
+                  (primary_expression
+                    (identifier))))))))
+      (newline)))
+  (newline))
+
+==================
 For with range and lambda
 ==================
 for i in 0..=3 {
@@ -70,12 +136,11 @@ let f = (x) => x * 2
   (for_statement
     name: (variable_identifier
       (variable_identifier))
-    iterable: (expression
-      (range_expression
-        left: (primary_expression
-          (integer))
-        right: (primary_expression
-          (integer))))
+    iterable: (for_range_expression
+      left: (primary_expression
+        (integer))
+      right: (primary_expression
+        (integer)))
     body: (statement_block
       (newline)
       (expression_statement

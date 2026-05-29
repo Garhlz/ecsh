@@ -6,7 +6,12 @@ import { Language, Parser, Query, type QueryCapture } from "web-tree-sitter";
 type SyntaxNode = NonNullable<ReturnType<Parser["parse"]>>["rootNode"];
 
 const TOKEN_TYPES = [
+  "keywordDeclaration",
+  "keywordControl",
+  "keywordImport",
+  "keywordCommand",
   "keyword",
+  "modifier",
   "string",
   "number",
   "comment",
@@ -53,7 +58,7 @@ type LoadedRuntime = {
 class EcscriptTreeSitterRuntime {
   private runtimePromise?: Promise<LoadedRuntime>;
 
-  constructor(private readonly context: vscode.ExtensionContext) { }
+  constructor(private readonly context: vscode.ExtensionContext) {}
 
   async get(): Promise<LoadedRuntime> {
     this.runtimePromise ??= this.load();
@@ -68,7 +73,7 @@ class EcscriptTreeSitterRuntime {
     const wasmPath = path.join(this.context.extensionPath, "assets", "tree-sitter-ecscript.wasm");
     const queryPath = path.join(this.context.extensionPath, "assets", "queries", "highlights.scm");
 
-    await ensureExists(wasmPath, "Missing ecscript parser wasm. Run `npm run build:wasm` in vscode-ecscript.");
+    await ensureExists(wasmPath, "Missing ecscript parser wasm. Run `just sync-vscode-assets` from the monorepo root.");
     await ensureExists(queryPath, "Missing ecscript highlight query bundle.");
 
     await Parser.init({
@@ -92,37 +97,55 @@ class EcscriptTreeSitterRuntime {
 }
 
 class EcscriptSemanticTokensProvider implements vscode.DocumentSemanticTokensProvider {
-  constructor(private readonly runtime: EcscriptTreeSitterRuntime) { }
+  constructor(private readonly runtime: EcscriptTreeSitterRuntime) {}
 
   async provideDocumentSemanticTokens(
     document: vscode.TextDocument,
-    _token: vscode.CancellationToken
+    token: vscode.CancellationToken
   ): Promise<vscode.SemanticTokens> {
     const runtime = await this.runtime.get();
-    const tree = runtime.parser.parse(document.getText());
-    if (!tree) return new vscode.SemanticTokensBuilder(LEGEND).build();
-    const rootNode = tree.rootNode;
-    const builder = new vscode.SemanticTokensBuilder(LEGEND);
-    const captures = runtime.query.captures(rootNode);
-    const accepted = resolveCandidates(captures, document);
-
-    for (const candidate of accepted) {
-      builder.push(
-        candidate.line,
-        candidate.char,
-        candidate.length,
-        tokenTypeIndex(candidate.tokenType),
-        modifierBitmask(candidate.modifiers),
-      );
+    if (token.isCancellationRequested) {
+      return new vscode.SemanticTokensBuilder(LEGEND).build();
     }
 
-    return builder.build();
+    const tree = runtime.parser.parse(document.getText());
+    try {
+      if (!tree) return new vscode.SemanticTokensBuilder(LEGEND).build();
+      if (token.isCancellationRequested) {
+        return new vscode.SemanticTokensBuilder(LEGEND).build();
+      }
+
+      const captures = runtime.query.captures(tree.rootNode);
+      if (token.isCancellationRequested) {
+        return new vscode.SemanticTokensBuilder(LEGEND).build();
+      }
+
+      const accepted = resolveCandidates(captures, document);
+
+      const builder = new vscode.SemanticTokensBuilder(LEGEND);
+      for (const candidate of accepted) {
+        if (token.isCancellationRequested) {
+          return new vscode.SemanticTokensBuilder(LEGEND).build();
+        }
+        builder.push(
+          candidate.line,
+          candidate.char,
+          candidate.length,
+          tokenTypeIndex(candidate.tokenType),
+          modifierBitmask(candidate.modifiers),
+        );
+      }
+
+      return builder.build();
+    } finally {
+      tree?.delete();
+    }
   }
 }
 
 // ── Folding ranges ──────────────────────────────────────────────
-// Foldable nodes are `statement_block` and `statement_block` inside
-// control-flow / function constructs that span more than one line.
+// Foldable nodes are `statement_block`, `object`, `array`, and
+// `command_literal` that span more than one line.
 
 const FOLDABLE_NODE_TYPES = new Set([
   "statement_block",
@@ -132,17 +155,24 @@ const FOLDABLE_NODE_TYPES = new Set([
 ]);
 
 class EcscriptFoldingRangeProvider implements vscode.FoldingRangeProvider {
-  constructor(private readonly runtime: EcscriptTreeSitterRuntime) { }
+  constructor(private readonly runtime: EcscriptTreeSitterRuntime) {}
 
   async provideFoldingRanges(
     document: vscode.TextDocument,
+    token: vscode.CancellationToken,
   ): Promise<vscode.FoldingRange[]> {
     const { parser } = await this.runtime.get();
+    if (token.isCancellationRequested) return [];
+
     const tree = parser.parse(document.getText());
-    if (!tree) return [];
-    const ranges: vscode.FoldingRange[] = [];
-    collectFoldingNodes(tree.rootNode, ranges);
-    return ranges;
+    try {
+      if (!tree) return [];
+      const ranges: vscode.FoldingRange[] = [];
+      collectFoldingNodes(tree.rootNode, ranges);
+      return ranges;
+    } finally {
+      tree?.delete();
+    }
   }
 }
 
@@ -176,16 +206,22 @@ const SYMBOL_KINDS: Record<string, vscode.SymbolKind> = {
 };
 
 class EcscriptDocumentSymbolProvider implements vscode.DocumentSymbolProvider {
-  constructor(private readonly runtime: EcscriptTreeSitterRuntime) { }
+  constructor(private readonly runtime: EcscriptTreeSitterRuntime) {}
 
   async provideDocumentSymbols(
     document: vscode.TextDocument,
+    token: vscode.CancellationToken,
   ): Promise<vscode.DocumentSymbol[]> {
     const { parser } = await this.runtime.get();
+    if (token.isCancellationRequested) return [];
+
     const tree = parser.parse(document.getText());
-    if (!tree) return [];
-    const symbols = collectDocumentSymbols(tree.rootNode, document);
-    return symbols;
+    try {
+      if (!tree) return [];
+      return collectDocumentSymbols(tree.rootNode, document);
+    } finally {
+      tree?.delete();
+    }
   }
 }
 
@@ -200,17 +236,19 @@ function collectDocumentSymbols(
     if (kind) {
       const name = childName(child);
       if (name) {
+        const startLineText = document.lineAt(child.startPosition.row).text;
+        const endLineText = document.lineAt(child.endPosition.row).text;
         const range = new vscode.Range(
           child.startPosition.row,
-          child.startPosition.column,
+          byteColumnToUtf16Column(startLineText, child.startPosition.column),
           child.endPosition.row,
-          child.endPosition.column,
+          byteColumnToUtf16Column(endLineText, child.endPosition.column),
         );
         const selectionRange = new vscode.Range(
           child.startPosition.row,
-          child.startPosition.column,
+          byteColumnToUtf16Column(startLineText, child.startPosition.column),
           child.endPosition.row,
-          child.endPosition.column,
+          byteColumnToUtf16Column(endLineText, child.endPosition.column),
         );
         symbols.push(
           new vscode.DocumentSymbol(
@@ -267,13 +305,17 @@ export function activate(context: vscode.ExtensionContext): void {
     try {
       const loaded = await runtime.get();
       const tree = loaded.parser.parse(editor.document.getText());
-      const root = tree?.rootNode?.toString() ?? "<parse failed>";
+      try {
+        const root = tree?.rootNode?.toString() ?? "<parse failed>";
 
-      const doc = await vscode.workspace.openTextDocument({
-        language: "lisp",
-        content: root
-      });
-      await vscode.window.showTextDocument(doc, { preview: true });
+        const doc = await vscode.workspace.openTextDocument({
+          language: "lisp",
+          content: root
+        });
+        await vscode.window.showTextDocument(doc, { preview: true });
+      } finally {
+        tree?.delete();
+      }
     } catch (error) {
       await vscode.window.showWarningMessage(renderError(error));
     }
@@ -304,7 +346,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
-export function deactivate(): void { }
+export function deactivate(): void {}
 
 async function ensureExists(filePath: string, message: string): Promise<void> {
   try {
@@ -331,30 +373,99 @@ function byteColumnToUtf16Column(lineText: string, byteColumn: number): number {
   return prefix.length;
 }
 
+// ── Capture-to-token lookup table ──────────────────────────────
+// Each capture name maps to a VS Code token type, optional modifier,
+// and priority. Higher priority wins when multiple captures cover the
+// same byte range. Entries set to `null` are always skipped.
+
+type TokenMapping = {
+  tokenType: TokenType;
+  modifiers: TokenModifier[];
+  priority: number;
+};
+
+const CAPTURE_TOKEN_MAP: Record<string, TokenMapping | null> = {
+  "comment":            { tokenType: "comment",    modifiers: [], priority: 10 },
+
+  // Keywords
+  "keyword.declaration": { tokenType: "keywordDeclaration", modifiers: ["declaration"], priority: 80 },
+  "keyword.modifier":    { tokenType: "modifier",           modifiers: [],              priority: 80 },
+  "keyword.control":     { tokenType: "keywordControl",     modifiers: [],              priority: 80 },
+  "keyword.import":      { tokenType: "keywordImport",      modifiers: [],              priority: 80 },
+  "keyword.command":     { tokenType: "keywordCommand",     modifiers: [],              priority: 90 },
+
+  // Functions
+  "function.declaration": { tokenType: "function", modifiers: ["declaration"], priority: 100 },
+  "function.call":        { tokenType: "function", modifiers: [],             priority:  90 },
+  "function.method":      { tokenType: "method",   modifiers: [],             priority: 100 },
+
+  // Variables
+  "parameter":             { tokenType: "parameter", modifiers: [],               priority: 90 },
+  "variable.declaration":  { tokenType: "variable",  modifiers: ["declaration"],  priority: 80 },
+  "variable":              { tokenType: "variable",  modifiers: [],               priority: 40 },
+
+  // Properties
+  "property":  { tokenType: "property",  modifiers: [], priority: 70 },
+  "namespace": { tokenType: "namespace", modifiers: [], priority: 90 },
+
+  // Literals
+  "string":             { tokenType: "string", modifiers: [],                     priority: 70 },
+  "string.special":     { tokenType: "string", modifiers: ["documentation"],      priority: 80 },
+  "string.special.path":{ tokenType: "string", modifiers: [],                     priority: 85 },
+  "number":             { tokenType: "number", modifiers: [],                     priority: 70 },
+  "constant.builtin":   { tokenType: "keyword", modifiers: [],                    priority: 70 },
+
+  // Operators
+  "operator":      { tokenType: "operator", modifiers: [],                   priority: 50 },
+  "operator.pipe": { tokenType: "operator", modifiers: ["modification"],     priority: 80 },
+
+  // Excluded (structural punctuation)
+  "punctuation.delimiter": null,
+};
+
+function classifyCapture(name: string): { tokenType: TokenType; modifiers: TokenModifier[]; priority: number } | null {
+  const entry = CAPTURE_TOKEN_MAP[name];
+  if (!entry) return null;
+  return entry;
+}
+
+// ── Semantic token conflict resolution ─────────────────────────
+// Sorts candidates by priority descending so that higher-priority
+// captures are accepted first. A candidate is only kept if it does
+// not overlap any already-accepted (higher-priority) candidate.
+// The final list is re-sorted by source position for VS Code output.
+
 function resolveCandidates(captures: QueryCapture[], document: vscode.TextDocument): TokenCandidate[] {
   const candidates = captures
     .map((c) => candidateFromCapture(c, document))
-    .filter((candidate): candidate is TokenCandidate => candidate !== null)
-    .sort(compareCandidates);
+    .filter((candidate): candidate is TokenCandidate => candidate !== null);
+
+  // Sort by priority descending first — highest-priority wins
+  candidates.sort((a, b) => {
+    if (a.priority !== b.priority) return b.priority - a.priority;
+    // Stable fallback for equal priority
+    if (a.line !== b.line) return a.line - b.line;
+    if (a.char !== b.char) return a.char - b.char;
+    return b.length - a.length;
+  });
 
   const accepted: TokenCandidate[] = [];
 
   for (const candidate of candidates) {
-    const last = accepted.at(-1);
-    if (!last) {
+    const hasOverlap = accepted.some((existing) =>
+      overlaps(existing, candidate)
+    );
+    if (!hasOverlap) {
       accepted.push(candidate);
-      continue;
-    }
-
-    if (!overlaps(last, candidate)) {
-      accepted.push(candidate);
-      continue;
-    }
-
-    if (sameSpan(last, candidate) && candidate.priority > last.priority) {
-      accepted[accepted.length - 1] = candidate;
     }
   }
+
+  // Re-sort by source position for the builder
+  accepted.sort((a, b) => {
+    if (a.line !== b.line) return a.line - b.line;
+    if (a.char !== b.char) return a.char - b.char;
+    return b.length - a.length;
+  });
 
   return accepted;
 }
@@ -400,76 +511,6 @@ function modifierBitmask(modifiers: readonly TokenModifier[]): number {
   return mask;
 }
 
-// ── Capture-to-token lookup table ──────────────────────────────
-// Each capture name maps to a VS Code token type, optional modifier,
-// and priority. Higher priority wins when multiple captures cover the
-// same byte range.
-
-type TokenMapping = {
-  tokenType: TokenType;
-  modifiers: TokenModifier[];
-  priority: number;
-};
-
-const CAPTURE_TOKEN_MAP: Record<string, TokenMapping> = {
-  "comment": { tokenType: "comment", modifiers: [], priority: 10 },
-
-  // Keywords
-  "keyword.declaration": { tokenType: "keyword", modifiers: ["declaration"], priority: 80 },
-  "keyword.control": { tokenType: "keyword", modifiers: [], priority: 80 },
-  "keyword.import": { tokenType: "keyword", modifiers: [], priority: 80 },
-  "keyword.command": { tokenType: "keyword", modifiers: [], priority: 90 },
-
-  // Functions
-  "function.declaration": { tokenType: "function", modifiers: ["declaration"], priority: 100 },
-  "function.call": { tokenType: "function", modifiers: [], priority: 90 },
-  "function.method": { tokenType: "method", modifiers: [], priority: 100 },
-
-  // Variables
-  "parameter": { tokenType: "parameter", modifiers: [], priority: 90 },
-  "variable.declaration": { tokenType: "variable", modifiers: ["declaration"], priority: 80 },
-  "variable": { tokenType: "variable", modifiers: [], priority: 40 },
-
-  // Properties
-  "property": { tokenType: "property", modifiers: [], priority: 70 },
-  "namespace": { tokenType: "namespace", modifiers: [], priority: 90 },
-
-  // Literals
-  "string": { tokenType: "string", modifiers: [], priority: 70 },
-  "string.special": { tokenType: "string", modifiers: ["documentation"], priority: 80 },
-  "string.special.path": { tokenType: "string", modifiers: [], priority: 85 },
-  "number": { tokenType: "number", modifiers: [], priority: 70 },
-  "constant.builtin": { tokenType: "keyword", modifiers: [], priority: 70 },
-
-  // Operators
-  "operator": { tokenType: "operator", modifiers: [], priority: 50 },
-  "operator.pipe": { tokenType: "operator", modifiers: ["modification"], priority: 80 },
-
-  // Excluded (structural punctuation)
-  "punctuation.delimiter": null!,
-};
-
-function classifyCapture(name: string): { tokenType: TokenType; modifiers: TokenModifier[]; priority: number } | null {
-  const entry = CAPTURE_TOKEN_MAP[name];
-  if (!entry) return null;
-  // null marker means "always skip"
-  if (!entry.tokenType) return null;
-  return entry;
-}
-
-function compareCandidates(a: TokenCandidate, b: TokenCandidate): number {
-  if (a.line !== b.line) {
-    return a.line - b.line;
-  }
-  if (a.char !== b.char) {
-    return a.char - b.char;
-  }
-  if (a.priority !== b.priority) {
-    return b.priority - a.priority;
-  }
-  return b.length - a.length;
-}
-
 function overlaps(a: TokenCandidate, b: TokenCandidate): boolean {
   if (a.line !== b.line) {
     return false;
@@ -478,8 +519,4 @@ function overlaps(a: TokenCandidate, b: TokenCandidate): boolean {
   const aEnd = a.char + a.length;
   const bEnd = b.char + b.length;
   return a.char < bEnd && b.char < aEnd;
-}
-
-function sameSpan(a: TokenCandidate, b: TokenCandidate): boolean {
-  return a.line === b.line && a.char === b.char && a.length === b.length;
 }

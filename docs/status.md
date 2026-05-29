@@ -5,7 +5,7 @@
 - 目标：说明项目已经完成的能力、当前正在收口的部分，以及后续工作入口
 - 范围：只描述现状与边界，不展开长期设计推演
 
-更长的设计路线保留在 [TODO.md](/home/elaine/work/projects/ecsh/docs/TODO.md)。
+更长的设计路线保留在 [TODO.md](TODO.md)。
 
 ## 项目结构
 
@@ -41,7 +41,7 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `$(cmd)`：通过 `/bin/sh -c` 做命令替换
 - `${...arr}`：把数组展开成多个 argv
 
-这一部分对应 [TODO.md](/home/elaine/work/projects/ecsh/docs/TODO.md) 中的 stage 6。当前 `HEAD` 对应的主提交也是这一阶段。
+这一部分对应 [TODO.md](TODO.md) 中的 stage 6。当前 `HEAD` 对应的主提交也是这一阶段。
 
 ### ecscript stage 1-6
 

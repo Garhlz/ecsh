@@ -38,9 +38,16 @@ The intended split is:
 Install dependencies and build the extension:
 
 ```bash
-cd vscode-ecscript
+cd packages/vscode-ecscript
 npm install
 npm run build
+```
+
+Or from the monorepo root:
+
+```bash
+just npm-install
+just vscode
 ```
 
 Refresh the copied query files and wasm from the grammar package:
@@ -63,8 +70,32 @@ The extension currently registers a semantic tokens provider for `.ecs` files.
 The first version is intentionally conservative and reuses the synced
 `assets/queries/highlights.scm` query plus the generated wasm parser.
 
+## Custom keyword colors
+
+The extension defines four custom semantic token types
+(`keywordDeclaration`, `keywordControl`, `keywordImport`, `keywordCommand`)
+so that different keyword classes can be styled independently.
+
+To customize their colors, add this to your `settings.json`:
+
+```json
+"editor.semanticTokenColorCustomizations": {
+  "rules": {
+    "keywordDeclaration:ecscript": "#C586C0",
+    "keywordControl:ecscript":     "#569CD6",
+    "keywordImport:ecscript":      "#4EC9B0",
+    "keywordCommand:ecscript":     "#D7BA7D",
+    "keyword.modifier:ecscript":   "#DCDCAA"
+  }
+}
+```
+
+Each theme may handle these custom token types differently. If a theme does
+not provide specific semantic rules, the TextMate fallback scopes defined in
+`package.json` (`storage.type.ecscript`, `keyword.control.ecscript`, etc.)
+will be used instead.
+
 ## Next steps
 
-- improve token conflict resolution for overlapping captures
-- consume `queries/injections.scm` for `cmd{ ... }`
+- consume `queries/injections.scm` for `cmd{ ... }` syntax highlighting
 - add incremental parsing instead of reparsing the entire document
