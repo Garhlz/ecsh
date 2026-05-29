@@ -55,5 +55,10 @@
       "\"",
       "\""
     ]
-  ]
+  ],
+  "indentationRules": {
+    "increaseIndentPattern": "\\{[^}\"']*$|\\[[^\\]\"']*$|\\([^)\"']*$",
+    "decreaseIndentPattern": "^\\s*[}\\]\\)]"
+  },
+  "wordPattern": "[A-Za-z_][A-Za-z0-9_]*"
 }

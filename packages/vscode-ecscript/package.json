@@ -71,22 +71,11 @@
     ],
     "semanticTokenScopes": [
       {
+        "language": "ecscript",
         "scopes": {
-          "keywordDeclaration": ["storage.type.ecscript", "keyword.declaration.ecscript"]
-        }
-      },
-      {
-        "scopes": {
-          "keywordControl": ["keyword.control.ecscript"]
-        }
-      },
-      {
-        "scopes": {
-          "keywordImport": ["keyword.control.import.ecscript"]
-        }
-      },
-      {
-        "scopes": {
+          "keywordDeclaration": ["storage.type.ecscript", "keyword.declaration.ecscript"],
+          "keywordControl": ["keyword.control.ecscript"],
+          "keywordImport": ["keyword.control.import.ecscript"],
           "keywordCommand": ["keyword.other.command.ecscript"]
         }
       }
