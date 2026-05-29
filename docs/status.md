@@ -229,6 +229,24 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `src/executor/`：shell 执行、启动、作业控制、运行时展开
 - `src/bin/ecscript.rs`：独立解释器入口
 - `src/main.rs`：`ecsh` 主循环与顶层调度
+- `packages/tree-sitter-ecscript/`：tree-sitter 语法定义、external scanner、corpus 测试、highlights/locals/injections query
+- `packages/vscode-ecscript/`：VS Code 扩展（语法高亮、折叠、大纲、悬停类型提示、语法错误诊断）
+- `scripts/sync-vscode-assets.sh`：从 `packages/tree-sitter-ecscript` 同步 wasm 和 query 到 VS Code 插件 assets
 
-如果后续继续推进顶层双模式分派，可以再把 `src/main.rs` 中的调度逻辑拆薄一层。  
-如果 shell 侧全面转向结构化错误，也可以把 shell 错误相关接口进一步收束到专门模块中。
+## 编辑器工具链
+
+`packages/tree-sitter-ecscript` 提供 ecscript 的 tree-sitter grammar，覆盖阶段 9 语法（表达式、语句、控制流、函数/lambda、`use`/`pub`、`|>` 管道、`for` range、`cmd{...}` 语法岛）。
+
+`packages/vscode-ecscript` 基于 tree-sitter wasm 提供：
+
+- **Semantic tokens**——按声明/控制/导入/命令/可见性分类的关键字高亮、函数/变量/参数/属性的区分着色
+- **Folding ranges**——`statement_block`、`object`、`array`、`command_literal` 可折叠
+- **Document symbols（大纲/面包屑）**——函数、`let` 变量、`use` 模块导入
+- **Hover**——光标悬停显示 tree-sitter 节点类型名
+- **Diagnostics**——tree-sitter ERROR 和 MISSING 节点转 VS Code 红色波浪线，300ms 防抖
+- **多行 token 拆分**——`command_body` 等跨行节点按行拆分 semantic token
+- **增量解析**——同一文档版本的 parse tree 在 semantic tokens/folding/symbols 三个 provider 间共享缓存
+
+`cmd{...}` 作为语法岛处理：external scanner 维护 brace-depth/quote/escape 状态机识别边界，内部 shell 语义仍由 ecsh/ecscript runtime 处理。scanner 额外跟踪 `${...}` 展开深度避免把展开内的 `}` 当成 cmd 闭合。
+
+所有构建通过 `just` 管理（`just test` / `just vscode` / `just vsix`），VS Code 插件 assets 由 sync 脚本同步，不手动维护两份 query 文件。

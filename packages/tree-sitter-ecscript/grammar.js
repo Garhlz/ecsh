@@ -2,7 +2,8 @@
 // @ts-check
 
 const PREC = {
-  pipe: 10,
+  pipe: 5,
+  range: 10,
   or: 20,
   and: 30,
   compare: 40,
@@ -140,7 +141,7 @@ module.exports = grammar({
       "for",
       field("name", $.variable_identifier),
       "in",
-      field("iterable", choice($.expression, $.for_range_expression)),
+      field("iterable", choice($.for_range_expression, $.expression)),
       field("body", $.statement_block)
     ),
 
@@ -165,7 +166,9 @@ module.exports = grammar({
 
     parameter_list: ($) => seq(
       "(",
-      optional(commaSep1($.variable_identifier)),
+      repeat($.newline),
+      optional(commaSep1($,$.variable_identifier)),
+      repeat($.newline),
       ")"
     ),
 
@@ -180,7 +183,7 @@ module.exports = grammar({
       $.string
     ),
 
-    path_literal: (_) => token(/\.?\.?\/?[A-Za-z0-9_\-./]+/),
+    path_literal: (_) => token(/\.?\.?\/?[^\s"'<>;(){}\[\],|]+/),
 
     expression: ($) => choice(
       $.pipe_expression,
@@ -200,7 +203,7 @@ module.exports = grammar({
       field("right", $.call_expression)
     )),
 
-    for_range_expression: ($) => prec.left(PREC.pipe, seq(
+    for_range_expression: ($) => prec.left(PREC.range, seq(
       field("left", $._logical_expression_operand),
       field("operator", choice("..", "..=")),
       field("right", $._logical_expression_operand)
@@ -267,7 +270,9 @@ module.exports = grammar({
 
     argument_list: ($) => seq(
       "(",
-      optional(commaSep1($.expression)),
+      repeat($.newline),
+      optional(commaSep1($,$.expression)),
+      repeat($.newline),
       ")"
     ),
 
@@ -311,15 +316,19 @@ module.exports = grammar({
 
     array: ($) => seq(
       "[",
-      optional(commaSep1($.expression)),
+      repeat($.newline),
+      optional(commaSep1($,$.expression)),
       optional(","),
+      repeat($.newline),
       "]"
     ),
 
     object: ($) => seq(
       "{",
-      optional(commaSep1($.object_entry)),
+      repeat($.newline),
+      optional(commaSep1($,$.object_entry)),
       optional(","),
+      repeat($.newline),
       "}"
     ),
 
@@ -405,6 +414,6 @@ module.exports = grammar({
   }
 });
 
-function commaSep1(rule) {
-  return seq(rule, repeat(seq(",", rule)));
+function commaSep1($, rule) {
+  return seq(rule, repeat(seq(",", repeat($.newline), rule)));
 }

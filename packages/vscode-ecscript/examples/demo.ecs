@@ -2,8 +2,12 @@ use ./std_test.ecs as std
 
 pub func demo(xs) {
     let obj = {name: "ecsh", nums: [1, 2, 3]}
-    let out = text(cmd{ printf "ok" })
+    let out = text(cmd{ printf "ok"})
     return xs |> map((x) => x + 1) |> join(",")
 }
 
 println(std.sum([1, 2, 3]))
+
+
+
+

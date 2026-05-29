@@ -14,6 +14,14 @@ if [[ ! -x "$TREE_SITTER_CLI" ]]; then
   exit 1
 fi
 
-"$TREE_SITTER_CLI" build --wasm \
-  "$ROOT/packages/tree-sitter-ecscript" \
-  -o "$ROOT/packages/vscode-ecscript/assets/tree-sitter-ecscript.wasm"
+WASM="$ROOT/packages/vscode-ecscript/assets/tree-sitter-ecscript.wasm"
+GRAMMAR="$ROOT/packages/tree-sitter-ecscript/grammar.js"
+SCANNER="$ROOT/packages/tree-sitter-ecscript/src/scanner.c"
+
+if [[ ! -f "$WASM" ]] || [[ "$GRAMMAR" -nt "$WASM" ]] || [[ "$SCANNER" -nt "$WASM" ]]; then
+  "$TREE_SITTER_CLI" build --wasm \
+    "$ROOT/packages/tree-sitter-ecscript" \
+    -o "$WASM"
+else
+  echo "tree-sitter wasm is up to date; skipping rebuild" >&2
+fi

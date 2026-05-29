@@ -13,6 +13,7 @@ typedef struct {
   bool in_single_quote;
   bool in_double_quote;
   bool escaped;
+  int shell_expansion_depth; ///< depth of ${...} shell parameter expansions
 } ScannerState;
 
 void *tree_sitter_ecscript_external_scanner_create() {
@@ -100,7 +101,7 @@ static bool scan_command_body(TSLexer *lexer, ScannerState *s) {
       continue;
     }
 
-    // ── brace depth (outside quotes) ─────────────────────────
+    // ── brace & dollar (outside quotes) ────────────────────
     if (!s->in_single_quote && !s->in_double_quote) {
       if (ch == '{') {
         s->brace_depth++;
@@ -109,7 +110,30 @@ static bool scan_command_body(TSLexer *lexer, ScannerState *s) {
         continue;
       }
 
+      // Shell parameter expansion `${…}`: the `}` inside the expansion
+      // (e.g. in pattern replacement `${var/}/x}`) must not be mistaken
+      // for the outer cmd-closing brace.  We handle `$` here and peek
+      // at the next character: if it's `{`, we enter a shell expansion
+      // sub-mode whose matching `}` decrements *both* counters.
+      if (ch == '$') {
+        advance(lexer); // consume the $
+        if (lexer->lookahead == '{') {
+          s->shell_expansion_depth++;
+          s->brace_depth++;
+          advance(lexer); // consume the {
+        }
+        consumed = true;
+        continue;
+      }
+
       if (ch == '}') {
+        if (s->shell_expansion_depth > 0) {
+          s->shell_expansion_depth--;
+          s->brace_depth--;
+          consumed = true;
+          advance(lexer);
+          continue;
+        }
         if (s->brace_depth > 0) {
           s->brace_depth--;
           consumed = true;
@@ -146,6 +170,7 @@ bool tree_sitter_ecscript_external_scanner_scan(
     s->in_single_quote = false;
     s->in_double_quote = false;
     s->escaped = false;
+    s->shell_expansion_depth = 0;
     return scan_command_body(lexer, s);
   }
 

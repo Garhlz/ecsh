@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { Language, Parser, Query, type QueryCapture } from "web-tree-sitter";
+import { Language, Parser, Query, type QueryCapture, type Tree } from "web-tree-sitter";
 
 type SyntaxNode = NonNullable<ReturnType<Parser["parse"]>>["rootNode"];
 
@@ -51,30 +51,109 @@ type LoadedRuntime = {
   parser: Parser;
   language: Language;
   query: Query;
+  injectionQuery: Query;
+  // NOTE: injectionQuery is loaded and exposed but not yet consumed by VS
+  // Code's language injection pipeline. A future step should use
+  // query.matches() to find @injection.content capture ranges and
+  // register them via VS Code's setLanguageConfiguration or
+  // create virtual documents with the injected language ID.
   wasmPath: string;
   queryPath: string;
+  injectionQueryPath: string;
 };
 
 class EcscriptTreeSitterRuntime {
   private runtimePromise?: Promise<LoadedRuntime>;
+  private treeCache?: { uri: string; version: number; tree: Tree };
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   async get(): Promise<LoadedRuntime> {
-    this.runtimePromise ??= this.load();
+    if (!this.runtimePromise) {
+      this.runtimePromise = this.load().catch((err) => {
+        this.runtimePromise = undefined;
+        throw err;
+      });
+    }
     return this.runtimePromise;
   }
 
-  invalidate(): void {
+  async invalidate(): Promise<void> {
+    const old = this.runtimePromise;
     this.runtimePromise = undefined;
+    if (old) {
+      try {
+        const runtime = await old;
+        runtime.parser.delete();
+        runtime.query.delete();
+        runtime.injectionQuery.delete();
+      } catch {
+        // runtime was never successfully loaded; nothing to clean up
+      }
+    }
+    // Tree cache depends on the parser; clear it when the runtime is flushed
+    this.clearTreeCache();
+  }
+
+  /** Parse (or reuse a cached parse for) an editor document.
+   *
+   * Three providers (semantic tokens, folding, document symbols) each need
+   * the parse tree.  The first one to arrive parses; the others reuse the
+   * cached tree.  Incremental parsing is used when the document has been
+   * edited since the last parse for the same URI.
+   *
+   * The caller must NOT call tree.delete() — the cache owns the lifecycle. */
+  async parseDocument(document: vscode.TextDocument): Promise<Tree | null> {
+    const { parser } = await this.get();
+    const uri = document.uri.toString();
+    const version = document.version;
+
+    // Cache hit: same document at same version
+    if (this.treeCache && this.treeCache.uri === uri && this.treeCache.version === version) {
+      return this.treeCache.tree;
+    }
+
+    // Cache miss or version change: parse fresh, possibly incremental
+    const oldTree =
+      this.treeCache && this.treeCache.uri === uri ? this.treeCache.tree : undefined;
+
+    const text = document.getText();
+    const tree = parser.parse(text, oldTree) ?? null;
+
+    // If parsing returned null, keep the previous cache entry (if any)
+    if (!tree) {
+      if (oldTree) {
+        // parser.parse(text, oldTree) can fail and return null when the text
+        // is large and incremental parse runs out of memory or hits a bug.
+        // In that case the caller should fall back to the old tree rather than
+        // leave providers with nothing.
+        return oldTree;
+      }
+      // Brand-new parse also failed — nothing to fall back to.
+      this.clearTreeCache();
+      return null;
+    }
+
+    // Replace cache entry — old tree (if different from tree) was consumed
+    // by parser.parse() or is being replaced.
+    if (this.treeCache && this.treeCache.tree !== tree) {
+      this.treeCache.tree.delete();
+    }
+    this.treeCache = { uri, version, tree };
+    return tree;
+  }
+
+  private clearTreeCache(): void {
+    if (this.treeCache) {
+      this.treeCache.tree.delete();
+      this.treeCache = undefined;
+    }
   }
 
   private async load(): Promise<LoadedRuntime> {
     const wasmPath = path.join(this.context.extensionPath, "assets", "tree-sitter-ecscript.wasm");
     const queryPath = path.join(this.context.extensionPath, "assets", "queries", "highlights.scm");
-
-    await ensureExists(wasmPath, "Missing ecscript parser wasm. Run `just sync-vscode-assets` from the monorepo root.");
-    await ensureExists(queryPath, "Missing ecscript highlight query bundle.");
+    const injectionQueryPath = path.join(this.context.extensionPath, "assets", "queries", "injections.scm");
 
     await Parser.init({
       locateFile(scriptName: string) {
@@ -82,17 +161,32 @@ class EcscriptTreeSitterRuntime {
       }
     });
 
-    const [languageBytes, querySource] = await Promise.all([
-      fs.readFile(wasmPath),
-      fs.readFile(queryPath, "utf8")
-    ]);
+    let languageBytes: Buffer;
+    let querySource: string;
+    let injectionQuerySource: string;
+    try {
+      [languageBytes, querySource, injectionQuerySource] = await Promise.all([
+        fs.readFile(wasmPath),
+        fs.readFile(queryPath, "utf8"),
+        fs.readFile(injectionQueryPath, "utf8"),
+      ]);
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT") {
+        throw new Error(
+          "Missing ecscript parser assets. Run `just sync-vscode-assets` from the monorepo root."
+        );
+      }
+      throw err;
+    }
 
     const language = await Language.load(new Uint8Array(languageBytes));
     const parser = new Parser();
     parser.setLanguage(language);
     const query = new Query(language, querySource);
+    const injectionQuery = new Query(language, injectionQuerySource);
 
-    return { parser, language, query, wasmPath, queryPath };
+    return { parser, language, query, injectionQuery, wasmPath, queryPath, injectionQueryPath };
   }
 }
 
@@ -103,43 +197,39 @@ class EcscriptSemanticTokensProvider implements vscode.DocumentSemanticTokensPro
     document: vscode.TextDocument,
     token: vscode.CancellationToken
   ): Promise<vscode.SemanticTokens> {
-    const runtime = await this.runtime.get();
     if (token.isCancellationRequested) {
       return new vscode.SemanticTokensBuilder(LEGEND).build();
     }
 
-    const tree = runtime.parser.parse(document.getText());
-    try {
-      if (!tree) return new vscode.SemanticTokensBuilder(LEGEND).build();
-      if (token.isCancellationRequested) {
-        return new vscode.SemanticTokensBuilder(LEGEND).build();
-      }
-
-      const captures = runtime.query.captures(tree.rootNode);
-      if (token.isCancellationRequested) {
-        return new vscode.SemanticTokensBuilder(LEGEND).build();
-      }
-
-      const accepted = resolveCandidates(captures, document);
-
-      const builder = new vscode.SemanticTokensBuilder(LEGEND);
-      for (const candidate of accepted) {
-        if (token.isCancellationRequested) {
-          return new vscode.SemanticTokensBuilder(LEGEND).build();
-        }
-        builder.push(
-          candidate.line,
-          candidate.char,
-          candidate.length,
-          tokenTypeIndex(candidate.tokenType),
-          modifierBitmask(candidate.modifiers),
-        );
-      }
-
-      return builder.build();
-    } finally {
-      tree?.delete();
+    const tree = await this.runtime.parseDocument(document);
+    if (!tree) return new vscode.SemanticTokensBuilder(LEGEND).build();
+    if (token.isCancellationRequested) {
+      return new vscode.SemanticTokensBuilder(LEGEND).build();
     }
+
+    const runtime = await this.runtime.get();
+    const captures = runtime.query.captures(tree.rootNode);
+    if (token.isCancellationRequested) {
+      return new vscode.SemanticTokensBuilder(LEGEND).build();
+    }
+
+    const accepted = resolveCandidates(captures, document);
+
+    const builder = new vscode.SemanticTokensBuilder(LEGEND);
+    for (const candidate of accepted) {
+      if (token.isCancellationRequested) {
+        return new vscode.SemanticTokensBuilder(LEGEND).build();
+      }
+      builder.push(
+        candidate.line,
+        candidate.char,
+        candidate.length,
+        tokenTypeIndex(candidate.tokenType),
+        modifierBitmask(candidate.modifiers),
+      );
+    }
+
+    return builder.build();
   }
 }
 
@@ -161,18 +251,13 @@ class EcscriptFoldingRangeProvider implements vscode.FoldingRangeProvider {
     document: vscode.TextDocument,
     token: vscode.CancellationToken,
   ): Promise<vscode.FoldingRange[]> {
-    const { parser } = await this.runtime.get();
     if (token.isCancellationRequested) return [];
 
-    const tree = parser.parse(document.getText());
-    try {
-      if (!tree) return [];
-      const ranges: vscode.FoldingRange[] = [];
-      collectFoldingNodes(tree.rootNode, ranges);
-      return ranges;
-    } finally {
-      tree?.delete();
-    }
+    const tree = await this.runtime.parseDocument(document);
+    if (!tree) return [];
+    const ranges: vscode.FoldingRange[] = [];
+    collectFoldingNodes(tree.rootNode, ranges);
+    return ranges;
   }
 }
 
@@ -200,9 +285,10 @@ function collectFoldingNodes(
 
 // ── Document symbols (outline / breadcrumbs) ────────────────────
 
-const SYMBOL_KINDS: Record<string, vscode.SymbolKind> = {
-  function_declaration: vscode.SymbolKind.Function,
-  let_statement: vscode.SymbolKind.Variable,
+const SYMBOL_KINDS: Record<string, { kind: vscode.SymbolKind; detail?: string }> = {
+  function_declaration: { kind: vscode.SymbolKind.Function },
+  let_statement: { kind: vscode.SymbolKind.Variable },
+  use_statement: { kind: vscode.SymbolKind.Namespace, detail: "module import" },
 };
 
 class EcscriptDocumentSymbolProvider implements vscode.DocumentSymbolProvider {
@@ -212,16 +298,11 @@ class EcscriptDocumentSymbolProvider implements vscode.DocumentSymbolProvider {
     document: vscode.TextDocument,
     token: vscode.CancellationToken,
   ): Promise<vscode.DocumentSymbol[]> {
-    const { parser } = await this.runtime.get();
     if (token.isCancellationRequested) return [];
 
-    const tree = parser.parse(document.getText());
-    try {
-      if (!tree) return [];
-      return collectDocumentSymbols(tree.rootNode, document);
-    } finally {
-      tree?.delete();
-    }
+    const tree = await this.runtime.parseDocument(document);
+    if (!tree) return [];
+    return collectDocumentSymbols(tree.rootNode, document);
   }
 }
 
@@ -232,12 +313,17 @@ function collectDocumentSymbols(
   const symbols: vscode.DocumentSymbol[] = [];
 
   for (const child of node.namedChildren) {
-    const kind = SYMBOL_KINDS[child.type];
-    if (kind) {
-      const name = childName(child);
-      if (name) {
+    const info = SYMBOL_KINDS[child.type];
+    if (info) {
+      // Use grammar field names to locate the name/alias node precisely.
+      const nameNode =
+        child.childForFieldName?.("name") ??
+        child.childForFieldName?.("alias");
+      if (nameNode) {
+        const name = nameNode.text;
         const startLineText = document.lineAt(child.startPosition.row).text;
         const endLineText = document.lineAt(child.endPosition.row).text;
+        const nameLineText = document.lineAt(nameNode.startPosition.row).text;
         const range = new vscode.Range(
           child.startPosition.row,
           byteColumnToUtf16Column(startLineText, child.startPosition.column),
@@ -245,16 +331,16 @@ function collectDocumentSymbols(
           byteColumnToUtf16Column(endLineText, child.endPosition.column),
         );
         const selectionRange = new vscode.Range(
-          child.startPosition.row,
-          byteColumnToUtf16Column(startLineText, child.startPosition.column),
-          child.endPosition.row,
-          byteColumnToUtf16Column(endLineText, child.endPosition.column),
+          nameNode.startPosition.row,
+          byteColumnToUtf16Column(nameLineText, nameNode.startPosition.column),
+          nameNode.endPosition.row,
+          byteColumnToUtf16Column(nameLineText, nameNode.endPosition.column),
         );
         symbols.push(
           new vscode.DocumentSymbol(
             name,
-            /* detail */ "",
-            kind,
+            info.detail ?? "",
+            info.kind,
             range,
             selectionRange,
           ),
@@ -268,27 +354,202 @@ function collectDocumentSymbols(
   return symbols;
 }
 
-function childName(node: any): string | undefined {
-  // The first identifier-like named child is the declaration name.
-  for (const child of node.namedChildren) {
-    if (
-      child.type === "variable_identifier" ||
-      child.type === "identifier"
-    ) {
-      return child.text;
+
+// ── Diagnostics (syntax errors from tree-sitter ERROR/MISSING nodes) ─
+
+class EcscriptDiagnosticsProvider {
+  private readonly diagnostics: vscode.DiagnosticCollection;
+  private timer?: ReturnType<typeof setTimeout>;
+  private readonly output: vscode.OutputChannel;
+
+  constructor(private readonly runtime: EcscriptTreeSitterRuntime) {
+    this.diagnostics = vscode.languages.createDiagnosticCollection("ecscript");
+    this.output = vscode.window.createOutputChannel("ecscript");
+  }
+
+  /** Lint every already-open .ecs file (called on activation). */
+  lintOpenEditors(): void {
+    for (const editor of vscode.window.visibleTextEditors) {
+      if (editor.document.languageId === "ecscript") {
+        this.lint(editor.document);
+      }
     }
   }
-  return undefined;
+
+  onDidChange(document: vscode.TextDocument): void {
+    if (document.languageId !== "ecscript") return;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.lint(document), 300);
+  }
+
+  onDidClose(document: vscode.TextDocument): void {
+    this.diagnostics.delete(document.uri);
+  }
+
+  dispose(): void {
+    clearTimeout(this.timer);
+    this.diagnostics.dispose();
+    this.output.dispose();
+  }
+
+  private lint(document: vscode.TextDocument): void {
+    this.runtime.get().then(({ parser }) => {
+      const tree = parser.parse(document.getText());
+      if (!tree) return;
+      try {
+        const errors = collectErrorDiagnostics(tree.rootNode, document);
+        this.diagnostics.set(document.uri, errors);
+      } finally {
+        tree.delete();
+      }
+    }).catch((err: unknown) => {
+      this.output.appendLine(
+        `[diagnostics] ${document.uri.toString()}: ${renderError(err)}`
+      );
+    });
+  }
 }
+
+function collectErrorDiagnostics(
+  node: SyntaxNode,
+  document: vscode.TextDocument,
+): vscode.Diagnostic[] {
+  const results: vscode.Diagnostic[] = [];
+
+  function walk(n: SyntaxNode): void {
+    // Detect both hard parse errors (ERROR) and missing required tokens
+    // (MISSING).  Tree-sitter reports most common user mistakes — e.g.
+    //   let x =     (missing value)
+    //   let = 1     (missing name)
+    // as MISSING nodes, not ERROR nodes.
+    if (n.isError || n.isMissing) {
+      // Only report the innermost error / missing node — checking
+      // `children` (all children, not just named) catches nested
+      // ERROR/MISSING and avoids cascading diagnostics.
+      const hasNestedIssue = n.children.some(
+        (c) => c != null && (c.isError || c.isMissing),
+      );
+      if (!hasNestedIssue) {
+        const range = diagnosticRange(n, document);
+        if (range) {
+          const message = n.isMissing
+            ? `Missing ${readableNodeLabel(n)}`
+            : "Syntax error";
+          results.push({
+            message,
+            range,
+            severity: vscode.DiagnosticSeverity.Error,
+            source: "ecscript",
+          });
+        }
+      }
+    }
+    for (const child of n.namedChildren) {
+      if (child) walk(child);
+    }
+  }
+
+  walk(node);
+  return results;
+}
+
+/** Build a VS Code Range for a tree-sitter node, ensuring the result
+ *  has non-zero width (MISSING nodes are zero-width). */
+function diagnosticRange(
+  n: SyntaxNode,
+  document: vscode.TextDocument,
+): vscode.Range | undefined {
+  const sr = n.startPosition.row;
+  const sc = byteColumnToUtf16Column(
+    document.lineAt(sr).text,
+    n.startPosition.column,
+  );
+  const er = n.endPosition.row;
+  let ec = byteColumnToUtf16Column(
+    document.lineAt(er).text,
+    n.endPosition.column,
+  );
+  // MISSING nodes are zero-width — extend to cover at least one
+  // character so the squiggle is visible.
+  if (sr === er && ec <= sc) {
+    const lineText = document.lineAt(sr).text;
+    ec = Math.min(sc + 1, lineText.length);
+    if (ec <= sc) return undefined; // empty line
+  }
+  return new vscode.Range(sr, sc, er, ec);
+}
+
+/** Human-readable label for a MISSING node, derived from its grammar
+ *  symbol or field name so the diagnostic message is more helpful. */
+function readableNodeLabel(n: SyntaxNode): string {
+  // The node type for MISSING nodes in tree-sitter is the grammar
+  // rule name (e.g. "expression", "variable_identifier").
+  const label = n.type
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+  return label || "token";
+}
+
+// ── Hover (node type under cursor) ────────────────────────────────
+
+class EcscriptHoverProvider implements vscode.HoverProvider {
+  constructor(private readonly runtime: EcscriptTreeSitterRuntime) {}
+
+  async provideHover(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    _token: vscode.CancellationToken,
+  ): Promise<vscode.Hover | undefined> {
+    const { parser } = await this.runtime.get();
+    const tree = parser.parse(document.getText());
+    if (!tree) return undefined;
+    try {
+      const byteCol = byteColumnFromUtf16Column(
+        document.lineAt(position.line).text,
+        position.character,
+      );
+      // Use descendantForPosition (returns any node, including anonymous
+      // keywords/punctuation) and walk up to the nearest named ancestor.
+      let node = tree.rootNode.descendantForPosition({
+        row: position.line,
+        column: byteCol,
+      });
+      while (node && node.type === "") {
+        node = node.parent;
+      }
+      if (!node || node === tree.rootNode) return undefined;
+
+      return new vscode.Hover(
+        new vscode.MarkdownString().appendCodeblock(node.type, "ecscript"),
+      );
+    } finally {
+      tree.delete();
+    }
+  }
+}
+
+function byteColumnFromUtf16Column(
+  lineText: string,
+  utf16Column: number,
+): number {
+  // Convert UTF-16 column back to byte offset by encoding the prefix
+  // up to that column and measuring its UTF-8 byte length.
+  const prefix = lineText.substring(0, utf16Column);
+  return Buffer.byteLength(prefix, "utf8");
+}
+
+let _runtime: EcscriptTreeSitterRuntime | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   const runtime = new EcscriptTreeSitterRuntime(context);
+  // Stash for deactivate() to clean up.
+  _runtime = runtime;
 
   const status = vscode.commands.registerCommand("ecscript.showStatus", async () => {
     try {
       const loaded = await runtime.get();
       await vscode.window.showInformationMessage(
-        `ecscript Tree-sitter runtime ready. wasm: ${path.basename(loaded.wasmPath)}, query: ${path.basename(loaded.queryPath)}`
+        `ecscript Tree-sitter runtime ready. wasm: ${path.basename(loaded.wasmPath)}, query: ${path.basename(loaded.queryPath)}, injection: ${path.basename(loaded.injectionQueryPath)}`
       );
     } catch (error) {
       await vscode.window.showWarningMessage(renderError(error));
@@ -337,23 +598,43 @@ export function activate(context: vscode.ExtensionContext): void {
     new EcscriptDocumentSymbolProvider(runtime),
   );
 
+  const diagnostics = new EcscriptDiagnosticsProvider(runtime);
+  const onDidChange = vscode.workspace.onDidChangeTextDocument((e) =>
+    diagnostics.onDidChange(e.document),
+  );
+  const onDidOpen = vscode.workspace.onDidOpenTextDocument((doc) =>
+    diagnostics.onDidChange(doc),
+  );
+  const onDidClose = vscode.workspace.onDidCloseTextDocument((doc) =>
+    diagnostics.onDidClose(doc),
+  );
+  // Lint .ecs files that were already open before activation.
+  diagnostics.lintOpenEditors();
+
+  const hoverProvider = vscode.languages.registerHoverProvider(
+    [{ language: "ecscript" }],
+    new EcscriptHoverProvider(runtime),
+  );
+
   context.subscriptions.push(
     status,
     showSyntaxTree,
     semanticTokens,
     foldingProvider,
     documentSymbolProvider,
+    diagnostics,
+    onDidChange,
+    onDidOpen,
+    onDidClose,
+    hoverProvider,
   );
 }
 
-export function deactivate(): void {}
-
-async function ensureExists(filePath: string, message: string): Promise<void> {
-  try {
-    await fs.access(filePath);
-  } catch {
-    throw new Error(message);
-  }
+export function deactivate(): void {
+  // Tree-sitter parser/language/query objects use WASM heap that will be
+  // freed when the module is unloaded. No explicit cleanup needed for
+  // web-tree-sitter v0.25.x — the WASM module releases its memory on unload.
+  _runtime?.invalidate();
 }
 
 function renderError(error: unknown): string {
@@ -436,9 +717,7 @@ function classifyCapture(name: string): { tokenType: TokenType; modifiers: Token
 // The final list is re-sorted by source position for VS Code output.
 
 function resolveCandidates(captures: QueryCapture[], document: vscode.TextDocument): TokenCandidate[] {
-  const candidates = captures
-    .map((c) => candidateFromCapture(c, document))
-    .filter((candidate): candidate is TokenCandidate => candidate !== null);
+  const candidates = captures.flatMap((c) => candidateFromCapture(c, document));
 
   // Sort by priority descending first — highest-priority wins
   candidates.sort((a, b) => {
@@ -473,33 +752,104 @@ function resolveCandidates(captures: QueryCapture[], document: vscode.TextDocume
 function candidateFromCapture(
   capture: QueryCapture,
   document: vscode.TextDocument,
-): TokenCandidate | null {
+): TokenCandidate[] {
   const token = classifyCapture(capture.name);
   if (!token) {
-    return null;
+    return [];
   }
 
   const { node } = capture;
-  if (node.startPosition.row !== node.endPosition.row) {
-    return null;
+  const startRow = node.startPosition.row;
+  const endRow = node.endPosition.row;
+
+  if (startRow === endRow) {
+    // Single-line case: emit a single token
+    return emitLineToken(
+      document, startRow,
+      node.startPosition.column, node.endPosition.column,
+      token.tokenType, token.modifiers, token.priority,
+    );
   }
 
-  const lineText = document.lineAt(node.startPosition.row).text;
-  const startChar = byteColumnToUtf16Column(lineText, node.startPosition.column);
-  const endChar = byteColumnToUtf16Column(lineText, node.endPosition.column);
+  // Multi-line case: emit one token per line the node spans
+  const results: TokenCandidate[] = [];
+
+  // First line: from startPosition.column to end of line
+  results.push(...emitLineToken(
+    document, startRow,
+    node.startPosition.column, null, // null → to end of line
+    token.tokenType, token.modifiers, token.priority,
+  ));
+
+  // Middle lines: full lines
+  for (let line = startRow + 1; line < endRow; line++) {
+    results.push(...emitLineToken(
+      document, line,
+      0, null,
+      token.tokenType, token.modifiers, token.priority,
+    ));
+  }
+
+  // Last line: from 0 to endPosition.column
+  results.push(...emitLineToken(
+    document, endRow,
+    0, node.endPosition.column,
+    token.tokenType, token.modifiers, token.priority,
+  ));
+
+  return results;
+}
+
+/** Emit zero or one safe, bounds-checked semantic token for a span on a
+ *  single line.  Returns `[]` when the span is empty, out-of-bounds, or
+ *  the line does not exist. */
+function emitLineToken(
+  document: vscode.TextDocument,
+  line: number,
+  startByteCol: number,
+  endByteCol: number | null, // null → rest of the line
+  tokenType: TokenType,
+  modifiers: TokenModifier[],
+  priority: number,
+): TokenCandidate[] {
+  if (line < 0 || line >= document.lineCount) return [];
+
+  const lineText = document.lineAt(line).text;
+  if (lineText.length === 0) return [];
+
+  // Clamp byte columns into [0, byteLength(lineText)] before converting.
+  // Tree-sitter byte offsets may include the trailing newline byte that
+  // VS Code's lineAt().text does NOT include, so a column pointing at
+  // '\n' would overrun the line text and produce an out-of-bounds
+  // semantic token — which VS Code rejects wholesale, breaking ALL
+  // highlighting for the document.
+  const lineBytes = Buffer.byteLength(lineText, "utf8");
+  const safeStartByte = Math.max(0, Math.min(startByteCol, lineBytes));
+  const safeEndByte =
+    endByteCol != null
+      ? Math.max(0, Math.min(endByteCol, lineBytes))
+      : lineBytes;
+
+  const startChar = byteColumnToUtf16Column(lineText, safeStartByte);
+  const endChar =
+    endByteCol != null
+      ? byteColumnToUtf16Column(lineText, safeEndByte)
+      : lineText.length;
+
   const length = endChar - startChar;
-  if (length <= 0) {
-    return null;
-  }
+  if (length <= 0) return [];
 
-  return {
-    line: node.startPosition.row,
+  // Final safety: the token must not overrun the line.
+  if (startChar + length > lineText.length) return [];
+
+  return [{
+    line,
     char: startChar,
     length,
-    tokenType: token.tokenType,
-    modifiers: token.modifiers,
-    priority: token.priority,
-  };
+    tokenType,
+    modifiers,
+    priority,
+  }];
 }
 
 function modifierBitmask(modifiers: readonly TokenModifier[]): number {
