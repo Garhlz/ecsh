@@ -1,7 +1,7 @@
-# ecscript 当前实现手册（stage 6 / 7 过渡期）
+# ecscript 当前实现手册（stage 9 / 10 过渡期）
 
 本文描述 ecscript **当前已经实现** 的语法与语义。
-按当前提交历史，`ecscript` 内核主体已经完成，`ecsh` 顶层也开始进入 stage 7 集成。除独立解释器本身外，`ecscript` 现在也已经被 `ecsh` 用于 `${expr}` / `${...arr}` 运行时展开。
+按当前提交历史，`ecscript` 内核主体已经完成，`ecsh` 顶层、命令桥、值流原语和模块 MVP 都已经接通。本文优先描述**当前语法事实**，方便直接作为 Tree-sitter grammar 的参考基线。
 
 ---
 
@@ -25,6 +25,8 @@
 - `for in`：遍历数组 / 对象 key / 区间
 - `break` / `continue`
 - `func name(args) { ... }` — 命名函数声明
+- `pub let` / `pub func`
+- `use ./foo.ecs as foo`
 - `(args) => expr` / `(args) => { stmts }` — 匿名函数（lambda/func literal）
 - 普通函数调用：`f(x, y)`、`obj.method()`
 - `return expr;` / `return;`
@@ -34,6 +36,8 @@
 - 基于字节偏移的 parse/runtime 错误定位
 - `ParseError::format_with_source(src)` / `RuntimeError::format_with_source(src)` 的源码定位格式化
 - 独立 `ecscript` 解释器入口：REPL / 文件执行 / `-e` / stdin
+- 模块缓存：同一路径模块只初始化一次
+- 循环导入检测：`a -> b -> a` 会报错
 
 当前未实现：
 
@@ -52,6 +56,7 @@
 - `ecscript` 现在支持 `|>` 值流语法糖：`x |> f(a, b)` 等价于 `f(x, a, b)`
 - 命令桥当前也支持单命令纯输出 shell builtin；pipeline 内 builtin 仍未接通
 - 文件级模块 MVP 已接通：`.ecs` 文件里可以 `use ./foo.ecs as foo`
+- 同一路径模块当前会复用同一个缓存对象，并检测循环导入
 
 ### 已知边界（非 bug）
 
@@ -64,6 +69,8 @@
 4. **带源码行的错误展示目前还是显式 API。** 错误对象内部仍只保存 byte offset；如果调用方想拿到 `line:column + 源码行 + ^` 的格式，需要显式调用 `format_with_source(src)`。
 
 5. **`use` 当前只在文件执行上下文可用。** 模块路径需要相对当前脚本文件目录解析，所以交互 REPL 中暂时不能直接 `use ./foo.ecs as foo`。
+
+6. **命令桥当前只在 shell-backed 执行上下文可用。** `run/capture/text/lines/with_env/with_cwd` 需要宿主提供 `ShellState`；独立 `ecscript` 解释器以及 `ecsh file.ecs` 这类纯文件脚本路径下，目前会报 `... is not available in this context`。
 
 ---
 
@@ -116,6 +123,7 @@ REPL 中：
 保留字：
 
 - `let`
+- `pub`
 - `nil`
 - `true`
 - `false`
@@ -128,6 +136,13 @@ REPL 中：
 - `continue`
 - `func`
 - `return`
+- `use`
+- `as`
+
+特殊说明：
+
+- `cmd` 在词法上是保留字；当后面紧跟 `{` 时，lexer 会直接把整个 `cmd{ ... }` 识别成单个 `CommandLiteral` token。
+- `true` / `false` / `nil` 在词法上是专门的 literal token，不是普通 `Identifier`。
 
 ### 2.3 数字
 
@@ -195,7 +210,7 @@ let pattern = r"\d+\.\d+";
 
 单独的 `&` 或 `|` 会报错并提示使用 `&&` 或 `||`。
 
-### 2.6 分隔符
+### 2.6 分隔符与换行
 
 `(` `)` `{` `}` `[` `]` `,` `.` `;` `:` `=` `+=` `-=` `*=` `/=` `%=` `..` `..=` `=>`
 
@@ -207,16 +222,32 @@ let pattern = r"\d+\.\d+";
 - `{}`：block / 对象字面量
 - `..` / `..=`：保留给 `for` 语句的区间语法
 
+另外，换行在词法上会产生 `Newline` token。当前 parser 会把：
+
+- 一个或多个 `;`
+- 一个或多个换行
+- `EOF`
+- `}`
+
+都视为“简单语句的合法终止位置”。
+
 ---
 
 ## 3. 语法
 
-当前 parser 接受的是 **script**，也就是一串语句。
+当前 parser 接受的是 **script**，也就是一串语句。对 Tree-sitter 来说，最重要的是区分：
+
+- 声明/控制流语句
+- 简单语句（`let` / 赋值 / 表达式语句 / `break` / `continue` / `return`）
+- `pub` 修饰的声明
+- `use ... as ...`
 
 ```ebnf
 script          = stmt* EOF
 
-stmt            = let_stmt
+stmt            = pub_stmt
+                | use_stmt
+                | let_stmt
                 | assign_stmt
                 | expr_stmt
                 | block
@@ -228,18 +259,23 @@ stmt            = let_stmt
                 | continue_stmt
                 | return_stmt
 
-let_stmt        = "let" identifier "=" expr ";"
-assign_stmt     = assign_target ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr ";"
-expr_stmt       = expr ";"
+pub_stmt        = "pub" (let_stmt | func_stmt)
+use_stmt        = "use" module_path "as" identifier stmt_end
+
+let_stmt        = "let" identifier "=" expr stmt_end
+assign_stmt     = assign_target ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr stmt_end
+expr_stmt       = expr stmt_end
 block           = "{" stmt* "}"
 
 if_stmt         = "if" expr block ("else" (block | if_stmt))?
 while_stmt      = "while" expr block
 for_stmt        = "for" identifier "in" expr block
 func_stmt       = "func" identifier "(" param_list? ")" block
-break_stmt      = "break" ";"
-continue_stmt   = "continue" ";"
-return_stmt     = "return" expr? ";"
+break_stmt      = "break" stmt_end
+continue_stmt   = "continue" stmt_end
+return_stmt     = "return" expr? stmt_end
+
+stmt_end        = (";" | newline)+ | EOF | "}"
 
 param_list      = identifier ("," identifier)*
 
@@ -247,8 +283,9 @@ assign_target   = identifier
                 | postfix "." identifier
                 | postfix "[" expr "]"
 
-expr            = range
-range           = logical_or ((".." | "..=") logical_or)?
+expr            = range_expr
+range_expr      = pipe_expr ((".." | "..=") pipe_expr)?
+pipe_expr       = logical_or ("|>" call_expr)*
 logical_or      = logical_and ("||" logical_and)*
 logical_and     = comparison ("&&" comparison)*
 comparison      = term (("==" | "!=" | "<" | ">" | "<=" | ">=") term)*
@@ -257,23 +294,33 @@ sum             = prefix (("*" | "/" | "%") prefix)*
 prefix          = ("!" | "-") prefix | postfix
 postfix         = primary (("." identifier) | ("[" expr "]") | ("(" arg_list? ")"))*
 arg_list        = expr ("," expr)*
+call_expr       = postfix "(" arg_list? ")"
 primary         = "nil"
                 | "true"
                 | "false"
                 | number
                 | string
                 | identifier
+                | command_literal
                 | array_literal
                 | object_literal
                 | lambda_expr
                 | "(" expr ")"
 
 lambda_expr     = "(" param_list? ")" "=>" (expr | block)
+command_literal = "cmd" "{" shell_source "}"
+module_path     = token_sequence_that_builds_a_path
 
 array_literal   = "[" (expr ("," expr)* ","?)? "]"
 object_literal  = "{" (object_entry ("," object_entry)* ","?)? "}"
 object_entry    = (identifier | string) ":" expr
 ```
+
+补充说明：
+
+- `|>` 是语法糖。运行时没有独立的 `PipeForward` 节点；parser 会把 `x |> f(a, b)` 直接改写成 `f(x, a, b)`。
+- `module_path` 当前不是单个 token；parser 会把 `Identifier` / `String` / `.` / `..` / `/` / `-` 这几类 token 拼起来，直到读到 `as`。
+- `command_literal` 当前在 lexer 阶段就是单 token；Tree-sitter 第一版更适合把它当一整块特殊语法岛，而不是完整复刻内部 shell parser。
 
 ### 3.1 `{ ... }` 的歧义
 
@@ -333,12 +380,15 @@ println(foo.name)
 - 当前不支持 `pub use`、命名导入或搜索路径
 - 同一路径模块当前会复用同一个缓存对象
 - `a -> b -> a` 这类循环导入当前会报错
+- 模块导出函数可以捕获模块私有顶层变量；这些私有绑定不会出现在导出对象上
 
 ---
 
 ## 4. 分号与块规则
 
-### 4.1 必须带分号的语句
+### 4.1 简单语句的终止规则
+
+下列语句都走“简单语句终止”规则：
 
 - `let x = 1;`
 - `x = 2;`
@@ -350,7 +400,24 @@ println(foo.name)
 - `return;`
 - `return expr;`
 
-### 4.2 不带分号的语句
+它们当前可以通过以下任一方式结束：
+
+- 一个或多个 `;`
+- 一个或多个换行
+- `EOF`
+- `}`
+
+也就是说，下面这些现在都合法：
+
+```ecs
+let x = 1
+let y = 2;
+let z = 3
+```
+
+但同一行里如果两个表达式/语句直接相邻，没有 `;` 或换行分隔，仍然会报错。
+
+### 4.2 不依赖分号的语句
 
 - `if ... { ... }`
 - `while ... { ... }`
@@ -358,10 +425,10 @@ println(foo.name)
 - `func name(args) { ... }`
 - block 本身
 
-### 4.3 block 内最后一条普通语句也必须带分号
+### 4.3 block 与尾表达式
 
-当前 **不支持尾表达式省分号**。  
-block 仍然是 statement block，不是 expression block。
+当前 **不支持 block value / 尾表达式返回值**。
+但 block 内最后一条普通语句已经**不必**强制写分号，只要它后面跟着 `}` 即可。
 
 ---
 
@@ -378,8 +445,7 @@ block 仍然是 statement block，不是 expression block。
 | 比较 | `==` `!=` `<` `>` `<=` `>=` | 左结合 |
 | 逻辑与 | `&&` | 左结合 |
 | 逻辑或 | `\|\|` | 左结合 |
-| 值流 | `\|>` | 左结合 |
-| 区间 | `..` `..=` | 左结合 |
+| 值流 / 区间 | `\|>` `..` `..=` | 左结合 |
 
 示例：
 
@@ -387,6 +453,7 @@ block 仍然是 statement block，不是 expression block。
 - `foo.bar(x)`
 - `1 + arr[0] * 2`
 - `0..10`
+- `range(1, 6) |> filter((x) => x > 2) |> join(",")`
 
 ---
 
@@ -396,7 +463,7 @@ block 仍然是 statement block，不是 expression block。
 
 ```rust
 pub enum StmtKind {
-    Let { name: String, expr: Expr },
+    Let { name: String, expr: Expr, public: bool },
     Assign { target: AssignTarget, expr: Expr },
     CompoundAssign { target: AssignTarget, op: CompoundAssignOp, expr: Expr },
     ExprStmt { expr: Expr },
@@ -405,7 +472,8 @@ pub enum StmtKind {
     While { cond: Expr, body: Vec<Stmt> },
     ForIn { var: String, iterable: Expr, body: Vec<Stmt> },
     ForRange { var: String, range: RangeExpr, body: Vec<Stmt> },
-    FuncDeclare { name: String, params: Vec<String>, body: Vec<Stmt> },
+    FuncDeclare { name: String, params: Vec<String>, body: Vec<Stmt>, public: bool },
+    Use { path: String, alias: String },
     Break,
     Continue,
     Return { value: Option<Expr> },
@@ -447,6 +515,7 @@ pub enum ExprKind {
     Call(Box<Expr>, Vec<Expr>),
     Range(RangeExpr),
     FuncLiteral { params: Vec<String>, body: Vec<Stmt> },
+    CommandLiteral(CommandValue),
 }
 
 pub struct RangeExpr {
@@ -457,7 +526,7 @@ pub struct RangeExpr {
 ```
 
 `Stmt` 和 `Expr` 上的 `span` 都是源码字节偏移。  
-当前约定是：**statement 的 span 指向该语句起始 token 的结束偏移**。
+当前约定是：**statement / expression 的 `span` 都是错误定位元数据，不追求完整范围信息。**
 
 ---
 
@@ -474,6 +543,7 @@ pub enum Value {
     Object(Rc<RefCell<HashMap<String, Value>>>),
     Function(Rc<Function>),
     Builtin(Builtin),
+    Command(CommandInvocation),
 }
 ```
 
@@ -614,8 +684,8 @@ for i in 0..3 { ... }
 for i in 0..=3 { ... }
 ```
 
-区间语法当前只保留给 `for` 语句。  
-在 `for i in 0..3 { ... }` 这种语法里，parser 会直接产出 `ForRange` 语句节点。
+区间语法当前**语法上是表达式**，但**语义上只允许用于 `for`**。
+在 `for i in 0..3 { ... }` 这种语法里，parser 会先得到 `ExprKind::Range`，再由 `parse_for` 特判成 `ForRange` 语句节点。
 
 普通值世界里不再把 `0..3` 当成可求值表达式；需要一个整数数组时，使用：
 
@@ -640,6 +710,7 @@ slice(range(0, 5), 1, 4) // => [1, 2, 3]
 | `insert(arr, i, v)` | 在位置 `i` 插入 | `i == len` 合法 |
 | `remove(arr, i)` | 删除并返回位置 `i` 的元素 | 越界报错 |
 | `slice(arr, start, end)` | 返回半开区间子数组 | 结果是 `arr[start..end)` |
+| `command(program, arg...)` | 以 argv-first 方式构造命令值 | 不解析 shell 语法 |
 | `keys(obj)` | 返回对象 key 数组 | 按 key 排序 |
 | `values(obj)` | 返回对象 value 数组 | 顺序与排序后的 key 一致 |
 | `stdin()` | 读取当前脚本输入文本 | 文件执行和管道输入场景返回完整文本；交互 REPL 默认空字符串 |
@@ -647,6 +718,12 @@ slice(range(0, 5), 1, 4) // => [1, 2, 3]
 | `write_lines(xs)` | 将数组逐项按行写到 stdout | 使用元素的 display 文本，每项自动换行 |
 | `to_json(x)` | 转成 JSON 字符串 | 对象 key 排序；检测循环引用 |
 | `from_json(text)` | 把 JSON 字符串解析成语言值 | 失败时报 `ParseInExpr` |
+| `run(cmd)` | 继承当前终端执行命令值 | 当前要求 shell-backed 执行上下文 |
+| `capture(cmd)` | 执行并返回结果对象 | 返回 `{ code, signal, stdout, stderr, duration_ms, ok }` |
+| `text(cmd)` | 返回命令 stdout 文本 | 当前要求 shell-backed 执行上下文 |
+| `lines(cmd)` | 返回命令 stdout 行数组 | 当前要求 shell-backed 执行上下文 |
+| `with_env(cmd, obj)` | 返回附加环境覆盖的新命令值 | 不修改当前 shell 全局环境 |
+| `with_cwd(cmd, path)` | 返回附加 cwd 覆盖的新命令值 | 不修改当前 shell 当前目录 |
 | `map(arr, func)` | 对数组逐项映射 | 缺失 `return` 视为 `nil` |
 | `filter(arr, func)` | 只保留谓词为 `true` 的元素 | 回调必须返回 `Bool` |
 | `reduce(arr, init, func)` | 左折叠 | 回调接收 `(acc, x)` |
@@ -697,6 +774,19 @@ println(payload.ok);
 - 文本桥只负责文本和数组行视图
 - JSON 桥只负责文本和结构化值互转
 - 先通过显式组合完成格式转换，不额外引入 `json(cmd)` 或更重的格式协议
+
+命令桥的当前语法入口：
+
+```ecs
+let c1 = cmd{ printf "hello" }
+let c2 = command("printf", "hello")
+```
+
+其中：
+
+- `cmd{ ... }` 由 lexer 直接识别成单个 `CommandLiteral` token
+- `command(...)` 是普通 builtin 调用
+- `cmd{ ... }` 当前支持单命令、重定向和 pipeline，不支持 `&&` / `||` / `;`
 
 ---
 
@@ -845,7 +935,7 @@ func add(a, b) {
 | `NonExistentField` | 对象字段不存在 |
 | `NotCallable` | 调用了不可调用值 |
 | `ArityMismatch` | builtin 或用户函数参数个数不对 |
-| `CircularReference` | `to_json` 检测到循环引用 |
+| `CircularReference` | `to_json` 检测到循环引用，或模块导入形成环 |
 | `IoError` | builtin 在 stdout/stderr 等 IO 上失败 |
 | `BreakOutsideLoop` | 循环外使用 `break` |
 | `ContinueOutsideLoop` | 循环外使用 `continue` |
@@ -912,6 +1002,7 @@ ecscript parse error at 3:17: expected ')'
 - `for in array` 当前使用 **迭代快照**，循环体修改原数组不会影响本轮迭代序列
 - 当前函数调用链是 **local → captures → global/root**，不继承调用者局部变量
 - 闭包只捕获自由变量，不会复制整个外层环境
+- 导出函数可以捕获模块私有顶层变量；模块对象只暴露 `pub` 名字，不暴露私有绑定
 - parse/runtime error 已经可以格式化成 `line:column + 源码行 + caret`
 
 ---
@@ -922,7 +1013,7 @@ ecscript parse error at 3:17: expected ')'
 
 - 多层闭包自动透传捕获（让 `() => () => x` 直接成立）
 - block value / 尾表达式
-- 模块系统
+- 搜索路径 / 命名导入 / `pub use`
 - shell 集成
 - 把源码格式化错误默认接入解释器入口
 - 字节码 VM / 后端演化

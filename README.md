@@ -99,6 +99,11 @@ println(cwd());
 println(join_path("/tmp", "ecsh"));
 ```
 
+说明：
+
+- `text(cmd{ ... })` / `lines(cmd{ ... })` / `run(cmd)` 这类命令桥消费接口当前要求 shell-backed 执行上下文
+- 它们在 `ecsh` 顶层脚本分派里可用；独立 `ecscript` 解释器以及 `ecsh file.ecs` 这类纯文件脚本路径下暂未完全接通
+
 模块 MVP 的当前写法：
 
 ```ecs
@@ -149,6 +154,13 @@ docs/
   status.md
   ecscript-manual.md
   TODO.md
+tree-sitter-ecscript/
+  grammar.js
+  queries/
+  test/corpus/
+vscode-ecscript/
+  src/extension.ts
+  examples/
 ```
 
 ## 当前边界
