@@ -1733,6 +1733,7 @@ mod stmt_tests {
         ast::{AssignTarget, Expr, ExprKind, InfixOper, Literal, Stmt, StmtKind},
         env::Environment,
         error::{RuntimeError, RuntimeErrorKind},
+        func::call_function,
         lexer::tokenize,
         parser::parse_script,
         pratt::parse_expr,
@@ -1863,6 +1864,76 @@ mod stmt_tests {
         let module = module.borrow();
         assert_eq!(module.get("visible"), Some(&Value::Int(2)));
         assert!(!module.contains_key("hidden"));
+    }
+
+    #[test]
+    fn eval_module_exported_function_captures_private_root_binding() {
+        let stmts = vec![
+            Stmt {
+                kind: StmtKind::Let {
+                    name: "a".into(),
+                    expr: lit_int(1),
+                    public: false,
+                },
+                span: 0,
+            },
+            Stmt {
+                kind: StmtKind::FuncDeclare {
+                    name: "one".into(),
+                    params: vec![],
+                    body: vec![
+                        Stmt {
+                            kind: StmtKind::Let {
+                                name: "tmp".into(),
+                                expr: Expr {
+                                    kind: ExprKind::Infix(
+                                        Box::new(Expr {
+                                            kind: ExprKind::Variable("a".into()),
+                                            span: 0,
+                                        }),
+                                        InfixOper::Add,
+                                        Box::new(Expr {
+                                            kind: ExprKind::Variable("a".into()),
+                                            span: 0,
+                                        }),
+                                    ),
+                                    span: 0,
+                                },
+                                public: false,
+                            },
+                            span: 0,
+                        },
+                        Stmt {
+                            kind: StmtKind::Return {
+                                value: Some(Expr {
+                                    kind: ExprKind::Variable("tmp".into()),
+                                    span: 0,
+                                }),
+                            },
+                            span: 0,
+                        },
+                    ],
+                    public: true,
+                },
+                span: 0,
+            },
+        ];
+
+        let module = eval_module(&stmts).unwrap();
+        let Value::Object(module) = module else {
+            panic!("expected object");
+        };
+        let one = {
+            let module = module.borrow();
+            module.get("one").cloned().expect("missing export")
+        };
+        let Value::Function(func) = one else {
+            panic!("expected function");
+        };
+
+        let env = Environment::new();
+        let result = call_function(func, &vec![], &env, 0).unwrap();
+        assert_eq!(result, Some(Value::Int(2)));
     }
 
     #[test]

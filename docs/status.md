@@ -116,6 +116,7 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `with_env(cmd, obj)` / `with_cwd(cmd, path)`：以不可变派生方式调整命令值
 - `cmd{ a | b }` pipeline 子集
 - 单命令纯输出 shell builtin：如 `pwd` / `env` / `status` / `help`
+- `run/capture/text/lines` 当前要求 shell-backed 执行上下文；独立 `ecscript` 解释器和 `ecsh file.ecs` 路径下暂未完全接通
 
 当前阶段 8 仍然保留的边界：
 

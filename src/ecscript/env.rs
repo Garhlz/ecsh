@@ -115,11 +115,6 @@ impl<'a> Environment<'a> {
     }
 
     pub fn capture_upvalue(&self, name: &str, span: usize) -> Option<Slot> {
-        if self.parent.is_none() {
-            // 当前层已经是root层，不进行变量提升
-            return None;
-        }
-
         // 先在读借用下探测类型，clone Slot（只增加引用计数），然后立刻 drop 读借用。
         // 这样后续的 borrow_mut 不会与活跃的 borrow 冲突。
         let found_value = {
@@ -143,7 +138,8 @@ impl<'a> Environment<'a> {
                 if let Some(parent) = self.parent {
                     parent.capture_upvalue(name, span)
                 } else {
-                    // 已经是root环境，在任何函数中都可以访问，不需要提升到堆上
+                    // 变量沿作用域链都不存在时，说明它不是可捕获的词法绑定。
+                    // 这种情况可能在调用时走 builtin 查找，也可能最终报未定义变量。
                     None
                 }
             }
