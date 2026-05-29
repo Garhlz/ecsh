@@ -1,0 +1,67 @@
+==================
+Basic statements
+==================
+let x = 1
+x += 2
+println(x)
+
+---
+
+(source_file
+  (let_statement
+    name: (variable_identifier
+      (variable_identifier))
+    value: (expression
+      (primary_expression
+        (integer))))
+  (newline)
+  (compound_assignment_statement
+    target: (assignment_target
+      (identifier))
+    value: (expression
+      (primary_expression
+        (integer))))
+  (newline)
+  (expression_statement
+    (expression
+      (postfix_expression
+        (call_expression
+          function: (primary_expression
+            (identifier))
+          arguments: (argument_list
+            (expression
+              (primary_expression
+                (identifier))))))))
+  (newline))
+
+==================
+Control flow
+==================
+if true {
+  return 1
+} else {
+  return 2
+}
+
+---
+
+(source_file
+  (if_statement
+    condition: (expression
+      (primary_expression
+        (true)))
+    consequence: (statement_block
+      (newline)
+      (return_statement
+        (expression
+          (primary_expression
+            (integer))))
+      (newline))
+    alternative: (statement_block
+      (newline)
+      (return_statement
+        (expression
+          (primary_expression
+            (integer))))
+      (newline)))
+  (newline))

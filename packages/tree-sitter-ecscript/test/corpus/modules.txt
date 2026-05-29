@@ -1,0 +1,89 @@
+==================
+Use and public exports
+==================
+use ./foo.ecs as foo
+pub let name = "ecsh"
+pub func add(a, b) {
+  return a + b
+}
+
+---
+
+(source_file
+  (use_statement
+    path: (module_path
+      (path_literal))
+    alias: (module_identifier
+      (module_identifier)))
+  (newline)
+  (let_statement
+    name: (variable_identifier
+      (variable_identifier))
+    value: (expression
+      (primary_expression
+        (string))))
+  (newline)
+  (function_declaration
+    name: (variable_identifier
+      (variable_identifier))
+    parameters: (parameter_list
+      (variable_identifier
+        (variable_identifier))
+      (variable_identifier
+        (variable_identifier)))
+    body: (statement_block
+      (newline)
+      (return_statement
+        (expression
+          (additive_expression
+            left: (primary_expression
+              (identifier))
+            right: (primary_expression
+              (identifier)))))
+      (newline)))
+  (newline))
+
+==================
+Field access after import
+==================
+use ./std_test.ecs as std
+println(std.sum([1, 2, 3]))
+
+---
+
+(source_file
+  (use_statement
+    path: (module_path
+      (path_literal))
+    alias: (module_identifier
+      (module_identifier)))
+  (newline)
+  (expression_statement
+    (expression
+      (postfix_expression
+        (call_expression
+          function: (primary_expression
+            (identifier))
+          arguments: (argument_list
+            (expression
+              (postfix_expression
+                (call_expression
+                  function: (field_expression
+                    object: (primary_expression
+                      (identifier))
+                    field: (property_identifier
+                      (property_identifier)))
+                  arguments: (argument_list
+                    (expression
+                      (primary_expression
+                        (array
+                          (expression
+                            (primary_expression
+                              (integer)))
+                          (expression
+                            (primary_expression
+                              (integer)))
+                          (expression
+                            (primary_expression
+                              (integer)))))))))))))))
+  (newline))

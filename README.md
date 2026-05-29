@@ -154,14 +154,31 @@ docs/
   status.md
   ecscript-manual.md
   TODO.md
-tree-sitter-ecscript/
-  grammar.js
-  queries/
-  test/corpus/
-vscode-ecscript/
-  src/extension.ts
-  examples/
+packages/
+  tree-sitter-ecscript/
+    grammar.js
+    queries/
+    test/corpus/
+  vscode-ecscript/
+    src/extension.ts
+    examples/
 ```
+
+## 开发命令
+
+本项目使用 [just](https://github.com/casey/just) 管理多语言 monorepo 开发流程：
+
+```bash
+just test              # cargo test --workspace + tree-sitter corpus
+just ts-generate       # 重新生成 tree-sitter parser
+just sync-vscode       # 同步 tree-sitter wasm/query 到 VS Code 插件 assets/
+just vscode            # sync-vscode + tsc 编译 VS Code 插件
+just all               # 一条龙
+```
+
+VS Code 插件 assets 由 `scripts/sync-vscode-assets.sh` 从 `tree-sitter-ecscript` 同步，**不应手动维护两份 query 文件**。
+
+开发仓库不提交 `dist/` 等构建产物。发布 VS Code 扩展时由 `vsce` 打包。
 
 ## 当前边界
 
