@@ -2,7 +2,7 @@
   "name": "vscode-ecscript",
   "displayName": "ecscript",
   "description": "VS Code support for ecscript, backed by tree-sitter-ecscript.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "Eglantine257",
   "license": "MIT",
   "repository": {
@@ -45,6 +45,50 @@
       {
         "command": "ecscript.showSyntaxTree",
         "title": "ecscript: Show Syntax Tree"
+      }
+    ],
+    "semanticTokenTypes": [
+      {
+        "id": "keywordDeclaration",
+        "superType": "keyword",
+        "description": "ecscript declaration keywords (let, func)"
+      },
+      {
+        "id": "keywordControl",
+        "superType": "keyword",
+        "description": "ecscript control flow keywords (if, else, while, for, in, return)"
+      },
+      {
+        "id": "keywordImport",
+        "superType": "keyword",
+        "description": "ecscript import keywords (use, as)"
+      },
+      {
+        "id": "keywordCommand",
+        "superType": "keyword",
+        "description": "ecscript command literal keyword (cmd)"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "scopes": {
+          "keywordDeclaration": ["storage.type.ecscript", "keyword.declaration.ecscript"]
+        }
+      },
+      {
+        "scopes": {
+          "keywordControl": ["keyword.control.ecscript"]
+        }
+      },
+      {
+        "scopes": {
+          "keywordImport": ["keyword.control.import.ecscript"]
+        }
+      },
+      {
+        "scopes": {
+          "keywordCommand": ["keyword.other.command.ecscript"]
+        }
       }
     ]
   },

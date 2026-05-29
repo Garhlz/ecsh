@@ -4,11 +4,13 @@
 
 ## 当前状态
 
-- `grammar.js`：覆盖 ecscript stage 7 全部语法（表达式、语句、控制流、函数/闭包、lambda、复合赋值、`use`/`pub`、`|>` 管道）
-- `queries/highlights.scm`：关键字、字面量、函数、变量、操作符的高亮分组
+- `grammar.js`：覆盖 ecscript 阶段 9 语法（表达式、语句、控制流、函数/闭包、lambda、复合赋值、`use`/`pub`、`|>` 管道、`for` 专用 range）
+- `queries/highlights.scm`：关键字（按声明/控制/导入/命令/可见性分类）、字面量、函数、变量、操作符的高亮分组
 - `queries/locals.scm`：函数/参数/变量的定义与引用导航
 - `cmd{ ... }` 作为语法岛处理，内部由 external scanner 识别边界并当整块文本保留
 - 已生成 parser 并能通过 `npm run generate` / `npm test`
+
+注意：`1..10` / `1..=10` 只在 `for` 语句中合法；需要值时使用 `range(start, end)`。
 
 ### cmd{} 语法岛实现方式
 
@@ -65,29 +67,46 @@ just sync-vscode-assets
 
 ## 编辑器主题自定义（可选）
 
-插件提供的是 semantic tokens，不强制覆盖用户主题颜色。若想在 VS Code 中手动定制高亮，可在 `settings.json` 中添加：
+插件注册了四种自定义 semantic token 类型来区分不同关键字类别
+（`keywordDeclaration`、`keywordControl`、`keywordImport`、`keywordCommand`）。
+
+若想在 VS Code 中手动定制高亮，可在 `settings.json` 中添加：
 
 ```json
 {
   "editor.semanticTokenColorCustomizations": {
     "enabled": true,
     "rules": {
-      "keyword.declaration:ecscript": "#C586C0",
-      "keyword.control:ecscript":     "#C586C0",
-      "keyword.import:ecscript":      "#569CD6",
+      "keywordDeclaration:ecscript":   "#C586C0",
+      "keywordDeclaration.declaration:ecscript": "#C586C0",
+      "keywordControl:ecscript":       "#569CD6",
+      "keywordImport:ecscript":        "#4EC9B0",
+      "keywordCommand:ecscript":       "#D7BA7D",
+      "keyword.modifier:ecscript":     "#DCDCAA",
       "function.declaration:ecscript": "#DCDCAA",
-      "function.call:ecscript":       "#DCDCAA",
-      "method:ecscript":              "#DCDCAA",
-      "parameter:ecscript":           "#9CDCFE",
-      "property:ecscript":            "#4FC1FF",
-      "namespace:ecscript":           "#C586C0",
-      "operator.modification:ecscript": "#D4D4D4"
+      "function.call:ecscript":        "#DCDCAA",
+      "method:ecscript":               "#DCDCAA",
+      "parameter:ecscript":            "#9CDCFE",
+      "property:ecscript":             "#4FC1FF",
+      "namespace:ecscript":            "#C586C0",
+      "operator.modification:ecscript":"#D4D4D4"
     }
   }
 }
 ```
 
-以上仅为示例，按个人主题调整。
+### 自定义 token 类型说明
+
+| Token 类型 | capture | 对应关键字 |
+|-----------|---------|-----------|
+| `keywordDeclaration` | `keyword.declaration` | `let`, `func` |
+| `keywordControl` | `keyword.control` | `if`, `else`, `while`, `for`, `in`, `return` |
+| `keywordImport` | `keyword.import` | `use`, `as` |
+| `keywordCommand` | `keyword.command` | `cmd` |
+| `modifier` | `keyword.modifier` | `pub` |
+
+以上仅为示例，按个人主题调整。如果主题未定义对应规则，将回退到
+`package.json` 中声明的 TextMate scope（`storage.type.ecscript` 等）。
 
 ## 设计基线
 

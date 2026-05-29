@@ -129,3 +129,42 @@ cmd{
       (primary_expression
         (command_literal
           (command_body))))))
+
+==================
+cmd with deeply nested braces
+==================
+cmd{ a { b { c } } }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+cmd with mixed quotes
+==================
+cmd{ echo "it's done" }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+cmd with backslash in body
+==================
+cmd{ echo foo\bar }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))

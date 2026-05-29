@@ -30,6 +30,50 @@ range(1, 5) |> join(",")
   (newline))
 
 ==================
+Pipe from identifier
+==================
+data |> process(x)
+
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (pipe_expression
+        left: (primary_expression
+          (identifier))
+        right: (call_expression
+          function: (primary_expression
+            (identifier))
+          arguments: (argument_list
+            (expression
+              (primary_expression
+                (identifier))))))))
+  (newline))
+
+==================
+Pipe into method call
+==================
+x |> obj.method()
+
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (pipe_expression
+        left: (primary_expression
+          (identifier))
+        right: (call_expression
+          function: (field_expression
+            object: (primary_expression
+              (identifier))
+            field: (property_identifier
+              (property_identifier)))
+          arguments: (argument_list)))))
+  (newline))
+
+==================
 Chained pipe with lambda
 ==================
 range(1, 5) |> map((x) => x + 1) |> join(",")

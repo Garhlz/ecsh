@@ -140,7 +140,7 @@ module.exports = grammar({
       "for",
       field("name", $.variable_identifier),
       "in",
-      field("iterable", $.expression),
+      field("iterable", choice($.expression, $.for_range_expression)),
       field("body", $.statement_block)
     ),
 
@@ -183,7 +183,6 @@ module.exports = grammar({
     path_literal: (_) => token(/\.?\.?\/?[A-Za-z0-9_\-./]+/),
 
     expression: ($) => choice(
-      $.range_expression,
       $.pipe_expression,
       $.logical_or_expression,
       $.logical_and_expression,
@@ -195,16 +194,16 @@ module.exports = grammar({
       $.primary_expression
     ),
 
-    range_expression: ($) => prec.left(PREC.pipe, seq(
-      field("left", choice($.range_expression, $.pipe_expression, $._logical_expression_operand)),
-      field("operator", choice("..", "..=")),
-      field("right", choice($.range_expression, $.pipe_expression, $._logical_expression_operand))
-    )),
-
     pipe_expression: ($) => prec.left(PREC.pipe, seq(
       field("left", choice($.pipe_expression, $._logical_expression_operand)),
       "|>",
       field("right", $.call_expression)
+    )),
+
+    for_range_expression: ($) => prec.left(PREC.pipe, seq(
+      field("left", $._logical_expression_operand),
+      field("operator", choice("..", "..=")),
+      field("right", $._logical_expression_operand)
     )),
 
     logical_or_expression: ($) => prec.left(PREC.or, seq(

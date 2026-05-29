@@ -54,7 +54,7 @@ cargo test
 - 阶段 12：here-doc、glob、subshell、更完整的作业控制与执行语义
 - `ecscript` 的 block value、模块缓存/搜索路径、字符串插值、多行字符串
 
-更完整的进度说明见 [docs/status.md](/home/elaine/work/projects/ecsh/docs/status.md)。
+更完整的进度说明见 [docs/status.md](docs/status.md)。
 
 ## 快速示例
 
@@ -130,10 +130,10 @@ println(from_json(text(cmd{ printf "{\"ok\":true}" })).ok);
 
 ## 文档
 
-- [docs/status.md](/home/elaine/work/projects/ecsh/docs/status.md)：当前进度与后续入口
-- [docs/ecscript-manual.md](/home/elaine/work/projects/ecsh/docs/ecscript-manual.md)：`ecscript` 当前实现手册
-- [docs/TODO.md](/home/elaine/work/projects/ecsh/docs/TODO.md)：设计备忘与分阶段路线
-- [examples/ecscript/README.md](/home/elaine/work/projects/ecsh/examples/ecscript/README.md)：完整 `.ecs` 冒烟脚本与当前边界示例
+- [docs/status.md](docs/status.md)：当前进度与后续入口
+- [docs/ecscript-manual.md](docs/ecscript-manual.md)：`ecscript` 当前实现手册
+- [docs/TODO.md](docs/TODO.md)：设计备忘与分阶段路线
+- [examples/ecscript/README.md](examples/ecscript/README.md)：完整 `.ecs` 冒烟脚本与当前边界示例
 
 ## 仓库结构
 
@@ -169,16 +169,18 @@ packages/
 本项目使用 [just](https://github.com/casey/just) 管理多语言 monorepo 开发流程：
 
 ```bash
+just npm-install       # 首次开发：安装 tree-sitter 和 VS Code 插件的 npm 依赖
 just test              # cargo test --workspace + tree-sitter corpus
 just ts-generate       # 重新生成 tree-sitter parser
 just sync-vscode       # 同步 tree-sitter wasm/query 到 VS Code 插件 assets/
 just vscode            # sync-vscode + tsc 编译 VS Code 插件
+just vsix              # vscode + 打包 VSIX
 just all               # 一条龙
 ```
 
 VS Code 插件 assets 由 `scripts/sync-vscode-assets.sh` 从 `tree-sitter-ecscript` 同步，**不应手动维护两份 query 文件**。
 
-开发仓库不提交 `dist/` 等构建产物。发布 VS Code 扩展时由 `vsce` 打包。
+开发仓库不提交 `dist/`、`assets/` 和 `*.vsix` 等构建产物。发布 VS Code 扩展时由 `vsce` 打包（`just vsix`）。
 
 ## 当前边界
 
