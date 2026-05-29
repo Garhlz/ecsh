@@ -171,3 +171,109 @@ let f = (x) => x * 2
               right: (primary_expression
                 (integer))))))))
   (newline))
+
+
+==================
+Object with newline separators
+==================
+{
+  name: "ecsh",
+  nums: [1, 2, 3],
+  enabled: true
+}
+---
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (object
+          (newline)
+          (object_entry
+            key: (property_identifier
+              (property_identifier))
+            value: (expression
+              (primary_expression
+                (string))))
+          (newline)
+          (object_entry
+            key: (property_identifier
+              (property_identifier))
+            value: (expression
+              (primary_expression
+                (array
+                  (expression
+                    (primary_expression
+                      (integer)))
+                  (expression
+                    (primary_expression
+                      (integer)))
+                  (expression
+                    (primary_expression
+                      (integer)))))))
+          (newline)
+          (object_entry
+            key: (property_identifier
+              (property_identifier))
+            value: (expression
+              (primary_expression
+                (true))))
+          (newline))))))
+
+==================
+Object empty with newline
+==================
+{
+}
+---
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (object
+          (newline))))))
+
+==================
+Object mixed comma and newline separators
+==================
+{
+  name: "ecsh",
+  nums: [1, 2, 3]
+  enabled: true,
+}
+---
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (object
+          (newline)
+          (object_entry
+            key: (property_identifier
+              (property_identifier))
+            value: (expression
+              (primary_expression
+                (string))))
+          (newline)
+          (object_entry
+            key: (property_identifier
+              (property_identifier))
+            value: (expression
+              (primary_expression
+                (array
+                  (expression
+                    (primary_expression
+                      (integer)))
+                  (expression
+                    (primary_expression
+                      (integer)))
+                  (expression
+                    (primary_expression
+                      (integer)))))))
+          (newline)
+          (object_entry
+            key: (property_identifier
+              (property_identifier))
+            value: (expression
+              (primary_expression
+                (true))))
+          (newline))))))

@@ -245,7 +245,7 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - **Hover**——光标悬停显示 tree-sitter 节点类型名
 - **Diagnostics**——tree-sitter ERROR 和 MISSING 节点转 VS Code 红色波浪线，300ms 防抖
 - **多行 token 拆分**——`command_body` 等跨行节点按行拆分 semantic token
-- **增量解析**——同一文档版本的 parse tree 在 semantic tokens/folding/symbols 三个 provider 间共享缓存
+- **解析缓存**——同一文档版本的 parse tree 在 semantic tokens/folding/symbols 三个 provider 间共享缓存（版本变化时 fresh parse，暂未启用 tree-sitter 增量解析因为需要 `Tree.edit()`）
 
 `cmd{...}` 作为语法岛处理：external scanner 维护 brace-depth/quote/escape 状态机识别边界，内部 shell 语义仍由 ecsh/ecscript runtime 处理。scanner 额外跟踪 `${...}` 展开深度避免把展开内的 `}` 当成 cmd 闭合。
 

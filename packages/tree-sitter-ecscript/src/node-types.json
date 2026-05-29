@@ -74,6 +74,10 @@
         {
           "type": "expression",
           "named": true
+        },
+        {
+          "type": "newline",
+          "named": true
         }
       ]
     }
@@ -88,6 +92,10 @@
       "types": [
         {
           "type": "expression",
+          "named": true
+        },
+        {
+          "type": "newline",
           "named": true
         }
       ]
@@ -996,6 +1004,10 @@
       "required": false,
       "types": [
         {
+          "type": "newline",
+          "named": true
+        },
+        {
           "type": "object_entry",
           "named": true
         }
@@ -1040,6 +1052,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "newline",
+          "named": true
+        },
         {
           "type": "variable_identifier",
           "named": true

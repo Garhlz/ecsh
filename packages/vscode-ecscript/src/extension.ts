@@ -99,8 +99,13 @@ class EcscriptTreeSitterRuntime {
    *
    * Three providers (semantic tokens, folding, document symbols) each need
    * the parse tree.  The first one to arrive parses; the others reuse the
-   * cached tree.  Incremental parsing is used when the document has been
-   * edited since the last parse for the same URI.
+   * cached tree for the same document version.
+   *
+   * We intentionally parse from scratch on version changes.  Incremental
+   * parsing requires calling Tree.edit() on the old tree before passing
+   * it to parser.parse(), which is not implemented yet.  Passing an
+   * un-edited old tree produces incorrect trees after insertions or
+   * deletions (especially newline edits).
    *
    * The caller must NOT call tree.delete() — the cache owns the lifecycle. */
   async parseDocument(document: vscode.TextDocument): Promise<Tree | null> {
@@ -113,30 +118,17 @@ class EcscriptTreeSitterRuntime {
       return this.treeCache.tree;
     }
 
-    // Cache miss or version change: parse fresh, possibly incremental
-    const oldTree =
-      this.treeCache && this.treeCache.uri === uri ? this.treeCache.tree : undefined;
-
+    // Version changed — fresh parse (no old tree, no incremental parsing).
     const text = document.getText();
-    const tree = parser.parse(text, oldTree) ?? null;
+    const tree = parser.parse(text) ?? null;
 
-    // If parsing returned null, keep the previous cache entry (if any)
     if (!tree) {
-      if (oldTree) {
-        // parser.parse(text, oldTree) can fail and return null when the text
-        // is large and incremental parse runs out of memory or hits a bug.
-        // In that case the caller should fall back to the old tree rather than
-        // leave providers with nothing.
-        return oldTree;
-      }
-      // Brand-new parse also failed — nothing to fall back to.
       this.clearTreeCache();
       return null;
     }
 
-    // Replace cache entry — old tree (if different from tree) was consumed
-    // by parser.parse() or is being replaced.
-    if (this.treeCache && this.treeCache.tree !== tree) {
+    // Replace cache entry.
+    if (this.treeCache) {
       this.treeCache.tree.delete();
     }
     this.treeCache = { uri, version, tree };
