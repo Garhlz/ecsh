@@ -319,6 +319,8 @@ object_entry    = (identifier | string) ":" expr
 补充说明：
 
 - `|>` 是语法糖。运行时没有独立的 `PipeForward` 节点；parser 会把 `x |> f(a, b)` 直接改写成 `f(x, a, b)`。
+- `|>` 右侧当前必须是调用表达式。
+- `|>` 后允许换行，而且可以连续出现多个空行；这和运行时 parser、tree-sitter grammar、VS Code 高亮当前保持一致。
 - `module_path` 当前不是单个 token；parser 会把 `Identifier` / `String` / `.` / `..` / `/` / `-` 这几类 token 拼起来，直到读到 `as`。
 - `command_literal` 当前在 lexer 阶段就是单 token；Tree-sitter 第一版更适合把它当一整块特殊语法岛，而不是完整复刻内部 shell parser。
 

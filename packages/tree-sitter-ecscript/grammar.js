@@ -202,7 +202,8 @@ module.exports = grammar({
 
     pipe_expression: ($) => prec.left(PREC.pipe, seq(
       field("left", choice($.pipe_expression, $._logical_expression_operand)),
-      "|>",
+      field("operator", "|>"),
+      repeat($.newline),
       field("right", $.call_expression)
     )),
 

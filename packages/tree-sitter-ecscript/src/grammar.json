@@ -706,8 +706,19 @@
             }
           },
           {
-            "type": "STRING",
-            "value": "|>"
+            "type": "FIELD",
+            "name": "operator",
+            "content": {
+              "type": "STRING",
+              "value": "|>"
+            }
+          },
+          {
+            "type": "REPEAT",
+            "content": {
+              "type": "SYMBOL",
+              "name": "newline"
+            }
           },
           {
             "type": "FIELD",
