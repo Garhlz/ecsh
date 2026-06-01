@@ -1,0 +1,22 @@
+==================
+Command literal inside call
+==================
+let out = text(cmd{ printf "ok" })
+
+---
+
+(source_file
+  (let_statement
+    name: (variable_identifier
+      (variable_identifier))
+    value: (expression
+      (postfix_expression
+        (call_expression
+          function: (primary_expression
+            (identifier))
+          arguments: (argument_list
+            (expression
+              (primary_expression
+                (command_literal
+                  (command_body)))))))))
+  (newline))

@@ -1,0 +1,249 @@
+==================
+Pipe into call
+==================
+range(1, 5) |> join(",")
+
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (pipe_expression
+        left: (postfix_expression
+          (call_expression
+            function: (primary_expression
+              (identifier))
+            arguments: (argument_list
+              (expression
+                (primary_expression
+                  (integer)))
+              (expression
+                (primary_expression
+                  (integer))))))
+        right: (call_expression
+          function: (primary_expression
+            (identifier))
+          arguments: (argument_list
+            (expression
+              (primary_expression
+                (string))))))))
+  (newline))
+
+==================
+Pipe from identifier
+==================
+data |> process(x)
+
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (pipe_expression
+        left: (primary_expression
+          (identifier))
+        right: (call_expression
+          function: (primary_expression
+            (identifier))
+          arguments: (argument_list
+            (expression
+              (primary_expression
+                (identifier))))))))
+  (newline))
+
+==================
+Pipe into method call
+==================
+x |> obj.method()
+
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (pipe_expression
+        left: (primary_expression
+          (identifier))
+        right: (call_expression
+          function: (field_expression
+            object: (primary_expression
+              (identifier))
+            field: (property_identifier
+              (property_identifier)))
+          arguments: (argument_list)))))
+  (newline))
+
+==================
+Chained pipe with lambda
+==================
+range(1, 5) |> map((x) => x + 1) |> join(",")
+
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (pipe_expression
+        left: (pipe_expression
+          left: (postfix_expression
+            (call_expression
+              function: (primary_expression
+                (identifier))
+              arguments: (argument_list
+                (expression
+                  (primary_expression
+                    (integer)))
+                (expression
+                  (primary_expression
+                    (integer))))))
+          right: (call_expression
+            function: (primary_expression
+              (identifier))
+            arguments: (argument_list
+              (expression
+                (primary_expression
+                  (lambda_expression
+                    (parameter_list
+                      (variable_identifier
+                        (variable_identifier)))
+                    body: (expression
+                      (additive_expression
+                        left: (primary_expression
+                          (identifier))
+                        right: (primary_expression
+                          (integer))))))))))
+        right: (call_expression
+          function: (primary_expression
+            (identifier))
+          arguments: (argument_list
+            (expression
+              (primary_expression
+                (string))))))))
+  (newline))
+
+==================
+Pipe followed by newline
+==================
+xs |>
+  map((x) => x + 1)
+
+---
+(source_file
+  (expression_statement
+    (expression
+      (pipe_expression
+        left: (primary_expression
+          (identifier))
+        (newline)
+        right: (call_expression
+          function: (primary_expression
+            (identifier))
+          arguments: (argument_list
+            (expression
+              (primary_expression
+                (lambda_expression
+                  (parameter_list
+                    (variable_identifier
+                      (variable_identifier)))
+                  body: (expression
+                    (additive_expression
+                      left: (primary_expression
+                        (identifier))
+                      right: (primary_expression
+                        (integer))))))))))))
+  (newline))
+
+==================
+Pipe followed by multiple newlines
+==================
+xs |>
+
+  map((x) => x + 1)
+
+---
+(source_file
+  (expression_statement
+    (expression
+      (pipe_expression
+        left: (primary_expression
+          (identifier))
+        (newline)
+        (newline)
+        right: (call_expression
+          function: (primary_expression
+            (identifier))
+          arguments: (argument_list
+            (expression
+              (primary_expression
+                (lambda_expression
+                  (parameter_list
+                    (variable_identifier
+                      (variable_identifier)))
+                  body: (expression
+                    (additive_expression
+                      left: (primary_expression
+                        (identifier))
+                      right: (primary_expression
+                        (integer))))))))))))
+  (newline))
+
+==================
+Chained pipe with newlines after operators
+==================
+xs |>
+  filter((x) => x > 1) |>
+  map((x) => x * 2) |>
+  join(", ")
+
+---
+(source_file
+  (expression_statement
+    (expression
+      (pipe_expression
+        left: (pipe_expression
+          left: (pipe_expression
+            left: (primary_expression
+              (identifier))
+            (newline)
+            right: (call_expression
+              function: (primary_expression
+                (identifier))
+              arguments: (argument_list
+                (expression
+                  (primary_expression
+                    (lambda_expression
+                      (parameter_list
+                        (variable_identifier
+                          (variable_identifier)))
+                      body: (expression
+                        (comparison_expression
+                          left: (primary_expression
+                            (identifier))
+                          right: (primary_expression
+                            (integer))))))))))
+          (newline)
+          right: (call_expression
+            function: (primary_expression
+              (identifier))
+            arguments: (argument_list
+              (expression
+                (primary_expression
+                  (lambda_expression
+                    (parameter_list
+                      (variable_identifier
+                        (variable_identifier)))
+                    body: (expression
+                      (multiplicative_expression
+                        left: (primary_expression
+                          (identifier))
+                        right: (primary_expression
+                          (integer))))))))))
+        (newline)
+        right: (call_expression
+          function: (primary_expression
+            (identifier))
+          arguments: (argument_list
+            (expression
+              (primary_expression
+                (string))))))))
+  (newline))

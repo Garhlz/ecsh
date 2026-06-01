@@ -1,8 +1,8 @@
 # ecsh / ecscript 设计备忘与演进路线
 
 > 注意：这份文档保留设计推演、阶段拆解和历史思路，内容会比当前实现更长，也可能包含尚未落地的方案。
-> 如果你只想看“项目现在做到哪一步”，请先看 [status.md](/home/elaine/work/projects/ecsh/docs/status.md)；
-> 如果你想看 `ecscript` 当前已经实现的语法与语义，请看 [ecscript-manual.md](/home/elaine/work/projects/ecsh/docs/ecscript-manual.md)。
+> 如果你只想看”项目现在做到哪一步”，请先看 [status.md](status.md)；
+> 如果你想看 `ecscript` 当前已经实现的语法与语义，请看 [ecscript-manual.md](ecscript-manual.md)。
 
 ## 一、语言设计总览
 

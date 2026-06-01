@@ -1,0 +1,20 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "ecscript",
+      "camelcase": "Ecscript",
+      "scope": "source.ecscript",
+      "file-types": [
+        "ecs"
+      ],
+      "injection-regex": "^ecscript$",
+      "class-name": "TreeSitterEcscript"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Tree-sitter grammar for ecscript"
+  }
+}

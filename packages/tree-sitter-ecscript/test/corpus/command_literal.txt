@@ -1,0 +1,170 @@
+==================
+Simple cmd
+==================
+cmd{ echo hello }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+cmd with brace string
+==================
+cmd{ echo "}" }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+cmd with awk script
+==================
+cmd{ awk '{print $1}' file }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+cmd with ${} expansion
+==================
+cmd{ echo ${HOME} }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+cmd with shell if
+==================
+cmd{ if true; then echo ok; fi }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+Empty cmd
+==================
+cmd {}
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal)))))
+
+==================
+cmd with space-only body
+==================
+cmd{ }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+cmd with nested braces
+==================
+cmd{ echo foo { bar } baz }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+cmd with escaped quotes
+==================
+cmd{ echo \"escaped\" }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+multiline cmd body
+==================
+cmd{
+  echo hello
+  echo "}"
+}
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+cmd with deeply nested braces
+==================
+cmd{ a { b { c } } }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+cmd with mixed quotes
+==================
+cmd{ echo "it's done" }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))
+
+==================
+cmd with backslash in body
+==================
+cmd{ echo foo\bar }
+---
+
+(source_file
+  (expression_statement
+    (expression
+      (primary_expression
+        (command_literal
+          (command_body))))))

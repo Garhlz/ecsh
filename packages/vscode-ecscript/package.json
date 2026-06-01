@@ -1,0 +1,97 @@
+{
+  "name": "vscode-ecscript",
+  "displayName": "ecscript",
+  "description": "VS Code support for ecscript, backed by tree-sitter-ecscript.",
+  "version": "0.1.1",
+  "publisher": "Eglantine257",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Eglantine257/ecsh",
+    "directory": "packages/vscode-ecscript"
+  },
+  "private": false,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:ecscript",
+    "onCommand:ecscript.showStatus",
+    "onCommand:ecscript.showSyntaxTree"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "ecscript",
+        "aliases": [
+          "ecscript",
+          "ecs"
+        ],
+        "extensions": [
+          ".ecs"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "ecscript.showStatus",
+        "title": "ecscript: Show Extension Status"
+      },
+      {
+        "command": "ecscript.showSyntaxTree",
+        "title": "ecscript: Show Syntax Tree"
+      }
+    ],
+    "semanticTokenTypes": [
+      {
+        "id": "keywordDeclaration",
+        "superType": "keyword",
+        "description": "ecscript declaration keywords (let, func)"
+      },
+      {
+        "id": "keywordControl",
+        "superType": "keyword",
+        "description": "ecscript control flow keywords (if, else, while, for, in, return)"
+      },
+      {
+        "id": "keywordImport",
+        "superType": "keyword",
+        "description": "ecscript import keywords (use, as)"
+      },
+      {
+        "id": "keywordCommand",
+        "superType": "keyword",
+        "description": "ecscript command literal keyword (cmd)"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "ecscript",
+        "scopes": {
+          "keywordDeclaration": ["storage.type.ecscript", "keyword.declaration.ecscript"],
+          "keywordControl": ["keyword.control.ecscript"],
+          "keywordImport": ["keyword.control.import.ecscript"],
+          "keywordCommand": ["keyword.other.command.ecscript"]
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "build:wasm": "mkdir -p assets && ../tree-sitter-ecscript/node_modules/.bin/tree-sitter build --wasm -o ./assets/tree-sitter-ecscript.wasm ../tree-sitter-ecscript"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "web-tree-sitter": "^0.25.10"
+  }
+}
