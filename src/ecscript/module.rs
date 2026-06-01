@@ -158,7 +158,11 @@ fn resolve_module_path(
         RuntimeError::new(
             span,
             RuntimeErrorKind::IoError,
-            format!("failed to resolve module '{}': {}", candidate.display(), err),
+            format!(
+                "failed to resolve module '{}': {}",
+                candidate.display(),
+                err
+            ),
         )
     })
 }

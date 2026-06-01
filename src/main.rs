@@ -20,6 +20,7 @@ use std::{
     path::Path,
 };
 
+/// 入口：有文件参数走脚本执行，否则进入交互 REPL。
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match script_file_arg()? {
         Some(path) => run_script_file(&path),
@@ -27,6 +28,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// 解析命令行参数，返回可选的脚本文件路径。
+///
+/// 只接受至多一个参数作为脚本路径，多余参数直接报错。
 fn script_file_arg() -> Result<Option<String>, Box<dyn std::error::Error>> {
     let mut args = env::args();
     let _program = args.next();
@@ -43,6 +47,9 @@ fn script_file_arg() -> Result<Option<String>, Box<dyn std::error::Error>> {
     Ok(Some(path))
 }
 
+/// 以文件模式执行 `.ecs` 脚本。
+///
+/// 若 stdin 不是终端，会提前将其内容快照下来供脚本内的 `stdin()` 等函数消费。
 fn run_script_file(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
     let env = Environment::new();
     let stdin_text = read_optional_stdin_text()?;
@@ -71,6 +78,12 @@ fn read_optional_stdin_text() -> Result<Option<String>, Box<dyn std::error::Erro
 }
 
 /// 初始化输入与全局状态，然后进入交互主循环。
+///
+/// 主循环流程：
+/// 1. 回收已完成的后台作业
+/// 2. 读取一条完整命令（含续行）
+/// 3. 分派到 shell / ecscript 两套路径执行
+/// 4. 根据返回值更新 `last_status`，或处理 `exit` 退出
 fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = ShellInput::new()?;
     let mut state = new_shell_state(input.is_interactive());
@@ -138,6 +151,9 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 加载 `~/.ecshrc` 启动脚本。
+///
+/// 仅在交互模式下生效；非交互模式跳过，避免干扰脚本化执行。
 fn load_startup_rc(state: &mut ShellState) {
     if !state.interactive {
         return;
@@ -168,17 +184,20 @@ fn load_startup_rc(state: &mut ShellState) {
     }
 }
 
+/// 一次命令读取的结果：成功读到一行、被 Ctrl-C 中断、或收到 EOF。
 enum ReadCommand {
     Line(String),
     Interrupted,
     Eof,
 }
 
+/// 顶层输入分派结果：shell 命令或 ecscript 语句块。
 enum TopLevelInput {
     Shell(ParsedJob),
     Ecscript(Vec<Stmt>),
 }
 
+/// 顶层分派阶段的解析错误，区分 shell 解析失败与 ecscript 解析失败。
 enum TopLevelError {
     Shell(ParseError),
     EcscriptParse(ParseError),
@@ -247,6 +266,9 @@ fn read_complete_command(
     }
 }
 
+/// 扫描源码文本判断 `{}` 是否仍未闭合。
+///
+/// 跳过单引号、双引号字符串及转义字符中的括号，只统计代码层的花括号深度。
 fn ecscript_block_still_open(src: &str) -> bool {
     enum ScanState {
         Normal,
@@ -458,7 +480,7 @@ fn run_parsed_line(
     }
 }
 
-/// 复用 `&&` / `||` 的条件分派骨架。
+/// `&&` / `||` 的条件分派骨架：先执行左侧，根据谓词决定是否执行右侧。
 fn run_with_condition(
     left: &ParsedLine,
     right: &ParsedLine,

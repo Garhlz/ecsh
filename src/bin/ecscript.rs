@@ -2,8 +2,7 @@ use ecsh::{
     diagnostics::print_error,
     ecscript::{
         Environment, Interpreter, InterpreterError, Value, error::ParseError,
-        repl_output_needs_newline, repr_value, reset_repl_output_state,
-        run_script_file_with_stdin,
+        repl_output_needs_newline, repr_value, reset_repl_output_state, run_script_file_with_stdin,
     },
 };
 use rustyline::{DefaultEditor, error::ReadlineError};
@@ -69,16 +68,16 @@ fn run() -> Result<(), CliError> {
                 Some(text)
             };
             let env = Environment::new();
-            run_script_file_with_stdin(&path, &env, stdin_text.as_deref()).map_err(|err| {
-                match err {
+            run_script_file_with_stdin(&path, &env, stdin_text.as_deref()).map_err(
+                |err| match err {
                     ecsh::ecscript::ScriptFileError::Read { path, err } => {
                         CliError::Other(format!("failed to read '{}': {}", path.display(), err))
                     }
                     ecsh::ecscript::ScriptFileError::Script { source, err } => {
                         CliError::Script { source, err }
                     }
-                }
-            })
+                },
+            )
         }
     }
 }
