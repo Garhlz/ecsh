@@ -371,7 +371,10 @@ fn smoke_runs_module_imports_via_ecsh_file_mode() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(output.status.success(), "stderr: {stderr}");
-    assert!(stdout.lines().any(|line| line == "2"), "stdout was:\n{stdout}");
+    assert!(
+        stdout.lines().any(|line| line == "2"),
+        "stdout was:\n{stdout}"
+    );
 
     let _ = std::fs::remove_file(main_path);
     let _ = std::fs::remove_file(foo_path);
@@ -473,7 +476,12 @@ exit
 "#,
     );
 
-    assert!(output.lines().next().is_some_and(|line| line.starts_with('/')));
+    assert!(
+        output
+            .lines()
+            .next()
+            .is_some_and(|line| line.starts_with('/'))
+    );
     assert!(output.lines().any(|line| line == "/tmp/ecsh"));
 }
 
