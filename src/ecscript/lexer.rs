@@ -254,6 +254,8 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
     let mut tokens = Vec::new();
     let mut offset: usize = 0; // 当前扫描位置的字节偏移
 
+    // 单趟扫描：每次读取一个字符，根据首字符决定后续分支。
+    // `offset` 始终记录已经消费的 UTF-8 字节数，用于报错定位。
     while let Some(ch) = chars.next() {
         let start = offset;
         match ch {
@@ -274,7 +276,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 buf.push(ch);
                 let mut is_int = true;
                 while let Some(next_ch) = chars.peek().copied() {
-                    // 这里提前看一个不消费
+                    // 数字先尽量吃满；只有第一次遇到 `.` 时，才尝试把它解释成浮点数的小数点。
                     match next_ch {
                         next_ch if next_ch.is_ascii_digit() => {
                             let _ = chars.next(); // 显式消费
@@ -282,7 +284,8 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                             buf.push(next_ch);
                         }
                         '.' if is_int => {
-                            // 因为这里'.'是没有消费的，而且要看'.'的下一个
+                            // 这里不能直接吞掉 `.`，因为 `1..2` 应该被拆成整数 + range，
+                            // 只有 `.` 后面仍是数字时，才把当前字面量升级为浮点数。
                             let mut lookahead = chars.clone();
                             let _ = lookahead.next();
 
@@ -330,6 +333,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                 offset += '"'.len_utf8();
 
                 let mut is_close = false;
+                // 原始字符串不处理任何转义，直到遇到下一个 `"` 才结束。
                 while let Some(next_ch) = chars.next() {
                     offset += next_ch.len_utf8();
                     if next_ch == '"' {
@@ -411,25 +415,16 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                         start,
                         offset,
                     ),
-                    "use" => push_token(
-                        &mut tokens,
-                        TokenKind::Keyword(Keyword::Use),
-                        start,
-                        offset,
-                    ),
-                    "pub" => push_token(
-                        &mut tokens,
-                        TokenKind::Keyword(Keyword::Pub),
-                        start,
-                        offset,
-                    ),
-                    "as" => push_token(
-                        &mut tokens,
-                        TokenKind::Keyword(Keyword::As),
-                        start,
-                        offset,
-                    ),
+                    "use" => {
+                        push_token(&mut tokens, TokenKind::Keyword(Keyword::Use), start, offset)
+                    }
+                    "pub" => {
+                        push_token(&mut tokens, TokenKind::Keyword(Keyword::Pub), start, offset)
+                    }
+                    "as" => push_token(&mut tokens, TokenKind::Keyword(Keyword::As), start, offset),
                     "cmd" => {
+                        // `cmd` 后面紧跟 `{...}` 时，整个命令体会被折叠成一个 token；
+                        // 否则它仍然只是普通关键字。
                         if let Some(command) = try_scan_command_literal(&mut chars, &mut offset)? {
                             push_token(
                                 &mut tokens,
@@ -454,6 +449,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             '\"' => {
                 offset += ch.len_utf8();
                 let mut is_close = false;
+                // 普通字符串支持少量转义，实际解码在词法阶段完成。
                 while let Some(next_ch) = chars.next() {
                     offset += next_ch.len_utf8();
                     match next_ch {
@@ -575,7 +571,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                     };
                     push_token(&mut tokens, kind, start, offset);
                 } else if let Some(next_ch) = chars.next_if(|next_ch| (*next_ch).is_ascii_digit()) {
-                    // .123这种浮点数
+                    // 支持 `.123` 形式，并在语义上补成 `0.123`。
                     offset += next_ch.len_utf8();
                     buf.push_str("0.");
                     buf.push(next_ch);
@@ -657,7 +653,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             }
             '/' => {
                 offset += ch.len_utf8();
-                // 单行注释
+                // `/` 同时承担除号、复合赋值和两种注释的入口，因此优先判注释。
                 if chars.next_if_eq(&'/').is_some() {
                     while let Some(nxt) = chars.next() {
                         offset += nxt.len_utf8();
@@ -665,7 +661,6 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                             break;
                         }
                     }
-                    // 多行注释
                 } else if chars.next_if_eq(&'*').is_some() {
                     let mut is_close = false;
                     while let Some(nxt) = chars.next() {
@@ -807,6 +802,7 @@ fn try_scan_command_literal(
     offset: &mut usize,
 ) -> Result<Option<String>, ParseError> {
     let mut probe = chars.clone();
+    // 先探测，不消费真实输入；只有确认是 `cmd {` 结构后才进入命令体扫描。
     while let Some(next) = probe.peek().copied() {
         if matches!(next, ' ' | '\t') {
             let _ = probe.next();
@@ -832,6 +828,8 @@ fn try_scan_command_literal(
     let mut depth = 1usize;
     let mut body = String::new();
 
+    // 命令字面量内部仍需要区分“普通态”和“引号态”，
+    // 否则引号中的 `{` / `}` 会错误地影响大括号配对深度。
     enum ScanState {
         Normal,
         SingleQuoted,
@@ -866,6 +864,7 @@ fn try_scan_command_literal(
                     body.push('"');
                 }
                 Some('\\') => {
+                    // 普通态下保留反斜杠和其后的一个字符，避免误拆转义后的引号。
                     *offset += '\\'.len_utf8();
                     body.push('\\');
                     let Some(next) = chars.next() else {
@@ -944,6 +943,8 @@ fn ensure_number_terminated(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     offset: usize,
 ) -> Result<(), ParseError> {
+    // 数字后面如果立刻跟标识符字符，会产生 `123abc` 这种歧义输入；
+    // 这里直接在词法阶段拒绝，而不是留给语法阶段处理。
     if let Some(next_ch) = chars.peek().copied() {
         if next_ch.is_ascii_alphabetic() || next_ch == '_' {
             return Err(ParseError::new(
@@ -959,203 +960,5 @@ fn ensure_number_terminated(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Delimiter, Operator, TokenKind, tokenize};
-
-    fn kinds(src: &str) -> Vec<TokenKind> {
-        tokenize(src)
-            .unwrap()
-            .into_iter()
-            .map(|token| token.kind)
-            .collect()
-    }
-
-    fn assert_kinds(src: &str, expected: Vec<TokenKind>) {
-        assert_eq!(kinds(src), expected);
-    }
-
-    fn assert_lex_error(src: &str, offset: usize, message: &str) {
-        let err = tokenize(src).unwrap_err();
-
-        assert_eq!(err.offset, offset);
-        assert_eq!(err.message, message);
-    }
-
-    fn ident(name: &str) -> TokenKind {
-        TokenKind::Identifier(name.to_string())
-    }
-
-    fn string(text: &str) -> TokenKind {
-        TokenKind::String(text.to_string())
-    }
-
-    fn int(value: i64) -> TokenKind {
-        TokenKind::Int(value)
-    }
-
-    fn float(value: f64) -> TokenKind {
-        TokenKind::Float(value)
-    }
-
-    fn op(operator: Operator) -> TokenKind {
-        TokenKind::Operator(operator)
-    }
-
-    fn delimiter(delimiter: Delimiter) -> TokenKind {
-        TokenKind::Delimiter(delimiter)
-    }
-
-    #[test]
-    fn lexes_keywords_and_identifiers() {
-        assert_kinds(
-            "nil true false foo123 _bar9",
-            vec![
-                TokenKind::Nil,
-                TokenKind::True,
-                TokenKind::False,
-                ident("foo123"),
-                ident("_bar9"),
-                TokenKind::EOF,
-            ],
-        );
-    }
-
-    #[test]
-    fn string_unescapes_common_sequences() {
-        assert_kinds(
-            "\"a\\n\\t\\\\\\\"b\"",
-            vec![string("a\n\t\\\"b"), TokenKind::EOF],
-        );
-    }
-
-    #[test]
-    fn raw_string_keeps_backslashes_literal() {
-        assert_kinds(
-            "r\"c:\\tmp\\ecs\\test.txt\"",
-            vec![string("c:\\tmp\\ecs\\test.txt"), TokenKind::EOF],
-        );
-    }
-
-    #[test]
-    fn raw_string_does_not_unescape_sequences() {
-        assert_kinds(r#"r"\n\t\\""#, vec![string(r#"\n\t\\"#), TokenKind::EOF]);
-    }
-
-    #[test]
-    fn raw_string_prefix_does_not_break_identifiers() {
-        assert_kinds(
-            "raw r foo",
-            vec![ident("raw"), ident("r"), ident("foo"), TokenKind::EOF],
-        );
-    }
-
-    #[test]
-    fn lexes_command_literal_as_single_token() {
-        assert_kinds(
-            r#"cmd{ echo "${x}" > out.txt }"#,
-            vec![
-                TokenKind::CommandLiteral(r#" echo "${x}" > out.txt "#.to_string()),
-                TokenKind::EOF,
-            ],
-        );
-    }
-
-    #[test]
-    fn eq_eq_lexes_as_equality_operator() {
-        assert_kinds(
-            "== != <= >= && || |> ! = += -= *= /= %=",
-            vec![
-                op(Operator::EqEq),
-                op(Operator::NotEq),
-                op(Operator::LtEq),
-                op(Operator::GtEq),
-                op(Operator::AndAnd),
-                op(Operator::OrOr),
-                op(Operator::PipeForward),
-                op(Operator::Bang),
-                delimiter(Delimiter::Eq),
-                delimiter(Delimiter::PlusEq),
-                delimiter(Delimiter::MinusEq),
-                delimiter(Delimiter::StarEq),
-                delimiter(Delimiter::SlashEq),
-                delimiter(Delimiter::PercentEq),
-                TokenKind::EOF,
-            ],
-        );
-    }
-
-    #[test]
-    fn distinguishes_ranges_from_floats() {
-        assert_kinds(
-            "1..2 1..=2 .123 1.23",
-            vec![
-                int(1),
-                delimiter(Delimiter::DotDot),
-                int(2),
-                int(1),
-                delimiter(Delimiter::DotDotEq),
-                int(2),
-                float(0.123),
-                float(1.23),
-                TokenKind::EOF,
-            ],
-        );
-    }
-
-    #[test]
-    fn reports_invalid_integer_suffix() {
-        assert_lex_error(
-            "123ab",
-            3,
-            "invalid numeric literal; expected separator after number, found 'a'",
-        );
-    }
-
-    #[test]
-    fn reports_invalid_float_suffix() {
-        assert_lex_error(
-            "1.23ab",
-            4,
-            "invalid numeric literal; expected separator after number, found 'a'",
-        );
-    }
-
-    #[test]
-    fn reports_invalid_leading_dot_float_suffix() {
-        assert_lex_error(
-            ".123abc",
-            4,
-            "invalid numeric literal; expected separator after number, found 'a'",
-        );
-    }
-
-    #[test]
-    fn reports_unterminated_string() {
-        assert_lex_error("\"abc", 4, "unterminated string literal");
-    }
-
-    #[test]
-    fn reports_unterminated_raw_string() {
-        assert_lex_error("r\"abc", 5, "unterminated raw string literal");
-    }
-
-    #[test]
-    fn reports_unknown_escape() {
-        assert_lex_error("\"\\x\"", 3, "unknown escape '\\x'");
-    }
-
-    #[test]
-    fn reports_unknown_character() {
-        assert_lex_error("@", 0, "unexpected character '@'");
-    }
-
-    #[test]
-    fn reports_single_ampersand() {
-        assert_lex_error("&", 1, "unexpected '&'; did you mean '&&'?");
-    }
-
-    #[test]
-    fn reports_single_pipe() {
-        assert_lex_error("|", 1, "unexpected '|'; did you mean '||'?");
-    }
-}
+#[path = "lexer_tests.rs"]
+mod tests;
