@@ -9,6 +9,10 @@ pub func demo(xs) {
 println(std.sum([1, 2, 3]))
 
 let a = [1,2,3]
-a = [1, 2, 3] |> take(2)
+a = a |> 
+    take(2) |>
+    join(", ")
+
+println(a)
 
 

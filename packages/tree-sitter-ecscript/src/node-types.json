@@ -1120,6 +1120,16 @@
           }
         ]
       },
+      "operator": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "|>",
+            "named": false
+          }
+        ]
+      },
       "right": {
         "multiple": false,
         "required": true,
@@ -1130,6 +1140,16 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "newline",
+          "named": true
+        }
+      ]
     }
   },
   {

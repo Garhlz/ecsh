@@ -70,6 +70,12 @@ The extension currently registers a semantic tokens provider for `.ecs` files.
 The first version is intentionally conservative and reuses the synced
 `assets/queries/highlights.scm` query plus the generated wasm parser.
 
+Current editor behavior intentionally aligned with the runtime:
+
+- `|>` supports multiline chains, including repeated blank lines before the next call
+- auto-indent only triggers for plain assignment starts (for example `let x =` or `foo.bar =`) and for `|>` continuation lines
+- incomplete `==`, `!=`, `<=`, `>=`, `+=`, and `=>` lines are not treated as assignment continuations
+
 ## Custom keyword colors
 
 The extension defines four custom semantic token types
