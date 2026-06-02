@@ -107,10 +107,9 @@ range(1, 5) |> map((x) => x + 1) |> join(",")
                       (variable_identifier
                         (variable_identifier)))
                     body: (expression
-                      (additive_expression
-                        left: (primary_expression
-                          (identifier))
-                        right: (primary_expression
+                      (identifier)
+                      (expression
+                        (primary_expression
                           (integer))))))))))
         right: (call_expression
           function: (primary_expression
@@ -128,6 +127,7 @@ xs |>
   map((x) => x + 1)
 
 ---
+
 (source_file
   (expression_statement
     (expression
@@ -146,10 +146,9 @@ xs |>
                     (variable_identifier
                       (variable_identifier)))
                   body: (expression
-                    (additive_expression
-                      left: (primary_expression
-                        (identifier))
-                      right: (primary_expression
+                    (identifier)
+                    (expression
+                      (primary_expression
                         (integer))))))))))))
   (newline))
 
@@ -161,6 +160,7 @@ xs |>
   map((x) => x + 1)
 
 ---
+
 (source_file
   (expression_statement
     (expression
@@ -180,10 +180,9 @@ xs |>
                     (variable_identifier
                       (variable_identifier)))
                   body: (expression
-                    (additive_expression
-                      left: (primary_expression
-                        (identifier))
-                      right: (primary_expression
+                    (identifier)
+                    (expression
+                      (primary_expression
                         (integer))))))))))))
   (newline))
 
@@ -196,6 +195,7 @@ xs |>
   join(", ")
 
 ---
+
 (source_file
   (expression_statement
     (expression
@@ -216,10 +216,9 @@ xs |>
                         (variable_identifier
                           (variable_identifier)))
                       body: (expression
-                        (comparison_expression
-                          left: (primary_expression
-                            (identifier))
-                          right: (primary_expression
+                        (identifier)
+                        (expression
+                          (primary_expression
                             (integer))))))))))
           (newline)
           right: (call_expression
@@ -233,10 +232,9 @@ xs |>
                       (variable_identifier
                         (variable_identifier)))
                     body: (expression
-                      (multiplicative_expression
-                        left: (primary_expression
-                          (identifier))
-                        right: (primary_expression
+                      (identifier)
+                      (expression
+                        (primary_expression
                           (integer))))))))))
         (newline)
         right: (call_expression

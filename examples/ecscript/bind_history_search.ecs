@@ -1,0 +1,15 @@
+pub func init() {
+    bind("up", (ctx) => {
+        if trim(ctx.line) == "" {
+            return { action: "previous_history" };
+        }
+        return { action: "history_search_backward" };
+    });
+
+    bind("down", (ctx) => {
+        if trim(ctx.line) == "" {
+            return { action: "next_history" };
+        }
+        return { action: "history_search_forward" };
+    });
+}

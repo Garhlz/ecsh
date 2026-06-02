@@ -2,7 +2,7 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 use crate::ecscript::{
     error::{RuntimeError, RuntimeErrorKind},
-    func::call_function,
+    func::call_function_with_ctx,
     value::{BuiltinContext, Value, display_value},
 };
 
@@ -181,8 +181,16 @@ pub(super) fn map_builtin(
     let items = arr.borrow().clone();
     let mut result = Vec::with_capacity(items.len());
     for value in items {
-        let mapped =
-            call_function(func.clone(), &vec![value], ctx.env, span)?.unwrap_or(Value::Nil);
+        let mapped = call_function_with_ctx(
+            func.clone(),
+            vec![value],
+            ctx.env,
+            ctx.shell_state,
+            ctx.stdin_text,
+            "map callback",
+            span,
+        )?
+        .unwrap_or(Value::Nil);
         result.push(mapped);
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -199,8 +207,16 @@ pub(super) fn filter_builtin(
     let items = arr.borrow().clone();
     let mut result = Vec::new();
     for value in items {
-        let bool_value =
-            call_function(func.clone(), &vec![value.clone()], ctx.env, span)?.unwrap_or(Value::Nil);
+        let bool_value = call_function_with_ctx(
+            func.clone(),
+            vec![value.clone()],
+            ctx.env,
+            ctx.shell_state,
+            ctx.stdin_text,
+            "filter callback",
+            span,
+        )?
+        .unwrap_or(Value::Nil);
         let Value::Bool(b) = bool_value else {
             return Err(RuntimeError::new(
                 span,
@@ -230,7 +246,16 @@ pub(super) fn reduce_builtin(
     let items = arr.borrow().clone();
     let mut acc = initial.clone();
     for item in items {
-        acc = call_function(func.clone(), &vec![acc, item], ctx.env, span)?.unwrap_or(Value::Nil);
+        acc = call_function_with_ctx(
+            func.clone(),
+            vec![acc, item],
+            ctx.env,
+            ctx.shell_state,
+            ctx.stdin_text,
+            "reduce callback",
+            span,
+        )?
+        .unwrap_or(Value::Nil);
     }
     Ok(acc)
 }
@@ -245,7 +270,15 @@ pub(super) fn each_builtin(
     let func = expect_function(&args[1], span, "each")?;
     let items = arr.borrow().clone();
     for item in items {
-        let _ = call_function(func.clone(), &vec![item], ctx.env, span)?;
+        let _ = call_function_with_ctx(
+            func.clone(),
+            vec![item],
+            ctx.env,
+            ctx.shell_state,
+            ctx.stdin_text,
+            "each callback",
+            span,
+        )?;
     }
     Ok(Value::Nil)
 }
@@ -260,7 +293,16 @@ pub(super) fn any_builtin(
     let func = expect_function(&args[1], span, "any")?;
     let items = arr.borrow().clone();
     for item in items {
-        let b = call_function(func.clone(), &vec![item], ctx.env, span)?.unwrap_or(Value::Nil);
+        let b = call_function_with_ctx(
+            func.clone(),
+            vec![item],
+            ctx.env,
+            ctx.shell_state,
+            ctx.stdin_text,
+            "any callback",
+            span,
+        )?
+        .unwrap_or(Value::Nil);
         let Value::Bool(b) = b else {
             return Err(RuntimeError::new(
                 span,
@@ -285,7 +327,16 @@ pub(super) fn all_builtin(
     let func = expect_function(&args[1], span, "all")?;
     let items = arr.borrow().clone();
     for item in items {
-        let b = call_function(func.clone(), &vec![item], ctx.env, span)?.unwrap_or(Value::Nil);
+        let b = call_function_with_ctx(
+            func.clone(),
+            vec![item],
+            ctx.env,
+            ctx.shell_state,
+            ctx.stdin_text,
+            "all callback",
+            span,
+        )?
+        .unwrap_or(Value::Nil);
         let Value::Bool(b) = b else {
             return Err(RuntimeError::new(
                 span,
@@ -310,8 +361,16 @@ pub(super) fn find_builtin(
     let func = expect_function(&args[1], span, "find")?;
     let items = arr.borrow().clone();
     for item in items {
-        let matched =
-            call_function(func.clone(), &vec![item.clone()], ctx.env, span)?.unwrap_or(Value::Nil);
+        let matched = call_function_with_ctx(
+            func.clone(),
+            vec![item.clone()],
+            ctx.env,
+            ctx.shell_state,
+            ctx.stdin_text,
+            "find callback",
+            span,
+        )?
+        .unwrap_or(Value::Nil);
         let Value::Bool(matched) = matched else {
             return Err(RuntimeError::new(
                 span,

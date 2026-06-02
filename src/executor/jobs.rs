@@ -442,10 +442,12 @@ mod tests {
             jobs: Vec::new(),
             next_job_id: 5,
             current_fg_pgid: None,
-            script_env: crate::ecscript::env::Environment::new(),
+            script_env: std::rc::Rc::new(crate::ecscript::env::Environment::new()),
             aliases: std::collections::HashMap::new(),
             traps: std::collections::HashMap::new(),
             command_history: Vec::new(),
+            extensions: crate::extensions::new_extensions(),
+            module_loader: None,
         };
         assert_eq!(next_job_id(&mut state), 5);
         assert_eq!(next_job_id(&mut state), 6);

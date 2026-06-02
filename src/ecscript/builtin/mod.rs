@@ -5,6 +5,7 @@ use crate::ecscript::{
     error::{RuntimeError, RuntimeErrorKind},
     value::{Builtin, BuiltinContext, Value},
 };
+use crate::extensions::HookName;
 
 mod collections;
 mod command;
@@ -23,7 +24,7 @@ use command::{
 };
 use io::{format_print_args, write_stdout};
 use json::{from_json_value, to_json_value};
-use support::{expect_arity, expect_array};
+use support::{expect_arity, expect_array, expect_function, expect_shell_state};
 
 /// 根据名字查找内置函数枚举。
 ///
@@ -32,6 +33,8 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
     match name {
         "command" => Some(Builtin::CommandBuilder),
         "env" => Some(Builtin::Env),
+        "set_env" => Some(Builtin::SetEnv),
+        "unset_env" => Some(Builtin::UnsetEnv),
         "cwd" => Some(Builtin::Cwd),
         "stdin" => Some(Builtin::Stdin),
         "read_lines" => Some(Builtin::ReadLines),
@@ -64,6 +67,13 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
         "join" => Some(Builtin::Join),
         "join_path" => Some(Builtin::JoinPath),
         "write_lines" => Some(Builtin::WriteLines),
+        "hook" => Some(Builtin::Hook),
+        "prompt" => Some(Builtin::Prompt),
+        "complete" => Some(Builtin::Complete),
+        "register_command" => Some(Builtin::RegisterCommand),
+        "set_cwd" => Some(Builtin::SetCwd),
+        "trim" => Some(Builtin::Trim),
+        "bind" => Some(Builtin::Bind),
         _ => None,
     }
 }
@@ -99,6 +109,54 @@ pub fn run_builtin(
                 Ok(value) => Value::String(value),
                 Err(_) => Value::Nil,
             })
+        }
+        Builtin::SetEnv => {
+            expect_arity(&args, 2, span, "set_env")?;
+            let Value::String(name) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("set_env expects String name, got {}", args[0].type_name()),
+                ));
+            };
+            let Value::String(value) = &args[1] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("set_env expects String value, got {}", args[1].type_name()),
+                ));
+            };
+            if !crate::builtin::is_valid_env_key(name) {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("set_env invalid variable name: {name}"),
+                ));
+            }
+
+            // ecsh executes ecscript on its main thread, matching the shell export builtin.
+            unsafe { std::env::set_var(name, value) };
+            Ok(Value::Nil)
+        }
+        Builtin::UnsetEnv => {
+            expect_arity(&args, 1, span, "unset_env")?;
+            let Value::String(name) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("unset_env expects String name, got {}", args[0].type_name()),
+                ));
+            };
+            if !crate::builtin::is_valid_env_key(name) {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("unset_env invalid variable name: {name}"),
+                ));
+            }
+
+            unsafe { std::env::remove_var(name) };
+            Ok(Value::Nil)
         }
         Builtin::Cwd => {
             expect_arity(&args, 0, span, "cwd")?;
@@ -276,6 +334,141 @@ pub fn run_builtin(
             for item in items {
                 write_stdout(&display_value(&item), true, span)?;
             }
+            Ok(Value::Nil)
+        }
+        Builtin::Hook => {
+            expect_arity(&args, 2, span, "hook")?;
+            let state = expect_shell_state(ctx.shell_state, span, "hook")?;
+            let Value::String(name) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("hook expects String name, got {}", args[0].type_name()),
+                ));
+            };
+            let hook_name = HookName::parse(name).ok_or_else(|| {
+                RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("unknown hook '{}'", name),
+                )
+            })?;
+            let func = expect_function(&args[1], span, "hook")?;
+            state
+                .extensions
+                .borrow_mut()
+                .hooks
+                .entry(hook_name)
+                .or_default()
+                .push(Value::Function(func));
+            Ok(Value::Nil)
+        }
+        Builtin::Prompt => {
+            expect_arity(&args, 1, span, "prompt")?;
+            let state = expect_shell_state(ctx.shell_state, span, "prompt")?;
+            let func = expect_function(&args[0], span, "prompt")?;
+            state.extensions.borrow_mut().prompt_handler = Some(Value::Function(func));
+            Ok(Value::Nil)
+        }
+        Builtin::Complete => {
+            expect_arity(&args, 2, span, "complete")?;
+            let state = expect_shell_state(ctx.shell_state, span, "complete")?;
+            let Value::String(name) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("complete expects String name, got {}", args[0].type_name()),
+                ));
+            };
+            let func = expect_function(&args[1], span, "complete")?;
+            state
+                .extensions
+                .borrow_mut()
+                .completions
+                .insert(name.clone(), Value::Function(func));
+            Ok(Value::Nil)
+        }
+        Builtin::RegisterCommand => {
+            expect_arity(&args, 2, span, "register_command")?;
+            let state = expect_shell_state(ctx.shell_state, span, "register_command")?;
+            let Value::String(name) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!(
+                        "register_command expects String name, got {}",
+                        args[0].type_name()
+                    ),
+                ));
+            };
+            if name.is_empty()
+                || name.contains('/')
+                || name.chars().any(|ch| ch.is_ascii_whitespace())
+            {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("register_command invalid command name: {name}"),
+                ));
+            }
+            if crate::builtin::BUILTIN_NAMES.contains(&name.as_str()) {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("register_command cannot override shell builtin: {name}"),
+                ));
+            }
+            let func = expect_function(&args[1], span, "register_command")?;
+            state
+                .extensions
+                .borrow_mut()
+                .script_commands
+                .insert(name.clone(), Value::Function(func));
+            Ok(Value::Nil)
+        }
+        Builtin::SetCwd => {
+            expect_arity(&args, 1, span, "set_cwd")?;
+            let state = expect_shell_state(ctx.shell_state, span, "set_cwd")?;
+            let Value::String(path) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("set_cwd expects String path, got {}", args[0].type_name()),
+                ));
+            };
+            crate::builtin::set_current_dir_with_hooks(path, state).map_err(|err| {
+                RuntimeError::new(span, RuntimeErrorKind::IoError, format!("set_cwd: {err}"))
+            })?;
+            Ok(Value::Nil)
+        }
+        Builtin::Trim => {
+            expect_arity(&args, 1, span, "trim")?;
+            let Value::String(text) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("trim expects String, got {}", args[0].type_name()),
+                ));
+            };
+            Ok(Value::String(text.trim().to_string()))
+        }
+        Builtin::Bind => {
+            expect_arity(&args, 2, span, "bind")?;
+            let state = expect_shell_state(ctx.shell_state, span, "bind")?;
+            let Value::String(key) = &args[0] else {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("bind expects String key, got {}", args[0].type_name()),
+                ));
+            };
+            let func = expect_function(&args[1], span, "bind")?;
+            crate::extensions::parse_key_string(key, span)?;
+            state
+                .extensions
+                .borrow_mut()
+                .key_bindings
+                .insert(key.clone(), Value::Function(func));
             Ok(Value::Nil)
         }
     }

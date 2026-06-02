@@ -12,6 +12,7 @@
 use crate::ecscript::Environment;
 use crate::ecscript::error::ParseError;
 use crate::ecscript::value::CommandValue;
+use crate::extensions::new_extensions;
 use crate::lexer::tokenize;
 use crate::types::{
     Command, OutputRedirection, ParsedJob, ParsedLine, Pipeline, Redirection, ShellState,
@@ -170,10 +171,12 @@ pub fn parse_command_literal(src: &str) -> Result<CommandValue, ParseError> {
         jobs: Vec::new(),
         next_job_id: 1,
         current_fg_pgid: None,
-        script_env: Environment::new(),
+        script_env: Rc::new(Environment::new()),
         aliases: HashMap::new(),
         traps: HashMap::new(),
         command_history: Vec::new(),
+        extensions: new_extensions(),
+        module_loader: None,
     };
     let tokens = tokenize(src, &state)?;
     if tokens.is_empty() {

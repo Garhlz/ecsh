@@ -2,8 +2,10 @@ use super::{format_print_args, run_builtin};
 use crate::ecscript::{
     env::Environment,
     error::RuntimeErrorKind,
-    value::{Builtin, BuiltinContext, Value},
+    value::{Builtin, BuiltinContext, Function, Value},
 };
+use crate::extensions::{HookName, new_extensions};
+use crate::types::{CommandStatus, ShellState};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 fn ctx() -> BuiltinContext<'static> {
@@ -11,6 +13,41 @@ fn ctx() -> BuiltinContext<'static> {
         shell_state: None,
         env: Box::leak(Box::new(Environment::new())),
         stdin_text: None,
+    }
+}
+
+fn shell_ctx<'a>(state: &'a ShellState, env: &'a Environment<'a>) -> BuiltinContext<'a> {
+    BuiltinContext {
+        shell_state: Some(state),
+        env,
+        stdin_text: None,
+    }
+}
+
+fn no_op_func() -> Value {
+    Value::Function(Rc::new(Function {
+        name: None,
+        params: vec!["ctx".into()],
+        stmts: vec![],
+        captures: HashMap::new(),
+    }))
+}
+
+fn interactive_state() -> ShellState {
+    ShellState {
+        last_status: CommandStatus::success(),
+        interactive: true,
+        shell_pgid: None,
+        shell_terminal_fd: None,
+        jobs: Vec::new(),
+        next_job_id: 1,
+        current_fg_pgid: None,
+        script_env: Rc::new(Environment::new()),
+        aliases: HashMap::new(),
+        traps: HashMap::new(),
+        command_history: Vec::new(),
+        extensions: new_extensions(),
+        module_loader: None,
     }
 }
 
@@ -55,6 +92,214 @@ fn env_requires_string_argument() {
     let err = run_builtin(Builtin::Env, vec![Value::Int(1)], 0, ctx()).unwrap_err();
     assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
     assert_eq!(err.message, "env expects String, got Int");
+}
+
+#[test]
+fn set_env_and_unset_env_modify_process_environment() {
+    let name = "ECSH_TEST_SET_ENV_BUILTIN";
+    unsafe { std::env::remove_var(name) };
+
+    let result = run_builtin(
+        Builtin::SetEnv,
+        vec![
+            Value::String(name.into()),
+            Value::String("configured".into()),
+        ],
+        0,
+        ctx(),
+    )
+    .unwrap();
+    assert_eq!(result, Value::Nil);
+    assert_eq!(std::env::var(name).ok().as_deref(), Some("configured"));
+
+    let result = run_builtin(
+        Builtin::UnsetEnv,
+        vec![Value::String(name.into())],
+        0,
+        ctx(),
+    )
+    .unwrap();
+    assert_eq!(result, Value::Nil);
+    assert_eq!(std::env::var_os(name), None);
+}
+
+#[test]
+fn set_env_and_unset_env_reject_invalid_names() {
+    let err = run_builtin(
+        Builtin::SetEnv,
+        vec![
+            Value::String("INVALID-NAME".into()),
+            Value::String("value".into()),
+        ],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(err.message, "set_env invalid variable name: INVALID-NAME");
+
+    let err = run_builtin(
+        Builtin::UnsetEnv,
+        vec![Value::String("INVALID-NAME".into())],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(err.message, "unset_env invalid variable name: INVALID-NAME");
+}
+
+#[test]
+fn hook_requires_shell_context() {
+    let err = run_builtin(
+        Builtin::Hook,
+        vec![Value::String("before_prompt".into()), no_op_func()],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::IoError);
+    assert_eq!(err.message, "hook requires interactive ecsh shell context");
+}
+
+#[test]
+fn hook_rejects_unknown_name() {
+    let env = Environment::new();
+    let state = interactive_state();
+
+    let err = run_builtin(
+        Builtin::Hook,
+        vec![Value::String("nope".into()), no_op_func()],
+        0,
+        shell_ctx(&state, &env),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(err.message, "unknown hook 'nope'");
+}
+
+#[test]
+fn prompt_and_complete_register_handlers() {
+    let env = Environment::new();
+    let state = interactive_state();
+
+    run_builtin(
+        Builtin::Prompt,
+        vec![no_op_func()],
+        0,
+        shell_ctx(&state, &env),
+    )
+    .unwrap();
+    run_builtin(
+        Builtin::Complete,
+        vec![Value::String("git".into()), no_op_func()],
+        0,
+        shell_ctx(&state, &env),
+    )
+    .unwrap();
+    run_builtin(
+        Builtin::Hook,
+        vec![Value::String("before_prompt".into()), no_op_func()],
+        0,
+        shell_ctx(&state, &env),
+    )
+    .unwrap();
+
+    let registry = state.extensions.borrow();
+    assert!(registry.prompt_handler.is_some());
+    assert!(registry.completions.contains_key("git"));
+    assert_eq!(
+        registry.hooks.get(&HookName::BeforePrompt).unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn register_command_registers_handler() {
+    let env = Environment::new();
+    let state = interactive_state();
+
+    run_builtin(
+        Builtin::RegisterCommand,
+        vec![Value::String("z".into()), no_op_func()],
+        0,
+        shell_ctx(&state, &env),
+    )
+    .unwrap();
+
+    assert!(state.extensions.borrow().script_commands.contains_key("z"));
+}
+
+#[test]
+fn register_command_rejects_shell_builtin_name() {
+    let env = Environment::new();
+    let state = interactive_state();
+
+    let err = run_builtin(
+        Builtin::RegisterCommand,
+        vec![Value::String("cd".into()), no_op_func()],
+        0,
+        shell_ctx(&state, &env),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "register_command cannot override shell builtin: cd"
+    );
+}
+
+#[test]
+fn bind_registers_handler_for_supported_key() {
+    let env = Environment::new();
+    let state = interactive_state();
+
+    run_builtin(
+        Builtin::Bind,
+        vec![Value::String("ctrl-x".into()), no_op_func()],
+        0,
+        shell_ctx(&state, &env),
+    )
+    .unwrap();
+
+    assert!(
+        state
+            .extensions
+            .borrow()
+            .key_bindings
+            .contains_key("ctrl-x")
+    );
+}
+
+#[test]
+fn bind_rejects_unsupported_key_string() {
+    let env = Environment::new();
+    let state = interactive_state();
+
+    let err = run_builtin(
+        Builtin::Bind,
+        vec![Value::String("ctrl-enter".into()), no_op_func()],
+        0,
+        shell_ctx(&state, &env),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(err.message, "unsupported key string 'ctrl-enter'");
+}
+
+#[test]
+fn trim_removes_surrounding_whitespace() {
+    let result = run_builtin(
+        Builtin::Trim,
+        vec![Value::String(" \n/tmp/ecsh\t ".into())],
+        0,
+        ctx(),
+    )
+    .unwrap();
+
+    assert_eq!(result, Value::String("/tmp/ecsh".into()));
 }
 
 #[test]

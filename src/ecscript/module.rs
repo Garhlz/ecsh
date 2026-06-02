@@ -23,13 +23,13 @@ use crate::ecscript::{
 /// - 解析 `use ... as ...` 语法
 /// - 管理词法环境
 /// - 决定 hook / completion / prompt 等扩展点
-pub(crate) struct ModuleLoader {
+pub struct ModuleLoader {
     cache: RefCell<HashMap<PathBuf, Value>>,
     loading: RefCell<HashSet<PathBuf>>,
 }
 
 impl ModuleLoader {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             cache: RefCell::new(HashMap::new()),
             loading: RefCell::new(HashSet::new()),

@@ -5,6 +5,7 @@
 use crate::builtin::{builtin_kind, is_builtin_allowed_in_pipeline, run_builtin};
 use crate::diagnostics::print_error;
 use crate::executor::jobs::{finalize_launched_job, next_job_id, set_child_pgid};
+use crate::extensions::new_extensions;
 use crate::redirection::handle_redirection_or_exit;
 use crate::signals::restore_child_interactive_signals;
 use crate::types::{
@@ -203,9 +204,11 @@ fn pipeline_child_state(last_status: CommandStatus) -> ShellState {
         jobs: Vec::new(),
         next_job_id: 1,
         current_fg_pgid: None,
-        script_env: crate::ecscript::env::Environment::new(),
+        script_env: std::rc::Rc::new(crate::ecscript::env::Environment::new()),
         aliases: HashMap::new(),
         traps: HashMap::new(),
         command_history: Vec::new(),
+        extensions: new_extensions(),
+        module_loader: None,
     }
 }

@@ -7,6 +7,7 @@
 //!   - 作业层：Job, JobProcess, JobStatus, ProcessState
 
 use crate::ecscript::env::Environment;
+use crate::extensions::SharedExtensions;
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::os::fd::RawFd;
@@ -83,6 +84,7 @@ pub struct ParsedJob {
 // ── 运行时状态 ──────────────────────────────────────────────────────
 
 /// Shell 全局运行时状态。
+#[derive(Clone)]
 pub struct ShellState {
     /// 上一条命令的退出码（`$?` 的值）。
     pub last_status: CommandStatus,
@@ -105,10 +107,12 @@ pub struct ShellState {
     /// 当前占用终端前台的进程组。
     pub current_fg_pgid: Option<Pid>,
 
-    pub script_env: Environment<'static>, // ← 新增：ecscript 全局根环境
+    pub script_env: Rc<Environment<'static>>, // ← 新增：ecscript 全局根环境
     pub aliases: HashMap<String, String>,
     pub traps: HashMap<String, String>,
     pub command_history: Vec<String>,
+    pub extensions: SharedExtensions,
+    pub module_loader: Option<Rc<crate::ecscript::ModuleLoader>>,
 }
 
 /// 命令退出码（即 `$?` 的值）。

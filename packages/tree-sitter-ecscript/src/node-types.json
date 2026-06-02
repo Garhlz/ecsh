@@ -8,6 +8,10 @@
         "required": true,
         "types": [
           {
+            "type": "additive_expression",
+            "named": true
+          },
+          {
             "type": "multiplicative_expression",
             "named": true
           },
@@ -216,6 +220,10 @@
             "named": true
           },
           {
+            "type": "comparison_expression",
+            "named": true
+          },
+          {
             "type": "multiplicative_expression",
             "named": true
           },
@@ -348,15 +356,51 @@
     "named": true,
     "fields": {},
     "children": {
-      "multiple": false,
-      "required": true,
+      "multiple": true,
+      "required": false,
       "types": [
         {
           "type": "additive_expression",
           "named": true
         },
         {
+          "type": "argument_list",
+          "named": true
+        },
+        {
+          "type": "array",
+          "named": true
+        },
+        {
+          "type": "command_literal",
+          "named": true
+        },
+        {
           "type": "comparison_expression",
+          "named": true
+        },
+        {
+          "type": "expression",
+          "named": true
+        },
+        {
+          "type": "false",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "lambda_expression",
           "named": true
         },
         {
@@ -372,6 +416,14 @@
           "named": true
         },
         {
+          "type": "nil",
+          "named": true
+        },
+        {
+          "type": "parenthesized_expression",
+          "named": true
+        },
+        {
           "type": "pipe_expression",
           "named": true
         },
@@ -381,6 +433,22 @@
         },
         {
           "type": "primary_expression",
+          "named": true
+        },
+        {
+          "type": "property_identifier",
+          "named": true
+        },
+        {
+          "type": "raw_string",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "true",
           "named": true
         },
         {
@@ -778,6 +846,10 @@
             "named": true
           },
           {
+            "type": "logical_and_expression",
+            "named": true
+          },
+          {
             "type": "multiplicative_expression",
             "named": true
           },
@@ -845,6 +917,10 @@
           },
           {
             "type": "logical_and_expression",
+            "named": true
+          },
+          {
+            "type": "logical_or_expression",
             "named": true
           },
           {
@@ -943,6 +1019,10 @@
         "multiple": false,
         "required": true,
         "types": [
+          {
+            "type": "multiplicative_expression",
+            "named": true
+          },
           {
             "type": "postfix_expression",
             "named": true

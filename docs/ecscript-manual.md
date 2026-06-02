@@ -68,7 +68,7 @@
 
 4. **带源码行的错误展示目前还是显式 API。** 错误对象内部仍只保存 byte offset；如果调用方想拿到 `line:column + 源码行 + ^` 的格式，需要显式调用 `format_with_source(src)`。
 
-5. **`use` 当前只在文件执行上下文可用。** 模块路径需要相对当前脚本文件目录解析，所以交互 REPL 中暂时不能直接 `use ./foo.ecs as foo`。
+5. **`use` 当前支持交互式 `ecsh` 顶层。** 在 `.ecs` 文件里，模块路径相对当前脚本目录解析；在交互式 `ecsh` 顶层里，模块路径相对当前 `cwd` 解析。
 
 6. **命令桥当前只在 shell-backed 执行上下文可用。** `run/capture/text/lines/with_env/with_cwd` 需要宿主提供 `ShellState`；独立 `ecscript` 解释器以及 `ecsh file.ecs` 这类纯文件脚本路径下，目前会报 `... is not available in this context`。
 
@@ -701,8 +701,12 @@ slice(range(0, 5), 1, 4) // => [1, 2, 3]
 | 名字 | 语义 | 备注 |
 |------|------|------|
 | `env(name)` | 读取环境变量 | `name` 必须是 `String`，不存在时返回 `nil` |
+| `set_env(name, value)` | 设置当前进程环境变量 | 参数必须是 `String`；后续外部命令会继承 |
+| `unset_env(name)` | 删除当前进程环境变量 | `name` 必须是合法环境变量名 |
 | `cwd()` | 返回当前工作目录 | 返回绝对路径字符串 |
+| `set_cwd(path)` | 修改当前 shell 工作目录 | 同步 `PWD` / `OLDPWD` 并触发 `after_cd` |
 | `join_path(a, b)` | 按平台规则拼接两段路径 | 参数都必须是 `String` |
+| `trim(text)` | 去掉字符串两端空白 | 参数必须是 `String` |
 | `range(start, end)` | 生成闭区间整数数组 | `start` / `end` 必须是 `Int` |
 | `len(x)` | 返回长度 | 支持 `Array` / `Object` / `String` |
 | `print(v...)` | 输出一个或多个值 | 参数之间用空格分隔，不自动换行 |
@@ -734,6 +738,21 @@ slice(range(0, 5), 1, 4) // => [1, 2, 3]
 | `all(arr, func)` | 全称量词 | 回调必须返回 `Bool` |
 | `find(arr, func)` | 返回首个匹配元素 | 没有匹配时返回 `nil` |
 | `join(arr, sep)` | 按 display 文本连接数组元素 | `sep` 必须是 `String` |
+| `bind(key, func)` | 注册交互式按键绑定 | 回调接收 `{ key, line, cursor, cwd }` |
+| `register_command(name, func)` | 注册 ecsh 顶层命令 | 回调接收 `{ name, args, cwd }` |
+
+### 9.6 脚本命令
+
+`register_command(name, func)` 用于从 `.ecshrc` 或显式初始化的模块注册真正的 ecsh 命令，而不是文本 alias：
+
+```ecs
+register_command("hello", (ctx) => {
+    println(join(ctx.args, ","));
+    return 0;
+});
+```
+
+命令解析顺序为 shell builtin、脚本命令、PATH 外部命令。脚本命令回调返回 `nil` 时退出码为 `0`，也可以返回非负 `Int` 作为退出码。当前 MVP 只支持顶层前台执行，不支持管道、后台执行和重定向。
 
 ### 9.x bridge 常见组合
 

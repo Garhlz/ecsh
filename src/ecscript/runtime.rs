@@ -163,6 +163,35 @@ pub fn run_script_file(
     run_script_file_with_stdin(path, env, None)
 }
 
+pub fn run_script_file_with_ctx(
+    path: impl AsRef<Path>,
+    env: &Environment<'_>,
+    shell_state: &crate::types::ShellState,
+    stdin_text: Option<&str>,
+) -> Result<(), ScriptFileError> {
+    let path = path.as_ref();
+    let source = fs::read_to_string(path).map_err(|err| ScriptFileError::Read {
+        path: path.to_path_buf(),
+        err,
+    })?;
+    let tokens = lexer::tokenize(&source).map_err(|err| ScriptFileError::Script {
+        source: source.clone(),
+        err: InterpreterError::Parse(err),
+    })?;
+    let stmts = parser::parse_script(&tokens).map_err(|err| ScriptFileError::Script {
+        source: source.clone(),
+        err: InterpreterError::Parse(err),
+    })?;
+    let loader = shell_state.module_loader.as_deref();
+    let ctx = eval::EvalContext::plain(Some(shell_state), stdin_text, path.parent(), loader);
+    eval::eval_script_with_io_ctx(&stmts, env, ctx)
+        .map(|_| ())
+        .map_err(|err| ScriptFileError::Script {
+            source,
+            err: InterpreterError::Runtime(err),
+        })
+}
+
 /// 读取并执行脚本文件，可选传入模拟标准输入的文本快照。
 ///
 /// 文件模式下的 `stdin()` / `read_lines()` 通过此方式消费管道输入或重定向输入。

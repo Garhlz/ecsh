@@ -1,4 +1,5 @@
 use ecsh::ecscript::value::CommandValue;
+use ecsh::extensions::new_extensions;
 use ecsh::parser::{parse_command_literal, parse_line};
 use ecsh::types::{
     Command, CommandStatus, OutputRedirection, ParsedJob, ParsedLine, Pipeline, Redirection,
@@ -16,10 +17,12 @@ fn state() -> ShellState {
         jobs: Vec::new(),
         next_job_id: 1,
         current_fg_pgid: None,
-        script_env: ecsh::ecscript::env::Environment::new(),
+        script_env: Rc::new(ecsh::ecscript::env::Environment::new()),
         aliases: HashMap::new(),
         traps: HashMap::new(),
         command_history: Vec::new(),
+        extensions: new_extensions(),
+        module_loader: None,
     }
 }
 

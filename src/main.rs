@@ -2,12 +2,17 @@
 
 use ecsh::diagnostics::print_error;
 use ecsh::ecscript::{
-    Environment, ParseError, RuntimeError, RuntimeErrorKind, Stmt, Value, display_value,
-    eval_top_level_script_with_ctx, parse_top_level_script, repl_output_needs_newline,
-    reset_repl_output_state, run_script_file as run_ecscript_file,
+    Environment, ModuleLoader, ParseError, RuntimeError, RuntimeErrorKind, Stmt, Value,
+    display_value, eval_top_level_script_with_ctx, parse_top_level_script,
+    repl_output_needs_newline, reset_repl_output_state,
+    run_script_file_with_ctx as run_ecscript_file_with_ctx,
     run_script_file_with_stdin as run_ecscript_file_with_stdin,
 };
 use ecsh::executor::{init_shell_job_control, reap_background_jobs, run_command, run_pipeline};
+use ecsh::extensions::{
+    HookName, before_prompt_context, new_extensions, postexec_context, preexec_context,
+    resolve_prompt, run_hooks,
+};
 use ecsh::input::{InputLine, ShellInput};
 use ecsh::parser::parse_line;
 use ecsh::prompt::build_prompt;
@@ -18,6 +23,8 @@ use std::{
     env,
     io::{self, IsTerminal, Read},
     path::Path,
+    rc::Rc,
+    time::Instant,
 };
 
 /// 入口：有文件参数走脚本执行，否则进入交互 REPL。
@@ -51,7 +58,7 @@ fn script_file_arg() -> Result<Option<String>, Box<dyn std::error::Error>> {
 ///
 /// 若 stdin 不是终端，会提前将其内容快照下来供脚本内的 `stdin()` 等函数消费。
 fn run_script_file(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
-    let env = Environment::new();
+    let env = Rc::new(Environment::new());
     let stdin_text = read_optional_stdin_text()?;
 
     match run_ecscript_file_with_stdin(path, &env, stdin_text.as_deref()) {
@@ -86,6 +93,7 @@ fn read_optional_stdin_text() -> Result<Option<String>, Box<dyn std::error::Erro
 /// 4. 根据返回值更新 `last_status`，或处理 `exit` 退出
 fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = ShellInput::new()?;
+    initialize_shell_environment();
     let mut state = new_shell_state(input.is_interactive());
     init_shell_job_control(&mut state)?;
     load_startup_rc(&mut state);
@@ -94,6 +102,7 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         reap_background_jobs(&mut state)?;
 
+        input.sync_shell_state(&state);
         let line = match read_complete_command(&mut input, &state)? {
             ReadCommand::Line(line) => line,
             ReadCommand::Interrupted => {
@@ -121,26 +130,64 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
             Err(TopLevelError::Shell(err)) => {
                 print_error(format_shell_parse_error(line, &err));
                 state.last_status = CommandStatus::failure();
+                state.extensions.borrow_mut().last_duration_ms = Some(0);
+                run_hooks(
+                    HookName::Postexec,
+                    postexec_context(line, state.last_status, 0),
+                    &state,
+                );
                 continue;
             }
             Err(TopLevelError::EcscriptParse(err)) => {
                 print_error(err.format_with_source(line));
                 state.last_status = CommandStatus::failure();
+                state.extensions.borrow_mut().last_duration_ms = Some(0);
+                run_hooks(
+                    HookName::Postexec,
+                    postexec_context(line, state.last_status, 0),
+                    &state,
+                );
                 continue;
             }
         };
 
+        run_hooks(HookName::Preexec, preexec_context(line), &state);
+        let start = Instant::now();
         match run_top_level_input(input, &mut state) {
             Ok(CommandFlow::Continue(current_status)) => {
                 state.last_status = current_status;
+                let duration = start.elapsed().as_millis();
+                state.extensions.borrow_mut().last_duration_ms = Some(duration);
+                run_hooks(
+                    HookName::Postexec,
+                    postexec_context(line, current_status, duration),
+                    &state,
+                );
             }
-            Ok(CommandFlow::Exit(_current_status)) => break,
+            Ok(CommandFlow::Exit(current_status)) => {
+                let duration = start.elapsed().as_millis();
+                state.last_status = current_status;
+                state.extensions.borrow_mut().last_duration_ms = Some(duration);
+                run_hooks(
+                    HookName::Postexec,
+                    postexec_context(line, current_status, duration),
+                    &state,
+                );
+                break;
+            }
             Err(err) => {
                 if repl_output_needs_newline() {
                     println!();
                 }
                 print_error(err.format_with_source(line));
                 state.last_status = CommandStatus::failure();
+                let duration = start.elapsed().as_millis();
+                state.extensions.borrow_mut().last_duration_ms = Some(duration);
+                run_hooks(
+                    HookName::Postexec,
+                    postexec_context(line, state.last_status, duration),
+                    &state,
+                );
                 continue;
             }
         }
@@ -168,7 +215,7 @@ fn load_startup_rc(state: &mut ShellState) {
     }
 
     reset_repl_output_state();
-    match run_ecscript_file(&path, &state.script_env) {
+    match run_ecscript_file_with_ctx(&path, &state.script_env, state, None) {
         Ok(()) => {
             if repl_output_needs_newline() {
                 println!();
@@ -213,11 +260,41 @@ fn new_shell_state(interactive: bool) -> ShellState {
         jobs: Vec::new(),
         next_job_id: 1,
         current_fg_pgid: None,
-        script_env: Environment::new(),
+        script_env: Rc::new(Environment::new()),
         aliases: HashMap::new(),
         traps: HashMap::new(),
         command_history: Vec::new(),
+        extensions: new_extensions(),
+        module_loader: Some(Rc::new(ModuleLoader::new())),
     }
+}
+
+fn initialize_shell_environment() {
+    if let Some(shell_path) = current_shell_path() {
+        unsafe { std::env::set_var("SHELL", shell_path) };
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        unsafe { std::env::set_var("PWD", cwd) };
+    }
+
+    unsafe { std::env::set_var("SHLVL", next_shlvl().to_string()) };
+}
+
+fn current_shell_path() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+        .or_else(|| std::env::args().next())
+}
+
+fn next_shlvl() -> i64 {
+    std::env::var("SHLVL")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .map(|value| value + 1)
+        .unwrap_or(1)
 }
 
 /// 读取一条完整命令。
@@ -228,7 +305,15 @@ fn read_complete_command(
     input: &mut ShellInput,
     state: &ShellState,
 ) -> Result<ReadCommand, Box<dyn std::error::Error>> {
-    let prompt = build_prompt(state)?;
+    run_hooks(HookName::BeforePrompt, before_prompt_context(state), state);
+    let prompt = match resolve_prompt(state) {
+        Ok(Some(prompt)) => prompt,
+        Ok(None) => build_prompt(state)?,
+        Err(err) => {
+            print_error(err.format_with_source(""));
+            build_prompt(state)?
+        }
+    };
     let mut buffer = String::new();
 
     loop {
@@ -370,9 +455,13 @@ fn run_top_level_input(
 
 #[cfg(test)]
 mod tests {
-    use super::{ReadCommand, load_startup_rc, read_complete_command};
+    use super::{
+        ReadCommand, current_shell_path, initialize_shell_environment, load_startup_rc, next_shlvl,
+        read_complete_command,
+    };
     use ecsh::ecscript::Value;
     use ecsh::input::{InputLine, ShellInput};
+    use ecsh::test_support::env_lock;
     use ecsh::types::ShellState;
 
     fn state() -> ShellState {
@@ -426,6 +515,7 @@ mod tests {
 
     #[test]
     fn load_startup_rc_populates_interactive_script_env() {
+        let _guard = env_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!("ecsh-{}-rc-home", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         let rc_path = home.join(".ecshrc");
@@ -447,6 +537,52 @@ mod tests {
 
         let _ = std::fs::remove_file(rc_path);
         let _ = std::fs::remove_dir(home);
+    }
+
+    #[test]
+    fn next_shlvl_increments_parent_level() {
+        let _guard = env_lock().lock().unwrap();
+        let old_shlvl = std::env::var_os("SHLVL");
+        unsafe { std::env::set_var("SHLVL", "4") };
+        assert_eq!(next_shlvl(), 5);
+
+        match old_shlvl {
+            Some(value) => unsafe { std::env::set_var("SHLVL", value) },
+            None => unsafe { std::env::remove_var("SHLVL") },
+        }
+    }
+
+    #[test]
+    fn initialize_shell_environment_sets_shell_pwd_and_shlvl() {
+        let _guard = env_lock().lock().unwrap();
+        let old_shell = std::env::var_os("SHELL");
+        let old_pwd = std::env::var_os("PWD");
+        let old_shlvl = std::env::var_os("SHLVL");
+        unsafe { std::env::set_var("SHLVL", "1") };
+
+        initialize_shell_environment();
+
+        assert_eq!(std::env::var("SHELL").ok(), current_shell_path(),);
+        assert_eq!(
+            std::env::var("PWD").ok(),
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| cwd.to_string_lossy().into_owned()),
+        );
+        assert_eq!(std::env::var("SHLVL").ok().as_deref(), Some("2"));
+
+        match old_shell {
+            Some(value) => unsafe { std::env::set_var("SHELL", value) },
+            None => unsafe { std::env::remove_var("SHELL") },
+        }
+        match old_pwd {
+            Some(value) => unsafe { std::env::set_var("PWD", value) },
+            None => unsafe { std::env::remove_var("PWD") },
+        }
+        match old_shlvl {
+            Some(value) => unsafe { std::env::set_var("SHLVL", value) },
+            None => unsafe { std::env::remove_var("SHLVL") },
+        }
     }
 }
 

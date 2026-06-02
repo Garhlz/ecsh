@@ -5,7 +5,7 @@ use crate::ecscript::{
     builtin::run_builtin,
     env::Environment,
     error::{EvalResult, RuntimeError, RuntimeErrorKind},
-    func::{call_function, free_vars},
+    func::{call_function_with_eval_ctx, free_vars},
     value::{BuiltinContext, CommandInvocation, Function, Value},
 };
 
@@ -192,7 +192,9 @@ pub(super) fn eval_expr_with_ctx(
 
             match callee {
                 Value::Function(func) => {
-                    if let Some(value) = call_function(func, &args, env, span)? {
+                    if let Some(value) =
+                        call_function_with_eval_ctx(func, args, env, ctx, "function", span)?
+                    {
                         Ok(value)
                     } else {
                         Ok(Value::Nil)

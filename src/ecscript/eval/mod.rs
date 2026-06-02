@@ -11,10 +11,10 @@ use assign::{assign_target, eval_compound_assign, expect_bool, expect_int, resol
 pub use expr::eval_expr;
 use expr::{eval_add, eval_div, eval_expr_with_ctx, eval_mod, eval_mul, eval_sub};
 pub use stmt::{
-    eval_module, eval_script, eval_script_with_ctx, eval_stmt, eval_top_level_script,
+    eval_module, eval_script, eval_script_with_ctx, eval_top_level_script,
     eval_top_level_script_with_ctx,
 };
-pub(crate) use stmt::{eval_module_in_dir, eval_script_with_io_ctx};
+pub(crate) use stmt::{eval_module_in_dir, eval_script_with_io_ctx, eval_stmt_with_ctx};
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecFlow {
     Normal,

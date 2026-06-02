@@ -1,0 +1,145 @@
+"$schema" = "https://starship.rs/config-schema.json"
+
+add_newline = true
+palette = "pastel_powerline_ecsh"
+
+format = """
+[](fg:purple)\
+$os\
+$username\
+$hostname\
+[](fg:purple bg:pink)\
+$shell\
+$shlvl\
+[](fg:pink bg:orange)\
+$directory\
+[](fg:orange bg:red)\
+$status\
+[](fg:red bg:blue)\
+$jobs\
+[](fg:blue bg:cyan)\
+$cmd_duration\
+[](fg:cyan bg:navy)\
+$time\
+[](fg:navy)\
+$line_break\
+$character"""
+
+[palettes.pastel_powerline_ecsh]
+text = "#ffffff"
+muted = "#cdd6f4"
+surface = "#313244"
+purple = "#9A348E"
+pink = "#DA627D"
+orange = "#FCA17D"
+blue = "#86BBD8"
+cyan = "#06969A"
+navy = "#33658A"
+green = "#A6E3A1"
+red = "#F38BA8"
+yellow = "#F9E2AF"
+
+# Git removed intentionally for ecsh adapter showcase.
+[git_branch]
+disabled = true
+
+[git_status]
+disabled = true
+
+[git_commit]
+disabled = true
+
+[git_state]
+disabled = true
+
+[git_metrics]
+disabled = true
+
+[os]
+disabled = false
+style = "bg:purple fg:text"
+format = "[$symbol]($style)"
+
+[os.symbols]
+Windows = "󰍲 "
+Macos = "󰀵 "
+Linux = "󰌽 "
+Arch = "󰣇 "
+Debian = "󰣚 "
+Fedora = "󰣛 "
+Ubuntu = "󰕈 "
+NixOS = " "
+
+[username]
+show_always = true
+style_user = "bg:purple fg:text bold"
+style_root = "bg:purple fg:text bold"
+format = "[$user]($style)"
+
+[hostname]
+ssh_only = true
+style = "bg:purple fg:text bold"
+format = "[@$hostname ]($style)"
+
+[shell]
+disabled = false
+unknown_indicator = "ecsh"
+style = "bg:pink fg:text bold"
+format = "[ 󰆍 $indicator ]($style)"
+
+[shlvl]
+disabled = false
+threshold = 1
+symbol = "↕"
+style = "bg:pink fg:text"
+format = "[$symbol$shlvl ]($style)"
+
+[directory]
+style = "bg:orange fg:text bold"
+format = "[ $path ]($style)"
+truncation_length = 4
+truncation_symbol = "…/"
+fish_style_pwd_dir_length = 1
+
+[directory.substitutions]
+"Documents" = "󰈙 "
+"Downloads" = " "
+"Developer" = "󰲋 "
+"Projects" = "󰲋 "
+"Music" = " "
+"Pictures" = " "
+
+[status]
+disabled = false
+symbol = "✘ "
+not_executable_symbol = "󰂭 "
+not_found_symbol = "󰍉 "
+sigint_symbol = "󰚌 "
+signal_symbol = "󱐋 "
+style = "bg:red fg:text bold"
+format = "[ $symbol$status ]($style)"
+
+[jobs]
+disabled = false
+symbol = "󰜎 "
+style = "bg:blue fg:text bold"
+number_threshold = 1
+symbol_threshold = 1
+format = "[ $symbol$number ]($style)"
+
+[cmd_duration]
+disabled = false
+min_time = 1
+show_milliseconds = true
+style = "bg:cyan fg:text bold"
+format = "[ 󰔛 $duration ]($style)"
+
+[time]
+disabled = false
+time_format = "%R"
+style = "bg:navy fg:text bold"
+format = "[  $time ]($style)"
+
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[❯](bold red)"

@@ -1,0 +1,36 @@
+func fallback_prompt(ctx) {
+    return "[ecsh] " + ctx.cwd + "\n$ ";
+}
+
+pub func init() {
+    prompt((ctx) => {
+        let base = command(
+            "starship",
+            "prompt",
+            "--status",
+            ctx.status,
+            "--path",
+            ctx.cwd,
+            "--terminal-width",
+            ctx.terminal_width,
+            "--jobs",
+            ctx.jobs,
+            "--shlvl",
+            ctx.shlvl,
+            "--cmd-duration",
+            ctx.duration_ms
+        );
+        let rendered = capture(
+            with_env(base, {
+                STARSHIP_SHELL: "ecsh",
+                SHELL: ctx.shell,
+                PWD: ctx.cwd,
+                
+            })
+        );
+        if rendered.ok {
+            return rendered.stdout;
+        }
+        return fallback_prompt(ctx);
+    });
+}

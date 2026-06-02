@@ -1,0 +1,5 @@
+pub func init() {
+    bind("ctrl-g", (ctx) => {
+        return {"action": "insert", "text": "git status"};
+    });
+}

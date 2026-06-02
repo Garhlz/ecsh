@@ -971,53 +971,57 @@ echo ${to_json(data)} | jq .name
 - [x] 明确模块求值环境：
       `use` 在独立模块环境中执行，导出结果映射成普通对象命名空间
 - [x] 先只支持相对路径模块，不做搜索路径和包管理
-- [ ] 决定是否支持交互 REPL 中的 `use`，或继续保持“仅文件上下文可用”
+- [x] 支持交互式 `ecsh` 顶层中的 `use`，基准目录取当前 `cwd`
 
 ### 第二批：最小 shell 扩展点（高优先级）
 
-- [ ] 实现最小 hook API：`before_prompt`、`after_cd`、`preexec`、`postexec`
-- [ ] 预留 prompt API：`prompt(func(ctx) { ... })`
-- [ ] 先让 `prompt` / `hook` 只接受 `ecscript` 函数值，不引入额外 DSL
-- [ ] 明确 hook 的返回值约定和错误传播规则：
+- [x] 实现最小 hook API：`before_prompt`、`after_cd`、`preexec`、`postexec`
+- [x] 预留 prompt API：`prompt((ctx) => { ... })`
+- [x] 先让 `prompt` / `hook` 只接受 `ecscript` 函数值，不引入额外 DSL
+- [x] 明确 hook 的返回值约定和错误传播规则：
       返回 `nil` 为“无动作”，异常则以受控方式中断当前扩展点
 
 ### 第三批：交互增强（次高优先级）
 
-- [ ] 实现 completion API：`complete(name, func(ctx) { ... })`
-- [ ] 预留 key binding API：`bind(key, func(ctx) { ... })`
-- [ ] 为 completion 增加结构化候选对象：
+- [x] 实现 completion API：`complete(name, (ctx) => { ... })`
+- [x] 实现最小 key binding API：`bind(key, (ctx) => { ... })`
+- [x] 为 completion 增加结构化候选对象：
       `{ value, display, desc, kind }`
-- [ ] 补一个最小交互扩展示例：
+- [x] 补一个最小交互扩展示例：
       `use git_complete as git; git.init()`
+- [x] 实现最小脚本命令注册 API：
+      `register_command(name, (ctx) => { ... })`
+- [x] 为 adapter 提供受控目录切换 API：
+      `set_cwd(path)` 同步 `PWD` / `OLDPWD` 并触发 `after_cd`
 
 **推荐上下文对象**
 
 ```sh
-hook("postexec", func(ctx) {
+hook("postexec", (ctx) => {
     # ctx = { command: "...", status: 0, duration_ms: 12, cwd: "..." }
 })
 
-complete("git", func(ctx) {
+complete("git", (ctx) => {
     # ctx = { line: "...", word: "...", argv: [...], arg_index: 1, cwd: "..." }
 })
 ```
 
 **设计边界**
 
-- [ ] hook 通过受控 API 修改 shell 状态，不直接暴露 shell 内部结构
-- [ ] 模块副作用必须显式调用 `init()`，不因 `use` 自动发生
-- [ ] completion 返回结构化对象：`{ value, display, desc, kind }`
-- [ ] prompt / completion / hook 都复用 `ecscript` 函数值，不再引入配置字符串 DSL
-- [ ] `source` 与 `use` 的语义继续分离：
+- [x] hook 通过受控 API 修改 shell 状态，不直接暴露 shell 内部结构
+- [x] 模块副作用必须显式调用 `init()`，不因 `use` 自动发生
+- [x] completion 返回结构化对象：`{ value, display, desc, kind }`
+- [x] prompt / completion / hook 都复用 `ecscript` 函数值，不再引入配置字符串 DSL
+- [x] `source` 与 `use` 的语义继续分离：
       `source` 修改当前会话；`use` 返回模块对象
-- [ ] 在模块系统稳定前，不把 shell builtin 或 extern metadata 硬塞进模块 loader
+- [x] 在模块系统稳定前，不把 shell builtin 或 extern metadata 硬塞进模块 loader
 
 **完成标准**
 
-- [ ] 可以先写出最小模块：
+- [x] 可以先写出最小模块：
       `use ./foo.ecs as foo; foo.init()`
-- [ ] 可以用 `.ecs` 模块实现一个最小 zoxide / direnv / starship adapter 原型
-- [ ] 用户配置可以写成：`use zoxide as zoxide; zoxide.init()`
+- [x] 可以用 `.ecs` 模块实现一个最小 zoxide / direnv / starship adapter 原型
+- [x] 用户配置可以写成：`use zoxide as zoxide; zoxide.init()`
 
 ### 阶段 11：调用元信息与外部命令适配层
 
@@ -1053,7 +1057,7 @@ complete("git", func(ctx) {
 pub let git = external({
     name: "git",
     help: "distributed version control",
-    complete: func(ctx) {
+    complete: (ctx) => {
         ...
     }
 })

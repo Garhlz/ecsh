@@ -32,7 +32,9 @@ pub fn eval_script_with_ctx(
     env: &Environment<'_>,
     shell_state: Option<&crate::types::ShellState>,
 ) -> EvalResult<ExecFlow> {
-    let ctx = EvalContext::plain(shell_state, None, None, None);
+    let cwd = shell_state.and_then(|_| std::env::current_dir().ok());
+    let loader = shell_state.and_then(|state| state.module_loader.as_deref());
+    let ctx = EvalContext::plain(shell_state, None, cwd.as_deref(), loader);
     eval_script_with_io_ctx(stmts, env, ctx)
 }
 
@@ -80,7 +82,9 @@ pub fn eval_top_level_script_with_ctx(
     env: &Environment<'_>,
     shell_state: Option<&crate::types::ShellState>,
 ) -> EvalResult<Option<Value>> {
-    let ctx = EvalContext::plain(shell_state, None, None, None);
+    let cwd = shell_state.and_then(|_| std::env::current_dir().ok());
+    let loader = shell_state.and_then(|state| state.module_loader.as_deref());
+    let ctx = EvalContext::plain(shell_state, None, cwd.as_deref(), loader);
     eval_top_level_script_with_io_ctx(stmts, env, ctx)
 }
 
@@ -141,15 +145,6 @@ pub(crate) fn eval_top_level_script_with_io_ctx(
             )),
         },
     }
-}
-
-/// 求值单条语句。
-///
-/// 大多数语句执行完成后返回 `ExecFlow::Normal`。
-/// `break` / `continue` / `return` 不在这里直接报错，而是先编码成
-/// `ExecFlow` 向上传递，再由循环、函数或顶层入口决定是否消费。
-pub fn eval_stmt(stmt: &Stmt, env: &Environment<'_>) -> Result<ExecFlow, RuntimeError> {
-    eval_stmt_with_ctx(stmt, env, EvalContext::plain(None, None, None, None))
 }
 
 /// 在独立模块环境中执行脚本，并把 `pub` 绑定收集成模块对象返回。

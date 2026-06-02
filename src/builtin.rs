@@ -5,7 +5,10 @@
 //! run_builtin 对它们返回 None，交由特殊路径处理。
 
 use crate::diagnostics::print_error;
-use crate::ecscript::{repl_output_needs_newline, reset_repl_output_state, run_script_file};
+use crate::ecscript::{
+    repl_output_needs_newline, reset_repl_output_state, run_script_file_with_ctx,
+};
+use crate::extensions::{HookName, after_cd_context, run_hooks};
 use crate::types::Command;
 use crate::types::{CommandFlow, CommandStatus, ShellState};
 use nix::unistd::isatty;
@@ -103,7 +106,7 @@ pub fn run_builtin(command: &Command, state: &mut ShellState) -> Option<CommandF
             Some(CommandFlow::Continue(CommandStatus::success()))
         }
         BuiltinKind::Exit => Some(CommandFlow::Exit(CommandStatus::success())),
-        BuiltinKind::Cd => Some(CommandFlow::Continue(run_cd(command))),
+        BuiltinKind::Cd => Some(CommandFlow::Continue(run_cd(command, state))),
         BuiltinKind::Pwd => Some(CommandFlow::Continue(run_pwd())),
         BuiltinKind::Env => Some(CommandFlow::Continue(run_env())),
         BuiltinKind::Export => Some(CommandFlow::Continue(run_export(command))),
@@ -178,7 +181,7 @@ fn color_prefix<'a>(use_color: bool, color: &'a str) -> &'a str {
 ///
 /// 不传参数时默认切换到 HOME 环境变量指向的目录。
 /// 使用 `std::env::set_current_dir` 操作系统调用更改进程的工作目录。
-fn run_cd(command: &Command) -> CommandStatus {
+fn run_cd(command: &Command, state: &ShellState) -> CommandStatus {
     if command.args.len() > 1 {
         print_error("cd: too many arguments");
         return CommandStatus::failure();
@@ -196,12 +199,32 @@ fn run_cd(command: &Command) -> CommandStatus {
         command.args[0].as_lit_str().unwrap_or("").to_string()
     };
 
-    if let Err(err) = std::env::set_current_dir(&dir) {
-        print_error(format!("cd: {}: {}", dir, err));
+    if let Err(err) = set_current_dir_with_hooks(&dir, state) {
+        print_error(format!("cd: {}", err));
         return CommandStatus::failure();
     }
 
     CommandStatus::success()
+}
+
+pub(crate) fn set_current_dir_with_hooks(dir: &str, state: &ShellState) -> Result<(), String> {
+    let old_cwd = std::env::current_dir()
+        .map(|cwd| cwd.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    std::env::set_current_dir(dir).map_err(|err| format!("{}: {}", dir, err))?;
+    let new_cwd = std::env::current_dir()
+        .map(|cwd| cwd.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    sync_pwd_env(&old_cwd, &new_cwd);
+    run_hooks(HookName::AfterCd, after_cd_context(old_cwd, new_cwd), state);
+    Ok(())
+}
+
+fn sync_pwd_env(old_cwd: &str, new_cwd: &str) {
+    unsafe {
+        std::env::set_var("OLDPWD", old_cwd);
+        std::env::set_var("PWD", new_cwd);
+    }
 }
 
 /// `pwd` 命令：打印当前工作目录。
@@ -261,7 +284,7 @@ fn run_export(command: &Command) -> CommandStatus {
 }
 
 /// 校验环境变量名是否合法：首字符为字母或下划线，后续为字母/数字/下划线。
-fn is_valid_env_key(key: &str) -> bool {
+pub(crate) fn is_valid_env_key(key: &str) -> bool {
     let mut chars = key.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -410,6 +433,9 @@ fn run_type(command: &Command, state: &mut ShellState) -> CommandStatus {
                 println!("{} is aliased to `{}`", name, value)
             }
             Some(CommandDescription::Builtin) => println!("{} is a shell builtin", name),
+            Some(CommandDescription::ScriptCommand) => {
+                println!("{} is an ecscript shell command", name)
+            }
             Some(CommandDescription::External(path)) => println!("{} is {}", name, path.display()),
             None => {
                 print_error(format!("type: not found: {}", name));
@@ -438,6 +464,9 @@ fn run_which(command: &Command, state: &mut ShellState) -> CommandStatus {
         match describe_command(name, state) {
             Some(CommandDescription::Alias(value)) => println!("alias {}='{}'", name, value),
             Some(CommandDescription::Builtin) => println!("{}: shell builtin", name),
+            Some(CommandDescription::ScriptCommand) => {
+                println!("{}: ecscript shell command", name)
+            }
             Some(CommandDescription::External(path)) => println!("{}", path.display()),
             None => {
                 print_error(format!("which: not found: {}", name));
@@ -480,7 +509,7 @@ fn run_source(command: &Command, state: &mut ShellState) -> CommandStatus {
     }
 
     reset_repl_output_state();
-    match run_script_file(path, &state.script_env) {
+    match run_script_file_with_ctx(path, &state.script_env, state, None) {
         Ok(()) => {
             if repl_output_needs_newline() {
                 println!();
@@ -501,16 +530,20 @@ fn run_source(command: &Command, state: &mut ShellState) -> CommandStatus {
 enum CommandDescription<'a> {
     Alias(&'a str),
     Builtin,
+    ScriptCommand,
     External(PathBuf),
 }
 
-/// 按 alias → builtin → PATH 的顺序解析一个命令名。
+/// 按 alias → builtin → ecscript command → PATH 的顺序解析一个命令名。
 fn describe_command<'a>(name: &'a str, state: &'a ShellState) -> Option<CommandDescription<'a>> {
     if let Some(alias) = state.aliases.get(name) {
         return Some(CommandDescription::Alias(alias.as_str()));
     }
     if BUILTIN_NAMES.contains(&name) {
         return Some(CommandDescription::Builtin);
+    }
+    if state.extensions.borrow().script_commands.contains_key(name) {
+        return Some(CommandDescription::ScriptCommand);
     }
     resolve_external_command(name).map(CommandDescription::External)
 }

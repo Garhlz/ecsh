@@ -1,15 +1,27 @@
 use crate::builtin::BUILTIN_NAMES;
+use crate::diagnostics::print_error;
+use crate::extensions::{invoke_bind_callback, key_to_event, parse_key_string, resolve_completion};
+use crate::types::ShellState;
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
-use rustyline::{Context, Editor, Helper, Result as RustylineResult};
+use rustyline::{
+    Cmd, ConditionalEventHandler, Context, Editor, Event, EventContext, EventHandler, Helper,
+    RepeatCount, Result as RustylineResult,
+};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::rc::Rc;
 
 pub type EcshEditor = Editor<EcshHelper, DefaultHistory>;
+
+thread_local! {
+    static BIND_SHELL_STATE: RefCell<Option<ShellState>> = const { RefCell::new(None) };
+}
 
 pub fn new_editor() -> RustylineResult<EcshEditor> {
     let mut editor = Editor::<EcshHelper, DefaultHistory>::new()?;
@@ -20,6 +32,79 @@ pub fn new_editor() -> RustylineResult<EcshEditor> {
 #[derive(Default)]
 pub struct EcshHelper {
     files: FilenameCompleter,
+    shell_state: Rc<RefCell<Option<ShellState>>>,
+}
+
+impl EcshHelper {
+    pub fn sync_shell_state(&mut self, state: &ShellState) {
+        *self.shell_state.borrow_mut() = Some(state.clone());
+        BIND_SHELL_STATE.with(|slot| *slot.borrow_mut() = Some(state.clone()));
+    }
+}
+
+/// A `ConditionalEventHandler` that dispatches to ecscript bind callbacks.
+#[derive(Clone)]
+pub struct BindDispatcher {
+    key: String,
+}
+
+impl BindDispatcher {
+    pub fn new(key: String) -> Self {
+        Self { key }
+    }
+}
+
+impl ConditionalEventHandler for BindDispatcher {
+    fn handle(
+        &self,
+        evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        ctx: &EventContext,
+    ) -> Option<Cmd> {
+        let Event::KeySeq(_) = evt else {
+            return None;
+        };
+        let line = ctx.line().to_string();
+        let cursor = ctx.pos();
+
+        BIND_SHELL_STATE.with(|slot| {
+            let state = slot.borrow();
+            let state = state.as_ref()?;
+            match invoke_bind_callback(&self.key, &line, cursor, state) {
+                Ok(Some(cmd)) => Some(cmd),
+                Ok(None) => None,
+                Err(err) => {
+                    print_error(err.format_with_source(""));
+                    None
+                }
+            }
+        })
+    }
+}
+
+pub fn sync_editor_shell_state(editor: &mut EcshEditor, state: &ShellState) {
+    let Some(helper) = editor.helper_mut() else {
+        return;
+    };
+    helper.sync_shell_state(state);
+
+    let key_bindings = state
+        .extensions
+        .borrow()
+        .key_bindings
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in key_bindings {
+        let Ok((keycode, modifiers)) = parse_key_string(&key, 0) else {
+            continue;
+        };
+        editor.bind_sequence(
+            key_to_event(keycode, modifiers),
+            EventHandler::Conditional(Box::new(BindDispatcher::new(key))),
+        );
+    }
 }
 
 impl Helper for EcshHelper {}
@@ -48,6 +133,10 @@ impl Completer for EcshHelper {
         let first_word = prefix[..word_start].trim().is_empty();
         let current = &prefix[word_start..];
 
+        if let Some((start, candidates)) = self.scripted_candidates(line, current, word_start) {
+            return Ok((start, candidates));
+        }
+
         if first_word && !current.contains('/') {
             let start = word_start;
             let candidates = command_candidates(current);
@@ -57,6 +146,41 @@ impl Completer for EcshHelper {
         }
 
         self.files.complete(line, pos, ctx)
+    }
+}
+
+impl EcshHelper {
+    fn scripted_candidates(
+        &self,
+        line: &str,
+        current: &str,
+        word_start: usize,
+    ) -> Option<(usize, Vec<Pair>)> {
+        let guard = self.shell_state.borrow();
+        let state = guard.as_ref()?;
+        let (argv, arg_index) = split_argv(line, current);
+        let command = argv.first()?.clone();
+
+        match resolve_completion(state, &command, line, current, argv, arg_index) {
+            Ok(Some(items)) => Some((
+                word_start,
+                items
+                    .into_iter()
+                    .map(|item| {
+                        let display = item.display.unwrap_or_else(|| item.value.clone());
+                        Pair {
+                            display,
+                            replacement: item.value,
+                        }
+                    })
+                    .collect(),
+            )),
+            Ok(None) => None,
+            Err(err) => {
+                print_error(err.format_with_source(""));
+                None
+            }
+        }
     }
 }
 
@@ -99,4 +223,112 @@ fn command_candidates(prefix: &str) -> Vec<Pair> {
             replacement: name,
         })
         .collect()
+}
+
+fn split_argv(line: &str, current: &str) -> (Vec<String>, usize) {
+    let mut argv = line
+        .split_whitespace()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let ends_with_space = line.chars().last().is_some_and(char::is_whitespace);
+    if ends_with_space {
+        argv.push(String::new());
+    }
+
+    let arg_index = argv.len().saturating_sub(1);
+    if let Some(last) = argv.last_mut() {
+        *last = current.to_string();
+    } else {
+        argv.push(current.to_string());
+    }
+    (argv, arg_index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EcshHelper;
+    use crate::ecscript::{
+        Environment, eval_top_level_script_with_ctx, lexer, parse_top_level_script,
+    };
+    use crate::extensions::new_extensions;
+    use crate::types::{CommandStatus, ShellState};
+    use rustyline::Context;
+    use rustyline::completion::Completer;
+    use rustyline::history::DefaultHistory;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    fn state() -> ShellState {
+        ShellState {
+            last_status: CommandStatus::success(),
+            interactive: true,
+            shell_pgid: None,
+            shell_terminal_fd: None,
+            jobs: Vec::new(),
+            next_job_id: 1,
+            current_fg_pgid: None,
+            script_env: Rc::new(Environment::new()),
+            aliases: HashMap::new(),
+            traps: HashMap::new(),
+            command_history: Vec::new(),
+            extensions: new_extensions(),
+            module_loader: None,
+        }
+    }
+
+    fn register(src: &str, state: &ShellState) {
+        let _ = lexer::tokenize(src).unwrap();
+        let stmts = parse_top_level_script(src).unwrap().unwrap();
+        eval_top_level_script_with_ctx(&stmts, &state.script_env, Some(state)).unwrap();
+    }
+
+    #[test]
+    fn scripted_completion_returns_structured_items() {
+        let state = state();
+        register(
+            r#"
+complete("git", (ctx) => {
+    return [
+        { value: "status", display: "git status" }
+    ];
+})
+"#,
+            &state,
+        );
+
+        let mut helper = EcshHelper::default();
+        helper.sync_shell_state(&state);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+        let (_, candidates) = helper.complete("git st", 6, &ctx).unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].replacement, "status");
+        assert_eq!(candidates[0].display, "git status");
+    }
+
+    #[test]
+    fn scripted_completion_falls_back_on_error() {
+        let state = state();
+        register(
+            r#"
+complete("git", (ctx) => {
+    return 1;
+})
+"#,
+            &state,
+        );
+
+        let mut helper = EcshHelper::default();
+        helper.sync_shell_state(&state);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+        let (_, candidates) = helper.complete("git", 3, &ctx).unwrap();
+
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.replacement == "git")
+        );
+    }
 }

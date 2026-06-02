@@ -38,6 +38,7 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `$VAR`：脚本作用域优先，再回退环境变量
 - `${expr}`：调用 `ecscript` 表达式求值
 - `${env("VAR")}`：通过 ecscript 内置函数显式读取环境变量
+- `set_env("VAR", value)` / `unset_env("VAR")`：从 `.ecshrc` 或 source 脚本修改当前 shell 环境
 - `$(cmd)`：通过 `/bin/sh -c` 做命令替换
 - `${...arr}`：把数组展开成多个 argv
 
@@ -182,18 +183,32 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - 模块缓存
 - hook / completion / prompt / bind
 
-阶段 10 当前已经起步：
+阶段 10 当前已经落地：
 
 - 文件级模块导入：`use ./foo.ecs as foo`
 - 导出可见性：`pub let` / `pub func`
 - 模块求值结果会映射成普通对象命名空间，成员访问继续复用 `foo.bar`
+- 最小 shell 扩展点：
+  - `hook("before_prompt" | "after_cd" | "preexec" | "postexec", func)`
+  - `prompt((ctx) => { ... })`
+  - `complete(name, (ctx) => { ... })`
+  - `bind(key, (ctx) => { ... })`
+  - `register_command(name, (ctx) => { ... })`
+- completion 当前接受结构化候选对象：
+  `{ value, display, desc, kind }`
+- 脚本命令当前接受 `{ name, args, cwd }`，可以通过 `set_cwd(path)` 修改当前目录
+- bind 回调当前接受 `{ key, line, cursor, cwd }`
+- bind 回调当前支持：
+  - `{ action: "accept" | "newline" | "complete" | "complete_hint" | "clear_screen" | "interrupt" }`
+  - `{ action: "history_search_backward" | "history_search_forward" | "previous_history" | "next_history" }`
+  - `{ action: "insert", text: "..." }`
 
 当前边界：
 
 - `use` 只支持相对路径 / 绝对路径文件导入
-- `use` 当前只在文件执行上下文可用：`.ecs` 文件、`source` / `.`, `.ecshrc`
-- 交互 REPL 里没有“当前模块目录”，因此会报错
+- `use` 当前已经支持交互式 `ecsh` 顶层输入，基准目录取当前 `cwd`
 - 已支持最小模块缓存：同一路径模块只初始化一次
+- 脚本命令当前只支持顶层前台执行，不支持管道、后台执行和重定向
 - 已支持循环导入检测
 - 还没有搜索路径、命名导入、`pub use`
 

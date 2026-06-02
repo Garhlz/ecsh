@@ -1,6 +1,8 @@
+use ecsh::extensions::new_extensions;
 use ecsh::lexer::tokenize;
 use ecsh::types::{CommandStatus, ShellState, ShellWord, Token, WordFragment};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 fn state() -> ShellState {
     ShellState {
@@ -11,10 +13,12 @@ fn state() -> ShellState {
         jobs: Vec::new(),
         next_job_id: 1,
         current_fg_pgid: None,
-        script_env: ecsh::ecscript::env::Environment::new(),
+        script_env: Rc::new(ecsh::ecscript::env::Environment::new()),
         aliases: HashMap::new(),
         traps: HashMap::new(),
         command_history: Vec::new(),
+        extensions: new_extensions(),
+        module_loader: None,
     }
 }
 

@@ -232,10 +232,12 @@ mod tests {
     use super::{ExpandEnv, expand_command, expand_shell_word};
     use crate::ecscript::env::Environment;
     use crate::ecscript::value::{Binding, Value};
+    use crate::extensions::new_extensions;
     use crate::types::{
         Command, CommandStatus, OutputRedirection, Redirection, ShellState, ShellWord, WordFragment,
     };
     use std::collections::HashMap;
+    use std::rc::Rc;
 
     fn state() -> ShellState {
         ShellState {
@@ -246,10 +248,12 @@ mod tests {
             jobs: Vec::new(),
             next_job_id: 1,
             current_fg_pgid: None,
-            script_env: Environment::new(),
+            script_env: Rc::new(Environment::new()),
             aliases: HashMap::new(),
             traps: HashMap::new(),
             command_history: Vec::new(),
+            extensions: new_extensions(),
+            module_loader: None,
         }
     }
 

@@ -214,31 +214,31 @@ module.exports = grammar({
     )),
 
     logical_or_expression: ($) => prec.left(PREC.or, seq(
-      field("left", $._logical_expression_operand),
+      field("left", choice($.logical_or_expression, $._logical_expression_operand)),
       "||",
       field("right", $._logical_expression_operand)
     )),
 
     logical_and_expression: ($) => prec.left(PREC.and, seq(
-      field("left", $._comparison_operand),
+      field("left", choice($.logical_and_expression, $._comparison_operand)),
       "&&",
       field("right", $._comparison_operand)
     )),
 
     comparison_expression: ($) => prec.left(PREC.compare, seq(
-      field("left", $._additive_operand),
+      field("left", choice($.comparison_expression, $._additive_operand)),
       field("operator", choice("==", "!=", "<", ">", "<=", ">=")),
       field("right", $._additive_operand)
     )),
 
     additive_expression: ($) => prec.left(PREC.add, seq(
-      field("left", $._multiplicative_operand),
+      field("left", choice($.additive_expression, $._multiplicative_operand)),
       field("operator", choice("+", "-")),
       field("right", $._multiplicative_operand)
     )),
 
     multiplicative_expression: ($) => prec.left(PREC.multiply, seq(
-      field("left", $._unary_operand),
+      field("left", choice($.multiplicative_expression, $._unary_operand)),
       field("operator", choice("*", "/", "%")),
       field("right", $._unary_operand)
     )),
@@ -305,7 +305,45 @@ module.exports = grammar({
     lambda_expression: ($) => seq(
       $.parameter_list,
       "=>",
-      field("body", choice($.statement_block, $.expression))
+      field("body", choice(
+        $.statement_block,
+        alias($._lambda_value_expression, $.expression)
+      ))
+    ),
+
+    _lambda_value_expression: ($) => prec.right(choice(
+      seq(
+        $._lambda_postfix_value,
+        optional(seq(
+          choice("|>", "||", "&&", "==", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%"),
+          $.expression
+        ))
+      ),
+      seq(choice("!", "-"), $.expression)
+    )),
+
+    _lambda_postfix_value: ($) => prec.left(seq(
+      $._non_object_primary_expression,
+      repeat(choice(
+        $.argument_list,
+        seq(".", $.property_identifier),
+        seq("[", $.expression, "]")
+      ))
+    )),
+
+    _non_object_primary_expression: ($) => choice(
+      $.identifier,
+      $.integer,
+      $.float,
+      $.string,
+      $.raw_string,
+      $.true,
+      $.false,
+      $.nil,
+      $.array,
+      $.lambda_expression,
+      $.command_literal,
+      $.parenthesized_expression
     ),
 
     command_literal: ($) => seq(

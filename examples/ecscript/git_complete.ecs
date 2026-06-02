@@ -1,0 +1,25 @@
+func item(value, desc) {
+    return {
+        value: value,
+        display: value,
+        desc: desc
+    };
+}
+
+pub func init() {
+    complete("git", (ctx) => {
+        if ctx.arg_index <= 1 {
+            return [
+                item("status", "show working tree status"),
+                item("switch", "switch branches"),
+                item("checkout", "switch branches or restore files"),
+                item("commit", "record changes"),
+                item("diff", "show changes"),
+                item("pull", "fetch and merge"),
+                item("push", "update remote refs")
+            ];
+        }
+
+        return [];
+    });
+}

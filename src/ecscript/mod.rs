@@ -20,10 +20,12 @@ pub use self::eval::{
     eval_module, eval_script, eval_script_with_ctx, eval_top_level_script,
     eval_top_level_script_with_ctx,
 };
+pub use self::func::call_function_with_ctx;
+pub use self::module::ModuleLoader;
 pub use self::runtime::{
     Interpreter, InterpreterError, ScriptFileError, eval_expr_src, repl_output_needs_newline,
-    reset_repl_output_state, run_script_file, run_script_file_with_stdin, run_script_source,
-    run_script_source_with_stdin,
+    reset_repl_output_state, run_script_file, run_script_file_with_ctx, run_script_file_with_stdin,
+    run_script_source, run_script_source_with_stdin,
 };
 pub use self::top_level::parse_top_level_script;
 pub use self::value::{Value, display_value, repr_value};

@@ -165,13 +165,11 @@ let f = (x) => x * 2
             (variable_identifier
               (variable_identifier)))
           body: (expression
-            (multiplicative_expression
-              left: (primary_expression
-                (identifier))
-              right: (primary_expression
+            (identifier)
+            (expression
+              (primary_expression
                 (integer))))))))
   (newline))
-
 
 ==================
 Object with newline separators
@@ -182,6 +180,7 @@ Object with newline separators
   enabled: true
 }
 ---
+
 (source_file
   (expression_statement
     (expression
@@ -220,11 +219,45 @@ Object with newline separators
           (newline))))))
 
 ==================
+Chained string concatenation with field access
+==================
+func fallback_prompt(ctx) {
+  return "[ecsh] " + ctx.cwd + "\n$ "
+}
+---
+
+(source_file
+  (function_declaration
+    name: (variable_identifier
+      (variable_identifier))
+    parameters: (parameter_list
+      (variable_identifier
+        (variable_identifier)))
+    body: (statement_block
+      (newline)
+      (return_statement
+        (expression
+          (additive_expression
+            left: (additive_expression
+              left: (primary_expression
+                (string))
+              right: (postfix_expression
+                (field_expression
+                  object: (primary_expression
+                    (identifier))
+                  field: (property_identifier
+                    (property_identifier)))))
+            right: (primary_expression
+              (string)))))
+      (newline))))
+
+==================
 Object empty with newline
 ==================
 {
 }
 ---
+
 (source_file
   (expression_statement
     (expression
@@ -241,6 +274,7 @@ Object mixed comma and newline separators
   enabled: true,
 }
 ---
+
 (source_file
   (expression_statement
     (expression
@@ -277,3 +311,96 @@ Object mixed comma and newline separators
               (primary_expression
                 (true))))
           (newline))))))
+
+==================
+Multiline lambda block callbacks
+==================
+pub func init() {
+  hook("after_cd", (ctx) => {
+    zoxide_add(ctx.cwd)
+  })
+
+  register_command("z", (ctx) => {
+    zoxide_jump(ctx.args)
+  })
+}
+
+---
+
+(source_file
+  (function_declaration
+    (variable_identifier
+      (variable_identifier))
+    (parameter_list)
+    (statement_block
+      (newline)
+      (expression_statement
+        (expression
+          (postfix_expression
+            (call_expression
+              (primary_expression
+                (identifier))
+              (argument_list
+                (expression
+                  (primary_expression
+                    (string)))
+                (expression
+                  (primary_expression
+                    (lambda_expression
+                      (parameter_list
+                        (variable_identifier
+                          (variable_identifier)))
+                      (statement_block
+                        (newline)
+                        (expression_statement
+                          (expression
+                            (postfix_expression
+                              (call_expression
+                                (primary_expression
+                                  (identifier))
+                                (argument_list
+                                  (expression
+                                    (postfix_expression
+                                      (field_expression
+                                        (primary_expression
+                                          (identifier))
+                                        (property_identifier
+                                          (property_identifier))))))))))
+                        (newline))))))))))
+      (newline)
+      (newline)
+      (expression_statement
+        (expression
+          (postfix_expression
+            (call_expression
+              (primary_expression
+                (identifier))
+              (argument_list
+                (expression
+                  (primary_expression
+                    (string)))
+                (expression
+                  (primary_expression
+                    (lambda_expression
+                      (parameter_list
+                        (variable_identifier
+                          (variable_identifier)))
+                      (statement_block
+                        (newline)
+                        (expression_statement
+                          (expression
+                            (postfix_expression
+                              (call_expression
+                                (primary_expression
+                                  (identifier))
+                                (argument_list
+                                  (expression
+                                    (postfix_expression
+                                      (field_expression
+                                        (primary_expression
+                                          (identifier))
+                                        (property_identifier
+                                          (property_identifier))))))))))
+                        (newline))))))))))
+      (newline)))
+  (newline))

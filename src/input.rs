@@ -7,7 +7,8 @@
 //! 历史文件存储在 ~/.ecsh_history。
 
 use crate::builtin::print_help;
-use crate::completion::{EcshEditor, new_editor};
+use crate::completion::{EcshEditor, new_editor, sync_editor_shell_state};
+use crate::types::ShellState;
 use nix::unistd::isatty;
 use rustyline::error::ReadlineError;
 use std::collections::VecDeque;
@@ -140,6 +141,13 @@ impl ShellInput {
     /// 判断当前是否是交互模式（tty）。
     pub fn is_interactive(&self) -> bool {
         matches!(self, ShellInput::Interactive { .. })
+    }
+
+    pub fn sync_shell_state(&mut self, state: &ShellState) {
+        let ShellInput::Interactive { editor, .. } = self else {
+            return;
+        };
+        sync_editor_shell_state(editor, state);
     }
 
     pub fn scripted(lines: impl IntoIterator<Item = InputLine>) -> Self {

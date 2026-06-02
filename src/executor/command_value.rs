@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use crate::builtin::{builtin_kind, is_builtin_allowed_in_pipeline, run_builtin};
 use crate::ecscript::value::{CommandInvocation, CommandResult, CommandValue};
+use crate::extensions::new_extensions;
 use crate::types::{Command, OutputRedirection, Pipeline, ShellResult, ShellState};
 
 use super::builtins::run_builtin_with_redirection;
@@ -476,10 +477,12 @@ fn builtin_bridge_state(state: &ShellState) -> ShellState {
         jobs: Vec::new(),
         next_job_id: 1,
         current_fg_pgid: None,
-        script_env: crate::ecscript::env::Environment::new(),
+        script_env: state.script_env.clone(),
         aliases: state.aliases.clone(),
         traps: HashMap::new(),
         command_history: state.command_history.clone(),
+        extensions: new_extensions(),
+        module_loader: None,
     }
 }
 
@@ -606,11 +609,13 @@ mod tests {
         env::Environment,
         value::{CommandInvocation, CommandValue},
     };
+    use crate::extensions::new_extensions;
     use crate::types::{
         Command, CommandStatus, OutputRedirection, Pipeline, Redirection, ShellState, ShellWord,
     };
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
+    use std::rc::Rc;
 
     fn state() -> ShellState {
         ShellState {
@@ -621,10 +626,12 @@ mod tests {
             jobs: Vec::new(),
             next_job_id: 1,
             current_fg_pgid: None,
-            script_env: Environment::new(),
+            script_env: Rc::new(Environment::new()),
             aliases: HashMap::new(),
             traps: HashMap::new(),
             command_history: Vec::new(),
+            extensions: new_extensions(),
+            module_loader: None,
         }
     }
 

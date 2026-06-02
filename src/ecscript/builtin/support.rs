@@ -4,6 +4,7 @@ use crate::ecscript::{
     error::{RuntimeError, RuntimeErrorKind},
     value::{Function, Value},
 };
+use crate::types::ShellState;
 
 // 内建参数校验的统一入口：立即比较 `args.len()` 和期望值，
 // 不一致就报告 `ArityMismatch`。
@@ -62,6 +63,20 @@ pub(super) fn expect_function(
         ));
     };
     Ok(func.clone())
+}
+
+pub(super) fn expect_shell_state<'a>(
+    shell_state: Option<&'a ShellState>,
+    span: usize,
+    builtin_name: &str,
+) -> Result<&'a ShellState, RuntimeError> {
+    shell_state.ok_or_else(|| {
+        RuntimeError::new(
+            span,
+            RuntimeErrorKind::IoError,
+            format!("{builtin_name} requires interactive ecsh shell context"),
+        )
+    })
 }
 
 pub(super) fn checked_array_index(

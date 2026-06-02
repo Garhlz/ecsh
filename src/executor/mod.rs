@@ -13,6 +13,7 @@ mod launch;
 
 use crate::builtin::{BuiltinKind, builtin_kind, is_builtin_allowed_in_pipeline};
 use crate::diagnostics::print_error;
+use crate::extensions::{has_registered_command, run_registered_command};
 use crate::types::{Command, CommandFlow, CommandStatus, Pipeline, ShellResult, ShellState};
 
 pub use builtins::run_special_builtin;
@@ -66,6 +67,35 @@ pub fn run_command(
                 },
             }
         }
+    } else if has_registered_command(state, command.program.as_lit_str().unwrap_or("")) {
+        if background {
+            print_error(format!(
+                "{}: ecscript shell command cannot run in the background",
+                command.program
+            ));
+            CommandFlow::Continue(CommandStatus::failure())
+        } else if command.redirection.stdin.is_some() || command.redirection.stdout.is_some() {
+            print_error(format!(
+                "{}: redirection is not supported for ecscript shell commands",
+                command.program
+            ));
+            CommandFlow::Continue(CommandStatus::failure())
+        } else {
+            let name = command.program.as_lit_str().unwrap_or("");
+            let args = command
+                .args
+                .iter()
+                .map(|arg| arg.as_lit_str().unwrap_or("").to_string())
+                .collect();
+            match run_registered_command(state, name, args) {
+                Ok(Some(status)) => CommandFlow::Continue(status),
+                Ok(None) => unreachable!("registered command disappeared during execution"),
+                Err(err) => {
+                    print_error(err.format_with_source(""));
+                    CommandFlow::Continue(CommandStatus::failure())
+                }
+            }
+        }
     } else {
         // 外部命令：fork → execvp，由 launch_command_job 处理前后台逻辑
         let status = match launch::launch_command_job(&command, state, background, command_line) {
@@ -111,6 +141,13 @@ pub fn run_pipeline(
     };
 
     for command in &expanded_pipeline.commands {
+        if has_registered_command(state, command.program.as_lit_str().unwrap_or("")) {
+            print_error(format!(
+                "pipeline: ecscript shell command is not supported in pipelines: {}",
+                command.program
+            ));
+            return Ok(CommandStatus::failure());
+        }
         if let Some(kind) = builtin_kind(command) {
             if !is_builtin_allowed_in_pipeline(kind) {
                 print_error(format!(

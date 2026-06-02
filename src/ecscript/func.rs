@@ -2,7 +2,7 @@ use crate::ecscript::{
     ast::{AssignTarget, Expr, ExprKind, RangeExpr, Stmt, StmtKind},
     env::Environment,
     error::{RuntimeError, RuntimeErrorKind},
-    eval::{ExecFlow, eval_stmt},
+    eval::{EvalContext, ExecFlow, eval_stmt_with_ctx},
     value::{Binding, Function, Value},
 };
 use std::collections::HashSet;
@@ -14,10 +14,50 @@ use std::rc::Rc;
 /// 根环境 → capture_env（被捕获的外部变量）→ local_env（参数和函数体局部变量）。
 ///
 /// `capture_env` 挂到 `find_root()` 而非调用点当前环境，因为闭包的捕获关系在定义时就已经固定。
+#[cfg(test)]
 pub fn call_function(
     func: Rc<Function>,
     params_value: &Vec<Value>,
     env: &Environment<'_>,
+    span: usize,
+) -> Result<Option<Value>, RuntimeError> {
+    call_function_with_eval_ctx(
+        func,
+        params_value.clone(),
+        env,
+        EvalContext::plain(None, None, None, None),
+        "function",
+        span,
+    )
+}
+
+pub fn call_function_with_ctx(
+    func: Rc<Function>,
+    params_value: Vec<Value>,
+    env: &Environment<'_>,
+    shell_state: Option<&crate::types::ShellState>,
+    stdin_text: Option<&str>,
+    label: &str,
+    span: usize,
+) -> Result<Option<Value>, RuntimeError> {
+    let cwd = shell_state.and_then(|_| std::env::current_dir().ok());
+    let loader = shell_state.and_then(|state| state.module_loader.as_deref());
+    call_function_with_eval_ctx(
+        func,
+        params_value,
+        env,
+        EvalContext::plain(shell_state, stdin_text, cwd.as_deref(), loader),
+        label,
+        span,
+    )
+}
+
+pub(crate) fn call_function_with_eval_ctx(
+    func: Rc<Function>,
+    params_value: Vec<Value>,
+    env: &Environment<'_>,
+    ctx: EvalContext<'_>,
+    label: &str,
     span: usize,
 ) -> Result<Option<Value>, RuntimeError> {
     let capture_env = Environment::new_child(env.find_root());
@@ -32,7 +72,12 @@ pub fn call_function(
         return Err(RuntimeError::new(
             span,
             RuntimeErrorKind::ArityMismatch,
-            "param number error",
+            format!(
+                "{} expects {} arguments, got {}",
+                label,
+                func.params.len(),
+                params_value.len()
+            ),
         ));
     }
 
@@ -50,7 +95,7 @@ pub fn call_function(
     }
 
     for stmt in &(*func).stmts {
-        match eval_stmt(stmt, &local_env)? {
+        match eval_stmt_with_ctx(stmt, &local_env, ctx)? {
             ExecFlow::Return { value, .. } => {
                 return Ok(value);
             }
@@ -70,6 +115,10 @@ pub fn free_vars(
     params: &Vec<String>,
     body: &Vec<Stmt>,
 ) -> Result<HashSet<String>, RuntimeError> {
+    Ok(collect_free_vars(name, params, body))
+}
+
+fn collect_free_vars(name: Option<&str>, params: &[String], body: &[Stmt]) -> HashSet<String> {
     let mut free_set: HashSet<String> = HashSet::new();
     let mut scope_stack: Vec<HashSet<String>> = Vec::new();
 
@@ -87,7 +136,7 @@ pub fn free_vars(
         visit_stmt(stmt, &mut scope_stack, &mut free_set);
     }
 
-    Ok(free_set)
+    free_set
 }
 
 fn visit_stmt(stmt: &Stmt, stack: &mut Vec<HashSet<String>>, free_set: &mut HashSet<String>) {
@@ -256,11 +305,13 @@ fn visit_expr(expr: &Expr, stack: &[HashSet<String>], free_set: &mut HashSet<Str
             visit_expr(end, stack, free_set);
         }
 
-        // 函数字面量 (lambda)：不递归进入。
-        // lambda 有自己独立的自由变量集合，在创建时单独分析，
-        // 当前收集的是外层函数的自由变量。
-        ExprKind::FuncLiteral { .. } => {
-            return;
+        // 内层 lambda 会在外层函数执行时创建，因此外层函数必须先保留
+        // lambda 将来需要的非局部绑定。属于外层局部作用域的名字会被
+        // upvalue 过滤，仍由 lambda 在创建时直接捕获。
+        ExprKind::FuncLiteral { params, body } => {
+            for name in collect_free_vars(None, params, body) {
+                upvalue(&name, stack, free_set);
+            }
         }
 
         // 命令字面量：不含变量引用

@@ -73,6 +73,8 @@ pub fn validate_array_index(
 pub enum Builtin {
     CommandBuilder,
     Env,
+    SetEnv,
+    UnsetEnv,
     Cwd,
     Stdin,
     ReadLines,
@@ -105,6 +107,13 @@ pub enum Builtin {
     Join,
     JoinPath,
     WriteLines,
+    Hook,
+    Prompt,
+    Complete,
+    RegisterCommand,
+    SetCwd,
+    Bind,
+    Trim,
 }
 
 impl Builtin {
@@ -112,6 +121,8 @@ impl Builtin {
         match self {
             Builtin::CommandBuilder => "command",
             Builtin::Env => "env",
+            Builtin::SetEnv => "set_env",
+            Builtin::UnsetEnv => "unset_env",
             Builtin::Cwd => "cwd",
             Builtin::Stdin => "stdin",
             Builtin::ReadLines => "read_lines",
@@ -144,6 +155,13 @@ impl Builtin {
             Builtin::Join => "join",
             Builtin::JoinPath => "join_path",
             Builtin::WriteLines => "write_lines",
+            Builtin::Hook => "hook",
+            Builtin::Prompt => "prompt",
+            Builtin::Complete => "complete",
+            Builtin::RegisterCommand => "register_command",
+            Builtin::SetCwd => "set_cwd",
+            Builtin::Trim => "trim",
+            Builtin::Bind => "bind",
         }
     }
 }

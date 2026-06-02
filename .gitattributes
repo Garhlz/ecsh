@@ -1,0 +1,4 @@
+# Tree-sitter generated files
+packages/tree-sitter-ecscript/src/parser.c linguist-generated=true
+packages/tree-sitter-ecscript/src/grammar.json linguist-generated=true
+packages/tree-sitter-ecscript/src/node-types.json linguist-generated=true

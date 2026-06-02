@@ -1,0 +1,27 @@
+func zoxide_add(path) {
+    capture(command("zoxide", "add", path));
+}
+
+func zoxide_jump(args) {
+    let target = trim(text(command("zoxide", "query", join(args, " "))));
+    set_cwd(target);
+}
+
+func zoxide_jump_interactive(args) {
+    let target = trim(text(command("zoxide", "query", "-i", join(args, " "))));
+    set_cwd(target);
+}
+
+pub func init() {
+    hook("after_cd", (ctx) => {
+        zoxide_add(ctx.cwd);
+    });
+
+    register_command("z", (ctx) => {
+        zoxide_jump(ctx.args);
+    });
+
+    register_command("zi", (ctx) => {
+        zoxide_jump_interactive(ctx.args);
+    });
+}
