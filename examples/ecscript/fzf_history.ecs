@@ -1,0 +1,69 @@
+// fzf_history.ecs — Ctrl-R fzf history picker for ecsh
+//
+// Usage (in ~/.ecshrc):
+//   use /path/to/examples/ecscript/fzf_history.ecs as fzf_history
+//   fzf_history.init()
+//
+// Requires: fzf installed on PATH.
+
+pub func init() {
+    bind("ctrl-r", (ctx) => {
+        if len(ctx.history) == 0 {
+            return nil;
+        }
+
+        let items = [];
+        let i = len(ctx.history) - 1;
+        while i >= 0 {
+            push(items, ctx.history[i]);
+            i = i - 1;
+        }
+
+        let tmp = capture(command("mktemp", "/tmp/ecsh-fzf-hist.XXXXXX"));
+        if !tmp.ok {
+            return nil;
+        }
+        let fname = trim(tmp.stdout);
+
+        for item in items {
+            run(command(
+                "sh",
+                "-c",
+                "printf '%s\\n' \"$1\" >> \"$2\"",
+                "--",
+                item,
+                fname
+            ));
+        }
+
+        let out = capture(command("mktemp", "/tmp/ecsh-fzf-out.XXXXXX"));
+        if !out.ok {
+            capture(command("rm", "-f", fname));
+            return nil;
+        }
+        let outname = trim(out.stdout);
+
+        let pick = capture(command(
+            "sh",
+            "-c",
+            "cat \"$1\" | fzf --no-sort > \"$2\" 2> /dev/tty",
+            "--",
+            fname,
+            outname
+        ));
+
+        let selected_raw = capture(command("cat", outname));
+        capture(command("rm", "-f", fname, outname));
+
+        if !pick.ok {
+            return nil;
+        }
+
+        let selected = trim(selected_raw.stdout);
+        if selected == "" {
+            return nil;
+        }
+
+        return { action: "set_line", text: selected };
+    });
+}

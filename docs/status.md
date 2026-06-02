@@ -74,11 +74,13 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `ecsh file.ecs` 走 ecscript 文件执行路径
 - `source` / `.` 在当前 shell 的 `script_env` 中执行 `.ecs` 文件
 - 交互启动时自动加载 `~/.ecshrc`
+- `reload_rc` 可在当前 session 中用全新脚本环境和模块缓存重载 `~/.ecshrc`
 - 顶层 shell parse error 与 ecscript parse/runtime error 已分别走源码定位输出
 
 当前固定的环境边界是：
 
-- 交互顶层、`source` / `.`、`.ecshrc` 共享当前 shell 的 `script_env`
+- 交互顶层与 `source` / `.` 共享当前 shell 的 `script_env`
+- `reload_rc` / 交互启动加载 `.ecshrc` 会重建脚本环境、扩展注册表和模块缓存，然后再切换到新结果
 - `ecsh file.ecs` 使用新的脚本根环境
 - ecscript block 内仍是纯 ecscript 语句，不直接执行 shell 命令；命令需要显式写成 `cmd{ ... }`
 
@@ -197,11 +199,22 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - completion 当前接受结构化候选对象：
   `{ value, display, desc, kind }`
 - 脚本命令当前接受 `{ name, args, cwd }`，可以通过 `set_cwd(path)` 修改当前目录
-- bind 回调当前接受 `{ key, line, cursor, cwd }`
+- bind 回调当前接受 `{ key, line, cursor, cwd, history }`（`history` 为 `Array<String>`）
 - bind 回调当前支持：
   - `{ action: "accept" | "newline" | "complete" | "complete_hint" | "clear_screen" | "interrupt" }`
   - `{ action: "history_search_backward" | "history_search_forward" | "previous_history" | "next_history" }`
   - `{ action: "insert", text: "..." }`
+  - `{ action: "set_line", text: "..." }`（替换整行）
+
+阶段 10 收口已完成（错误语义与生命周期加固）：
+
+- `hook` 错误按 best-effort 处理：打印错误，跳过该 handler，继续执行后续 handler
+- `preexec`：仅在 shell 成功解析后、执行前触发；解析错误不触发 `preexec`
+- `postexec`：命令到达最终结果后触发，包含解析错误和执行失败场景
+- `prompt` 错误或非 String 返回：打印错误（同类错误同会话只打印一次），回退到默认 prompt
+- `complete` 错误或无效候选：打印错误（同命令同错误同会话只打印一次），回退到无脚本候选；非法 item 跳过不 panic
+- `after_cd` 钩子内调用 `set_cwd()`：目录和 `PWD`/`OLDPWD` 正常更新，但不递归触发 `after_cd`（reentry guard）
+- `register_command` 保持原有语义：handler 错误打印并返回失败；组合限制不变（禁止后台/管道/重定向）
 
 当前边界：
 

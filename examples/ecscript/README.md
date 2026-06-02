@@ -22,9 +22,9 @@ cargo run --bin ecsh -- examples/ecscript/loop_and_accumulate.ecs
 - `starship.toml`：配套 Starship 配置，展示 ecsh 传入的 shell、SHLVL、jobs、命令耗时和退出状态
 - `git_complete.ecs`：阶段 10 completion adapter 示例
 - `zoxide.ecs`：阶段 10 shell command adapter 示例，需要本机安装 `zoxide`
-- `bind_accept_hint.ecs`：阶段 10 bind 示例，把 `Ctrl-E` 绑定为“接受当前补全提示”
 - `bind_insert_template.ecs`：阶段 10 bind 示例，把 `Ctrl-G` 绑定为插入 `git status`
 - `bind_history_search.ecs`：阶段 10 bind 示例，把 `Up` / `Down` 绑定为历史前缀搜索
+- `fzf_history.ecs`：fzf 历史选择器 bind 示例，把 `Ctrl-R` 绑定为 fzf 交互式历史搜索（需要本机安装 `fzf`）
 
 在 `~/.ecshrc` 中启用配套 Starship 配置：
 
@@ -33,6 +33,8 @@ set_env("STARSHIP_CONFIG", "/path/to/ecsh/examples/ecscript/starship.toml")
 use /path/to/ecsh/examples/ecscript/starship_prompt.ecs as starship
 starship.init()
 ```
+
+修改完 `~/.ecshrc` 后，使用 `reload_rc` 重新加载；不要再用 `source ~/.ecshrc`。
 
 在 `~/.ecshrc` 中启用 zoxide：
 
@@ -44,20 +46,20 @@ zoxide.init()
 在 `~/.ecshrc` 中启用按键绑定示例：
 
 ```ecs
-use /path/to/ecsh/examples/ecscript/bind_accept_hint.ecs as bind_accept_hint
-bind_accept_hint.init()
-
 use /path/to/ecsh/examples/ecscript/bind_insert_template.ecs as bind_insert_template
 bind_insert_template.init()
 
 use /path/to/ecsh/examples/ecscript/bind_history_search.ecs as bind_history_search
 bind_history_search.init()
+
+use /path/to/ecsh/examples/ecscript/fzf_history.ecs as fzf_history
+fzf_history.init()
 ```
 
 说明：
-- `bind_accept_hint.ecs` 适合配合当前 completion 体验，`Ctrl-E` 会尝试接受提示文本。
 - `bind_insert_template.ecs` 用于演示 `insert` 动作，按下 `Ctrl-G` 会在光标处插入 `git status`。
 - `bind_history_search.ecs` 会把 `Up` / `Down` 改成基于当前前缀的历史搜索，而不是普通上一条/下一条历史。
+- `fzf_history.ecs` 使用 `set_line` action + `ctx.history` 实现 Ctrl-R fzf 历史选择器。`ctx.history` 会包含 `~/.ecsh_history` 中已加载的历史和当前会话新输入的命令。需要本机安装 `fzf`。
 
 预期失败脚本：
 - 这些脚本用于固定当前语言边界，而不是回归成功行为。

@@ -6,15 +6,17 @@
 
 use crate::diagnostics::print_error;
 use crate::ecscript::{
-    repl_output_needs_newline, reset_repl_output_state, run_script_file_with_ctx,
+    Environment, ModuleLoader, repl_output_needs_newline, reset_repl_output_state,
+    run_script_file_with_ctx,
 };
-use crate::extensions::{HookName, after_cd_context, run_hooks};
+use crate::extensions::{HookName, after_cd_context, new_extensions, run_hooks};
 use crate::types::Command;
 use crate::types::{CommandFlow, CommandStatus, ShellState};
 use nix::unistd::isatty;
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_HOT_PINK: &str = "\x1b[1;38;5;201m";
@@ -45,6 +47,7 @@ pub enum BuiltinKind {
     Which,
     History,
     Source,
+    ReloadRc,
 }
 
 /// 将命令名映射到 BuiltinKind。
@@ -72,13 +75,33 @@ pub fn builtin_kind(command: &Command) -> Option<BuiltinKind> {
         "history" => Some(BuiltinKind::History),
         "source" => Some(BuiltinKind::Source),
         "." => Some(BuiltinKind::Source),
+        "reload_rc" => Some(BuiltinKind::ReloadRc),
         _ => None,
     }
 }
 
 pub const BUILTIN_NAMES: &[&str] = &[
-    "help", "exit", "cd", "pwd", "env", "export", "unset", "clear", "status", "jobs", "fg", "bg",
-    "alias", "unalias", "trap", "type", "which", "history", "source", ".",
+    "help",
+    "exit",
+    "cd",
+    "pwd",
+    "env",
+    "export",
+    "unset",
+    "clear",
+    "status",
+    "jobs",
+    "fg",
+    "bg",
+    "alias",
+    "unalias",
+    "trap",
+    "type",
+    "which",
+    "history",
+    "source",
+    ".",
+    "reload_rc",
 ];
 
 /// 判断某个内置命令是否可以出现在管道中。
@@ -120,6 +143,7 @@ pub fn run_builtin(command: &Command, state: &mut ShellState) -> Option<CommandF
         BuiltinKind::Which => Some(CommandFlow::Continue(run_which(command, state))),
         BuiltinKind::History => Some(CommandFlow::Continue(run_history(command, state))),
         BuiltinKind::Source => Some(CommandFlow::Continue(run_source(command, state))),
+        BuiltinKind::ReloadRc => Some(CommandFlow::Continue(run_reload_rc(command, state))),
         // jobs / fg / bg 需要访问作业表和前台等待逻辑，
         // 由 executor 层统一处理，避免 builtin 模块反向依赖 executor。
         BuiltinKind::Jobs | BuiltinKind::Fg | BuiltinKind::Bg => None,
@@ -151,6 +175,7 @@ pub fn print_help() {
     println!("  which NAME ... - print resolved command path or shell resolution");
     println!("  history - show command history");
     println!("  source FILE / . FILE - run an .ecs file in the current shell script environment");
+    println!("  reload_rc - reload ~/.ecshrc with a fresh ecscript module/runtime registry");
 }
 
 /// 打印 help 标题行。每个词用不同颜色，重定向到文件时自动去掉颜色。
@@ -216,7 +241,22 @@ pub(crate) fn set_current_dir_with_hooks(dir: &str, state: &ShellState) -> Resul
         .map(|cwd| cwd.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
     sync_pwd_env(&old_cwd, &new_cwd);
-    run_hooks(HookName::AfterCd, after_cd_context(old_cwd, new_cwd), state);
+
+    let already_running = {
+        let mut ext = state.extensions.borrow_mut();
+        if ext.after_cd_reentry {
+            true
+        } else {
+            ext.after_cd_reentry = true;
+            false
+        }
+    };
+
+    if !already_running {
+        run_hooks(HookName::AfterCd, after_cd_context(old_cwd, new_cwd), state);
+        state.extensions.borrow_mut().after_cd_reentry = false;
+    }
+
     Ok(())
 }
 
@@ -526,6 +566,84 @@ fn run_source(command: &Command, state: &mut ShellState) -> CommandStatus {
     }
 }
 
+fn run_reload_rc(command: &Command, state: &mut ShellState) -> CommandStatus {
+    if !command.args.is_empty() {
+        print_usage("reload_rc", "reload_rc");
+        return CommandStatus::failure();
+    }
+
+    reload_startup_rc(state)
+}
+
+pub fn load_startup_rc(state: &mut ShellState) {
+    let Some(path) = startup_rc_path() else {
+        return;
+    };
+    let status = run_rc_file(&path, state, false);
+    if status.code != 0 {
+        state.last_status = status;
+    }
+}
+
+pub fn reload_startup_rc(state: &mut ShellState) -> CommandStatus {
+    let Some(path) = startup_rc_path() else {
+        print_error("reload_rc: ~/.ecshrc not found");
+        return CommandStatus::failure();
+    };
+    run_rc_file(&path, state, true)
+}
+
+fn startup_rc_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let path = Path::new(&home).join(".ecshrc");
+    path.exists().then_some(path)
+}
+
+fn run_rc_file(path: &Path, state: &mut ShellState, fresh_runtime: bool) -> CommandStatus {
+    reset_repl_output_state();
+    let result = if fresh_runtime {
+        run_rc_file_with_fresh_runtime(path, state)
+    } else {
+        run_script_file_with_ctx(path, &state.script_env, state, None)
+    };
+
+    match result {
+        Ok(()) => {
+            if repl_output_needs_newline() {
+                println!();
+            }
+            CommandStatus::success()
+        }
+        Err(err) => {
+            if repl_output_needs_newline() {
+                println!();
+            }
+            print_error(err.format_for_user());
+            CommandStatus::failure()
+        }
+    }
+}
+
+fn run_rc_file_with_fresh_runtime(
+    path: &Path,
+    state: &mut ShellState,
+) -> Result<(), crate::ecscript::ScriptFileError> {
+    let mut staged = state.clone();
+    staged.script_env = Rc::new(Environment::new());
+    staged.extensions = new_extensions();
+    staged.module_loader = Some(Rc::new(ModuleLoader::new()));
+
+    run_script_file_with_ctx(path, &staged.script_env, &staged, None)?;
+
+    state.script_env = staged.script_env;
+    state.aliases = staged.aliases;
+    state.traps = staged.traps;
+    state.extensions = staged.extensions;
+    state.module_loader = staged.module_loader;
+    state.last_status = staged.last_status;
+    Ok(())
+}
+
 /// `type` / `which` 的内部统一解析结果。
 enum CommandDescription<'a> {
     Alias(&'a str),
@@ -600,4 +718,58 @@ fn run_status(state: &mut ShellState) -> CommandStatus {
 /// 打印统一格式的 usage 错误。
 fn print_usage(name: &str, usage: &str) {
     print_error(format!("{}: usage: {}", name, usage));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reload_startup_rc;
+    use crate::ecscript::{Environment, ModuleLoader, Value, run_script_source};
+    use crate::extensions::new_extensions;
+    use crate::types::{CommandStatus, ShellState};
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    fn state() -> ShellState {
+        ShellState {
+            last_status: CommandStatus::success(),
+            interactive: true,
+            shell_pgid: None,
+            shell_terminal_fd: None,
+            jobs: Vec::new(),
+            next_job_id: 1,
+            current_fg_pgid: None,
+            script_env: Rc::new(Environment::new()),
+            aliases: HashMap::new(),
+            traps: HashMap::new(),
+            command_history: Vec::new(),
+            extensions: new_extensions(),
+            module_loader: Some(Rc::new(ModuleLoader::new())),
+        }
+    }
+
+    #[test]
+    fn reload_rc_keeps_old_script_env_on_failure() {
+        let home = std::env::temp_dir().join(format!("ecsh-reload-rc-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".ecshrc"), "let replacement = \n").unwrap();
+
+        let old_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", &home) };
+
+        let mut shell = state();
+        run_script_source("let sentinel = 1\n", &shell.script_env).unwrap();
+
+        let status = reload_startup_rc(&mut shell);
+        assert_eq!(status, CommandStatus::failure());
+        assert_eq!(shell.script_env.get("sentinel", 0).unwrap(), Value::Int(1));
+        assert!(shell.script_env.get("replacement", 0).is_err());
+
+        match old_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        let _ = std::fs::remove_file(home.join(".ecshrc"));
+        let _ = std::fs::remove_dir(home);
+    }
 }

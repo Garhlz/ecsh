@@ -171,9 +171,55 @@ impl ShellInput {
         };
         history
     }
+
+    pub fn history_entries(&self) -> Vec<String> {
+        match self {
+            ShellInput::Interactive { editor, .. } => editor.history().iter().cloned().collect(),
+            ShellInput::Plain => Vec::new(),
+            ShellInput::Scripted { history, .. } => history.clone(),
+        }
+    }
 }
 
 /// 历史文件路径：~/.ecsh_history
 fn history_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ecsh_history"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InputLine, ShellInput};
+    use crate::completion::new_editor;
+
+    #[test]
+    fn history_entries_include_loaded_persisted_history() {
+        let path =
+            std::env::temp_dir().join(format!("ecsh-input-history-{}.txt", std::process::id()));
+
+        let mut seed = new_editor().expect("seed editor");
+        let _ = seed.add_history_entry("git diff");
+        let _ = seed.add_history_entry("cargo test");
+        seed.save_history(&path).expect("save history");
+
+        let mut editor = new_editor().expect("editor");
+        editor.load_history(&path).expect("load history");
+
+        let input = ShellInput::Interactive {
+            editor,
+            history_path: Some(path.clone()),
+        };
+        assert_eq!(
+            input.history_entries(),
+            vec!["git diff".to_string(), "cargo test".to_string()]
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scripted_history_entries_return_recorded_history() {
+        let mut input = ShellInput::scripted([InputLine::Line("echo hi".into())]);
+        input.add_history_entry("echo hi");
+        assert_eq!(input.history_entries(), vec!["echo hi".to_string()]);
+    }
 }

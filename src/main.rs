@@ -5,7 +5,6 @@ use ecsh::ecscript::{
     Environment, ModuleLoader, ParseError, RuntimeError, RuntimeErrorKind, Stmt, Value,
     display_value, eval_top_level_script_with_ctx, parse_top_level_script,
     repl_output_needs_newline, reset_repl_output_state,
-    run_script_file_with_ctx as run_ecscript_file_with_ctx,
     run_script_file_with_stdin as run_ecscript_file_with_stdin,
 };
 use ecsh::executor::{init_shell_job_control, reap_background_jobs, run_command, run_pipeline};
@@ -95,6 +94,7 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = ShellInput::new()?;
     initialize_shell_environment();
     let mut state = new_shell_state(input.is_interactive());
+    state.command_history = input.history_entries();
     init_shell_job_control(&mut state)?;
     load_startup_rc(&mut state);
     input.print_welcome();
@@ -198,37 +198,12 @@ fn main_loop() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 加载 `~/.ecshrc` 启动脚本。
-///
-/// 仅在交互模式下生效；非交互模式跳过，避免干扰脚本化执行。
+/// 仅在交互模式下加载 `~/.ecshrc`，避免干扰脚本化执行。
 fn load_startup_rc(state: &mut ShellState) {
     if !state.interactive {
         return;
     }
-
-    let Some(home) = env::var_os("HOME") else {
-        return;
-    };
-    let path = Path::new(&home).join(".ecshrc");
-    if !path.exists() {
-        return;
-    }
-
-    reset_repl_output_state();
-    match run_ecscript_file_with_ctx(&path, &state.script_env, state, None) {
-        Ok(()) => {
-            if repl_output_needs_newline() {
-                println!();
-            }
-        }
-        Err(err) => {
-            if repl_output_needs_newline() {
-                println!();
-            }
-            print_error(err.format_for_user());
-            state.last_status = CommandStatus::failure();
-        }
-    }
+    ecsh::builtin::load_startup_rc(state);
 }
 
 /// 一次命令读取的结果：成功读到一行、被 Ctrl-C 中断、或收到 EOF。
@@ -310,6 +285,8 @@ fn read_complete_command(
         Ok(Some(prompt)) => prompt,
         Ok(None) => build_prompt(state)?,
         Err(err) => {
+            // resolve_prompt now handles error printing internally;
+            // this Err arm is a safety net for unexpected failures.
             print_error(err.format_with_source(""));
             build_prompt(state)?
         }

@@ -1,5 +1,0 @@
-pub func init() {
-    bind("right", (ctx) => {
-        return {"action": "complete_hint"};
-    });
-}

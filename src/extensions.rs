@@ -2,7 +2,7 @@ use crate::diagnostics::print_error;
 use crate::ecscript::{Environment, RuntimeError, RuntimeErrorKind, Value, call_function_with_ctx};
 use crate::types::{CommandStatus, JobStatus, ShellState};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
@@ -43,11 +43,40 @@ pub struct ExtensionRegistry {
     pub script_commands: HashMap<String, Value>,
     pub key_bindings: HashMap<String, Value>,
     pub last_duration_ms: Option<u128>,
+    pub after_cd_reentry: bool,
+    prompt_seen_errors: HashSet<String>,
+    completion_seen_errors: HashMap<String, HashSet<String>>,
 }
 
 impl ExtensionRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Print a throttled error: same message prints only once per session
+    /// until the caller clears the state on success.
+    pub fn throttled_prompt_error(&mut self, msg: &str) {
+        if self.prompt_seen_errors.insert(msg.to_string()) {
+            print_error(msg.to_string());
+        }
+    }
+
+    pub fn clear_prompt_errors(&mut self) {
+        self.prompt_seen_errors.clear();
+    }
+
+    pub fn throttled_completion_error(&mut self, key: &str, msg: &str) {
+        let seen = self
+            .completion_seen_errors
+            .entry(key.to_string())
+            .or_default();
+        if seen.insert(msg.to_string()) {
+            print_error(msg.to_string());
+        }
+    }
+
+    pub fn clear_completion_errors(&mut self, key: &str) {
+        self.completion_seen_errors.remove(key);
     }
 }
 
@@ -103,24 +132,31 @@ pub fn resolve_prompt(state: &ShellState) -> Result<Option<String>, RuntimeError
         return Ok(None);
     };
 
-    let value = invoke_callback(
+    match invoke_callback(
         &handler,
         prompt_context(state),
         &state.script_env,
         state,
         "prompt",
-    )?;
-    let Value::String(prompt) = value else {
-        return Err(RuntimeError::new(
-            0,
-            RuntimeErrorKind::TypeMismatch,
-            format!(
-                "prompt handler must return String, got {}",
-                value.type_name()
-            ),
-        ));
-    };
-    Ok(Some(prompt))
+    ) {
+        Ok(value) => {
+            let Value::String(prompt) = value else {
+                let msg = format!(
+                    "prompt handler must return String, got {}",
+                    value.type_name()
+                );
+                state.extensions.borrow_mut().throttled_prompt_error(&msg);
+                return Ok(None);
+            };
+            state.extensions.borrow_mut().clear_prompt_errors();
+            Ok(Some(prompt))
+        }
+        Err(err) => {
+            let msg = err.format_with_source("");
+            state.extensions.borrow_mut().throttled_prompt_error(&msg);
+            Ok(None)
+        }
+    }
 }
 
 pub fn resolve_completion(
@@ -136,14 +172,46 @@ pub fn resolve_completion(
         return Ok(None);
     };
 
-    let value = invoke_callback(
+    let completion_key = command.to_string();
+    let value = match invoke_callback(
         &handler,
         completion_context(line, word, argv, arg_index),
         &state.script_env,
         state,
         "complete",
-    )?;
-    Ok(Some(completion_items_from_value(value)?))
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            let msg = err.format_with_source("");
+            state
+                .extensions
+                .borrow_mut()
+                .throttled_completion_error(&completion_key, &msg);
+            return Ok(Some(Vec::new()));
+        }
+    };
+
+    match completion_items_from_value(value) {
+        Ok((items, warnings)) => {
+            let had_warnings = !warnings.is_empty();
+            let mut extensions = state.extensions.borrow_mut();
+            for warning in warnings {
+                extensions.throttled_completion_error(&completion_key, &warning);
+            }
+            if !had_warnings {
+                extensions.clear_completion_errors(&completion_key);
+            }
+            Ok(Some(items))
+        }
+        Err(err) => {
+            let msg = err.format_with_source("");
+            state
+                .extensions
+                .borrow_mut()
+                .throttled_completion_error(&completion_key, &msg);
+            Ok(Some(Vec::new()))
+        }
+    }
 }
 
 pub fn has_registered_command(state: &ShellState, name: &str) -> bool {
@@ -265,7 +333,9 @@ fn registered_command_context(name: &str, args: Vec<String>) -> Value {
     ])
 }
 
-fn completion_items_from_value(value: Value) -> Result<Vec<CompletionItem>, RuntimeError> {
+fn completion_items_from_value(
+    value: Value,
+) -> Result<(Vec<CompletionItem>, Vec<String>), RuntimeError> {
     let Value::Array(items) = value else {
         return Err(RuntimeError::new(
             0,
@@ -277,12 +347,20 @@ fn completion_items_from_value(value: Value) -> Result<Vec<CompletionItem>, Runt
         ));
     };
 
-    items
-        .borrow()
-        .iter()
-        .cloned()
-        .map(completion_item_from_value)
-        .collect()
+    let mut result = Vec::new();
+    let mut warnings = Vec::new();
+    for item in items.borrow().iter().cloned() {
+        match completion_item_from_value(item) {
+            Ok(ci) => result.push(ci),
+            Err(err) => {
+                warnings.push(format!(
+                    "complete handler: skipping invalid item: {}",
+                    err.format_with_source("")
+                ));
+            }
+        }
+    }
+    Ok((result, warnings))
 }
 
 fn completion_item_from_value(value: Value) -> Result<CompletionItem, RuntimeError> {
@@ -475,13 +553,18 @@ pub fn key_to_event(
 }
 
 /// Context object passed to bind callbacks.
-fn bind_context(key: &str, line: &str, cursor: usize) -> Value {
+fn bind_context(key: &str, line: &str, cursor: usize, history: &[String]) -> Value {
     let cwd = current_cwd();
+    let history_values: Vec<Value> = history.iter().map(|h| Value::String(h.clone())).collect();
     object([
         ("key", Value::String(key.to_string())),
         ("line", Value::String(line.to_string())),
         ("cursor", Value::Int(cursor as i64)),
         ("cwd", Value::String(cwd)),
+        (
+            "history",
+            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(history_values))),
+        ),
     ])
 }
 
@@ -522,7 +605,7 @@ pub fn bind_result_to_cmd(result: &Value) -> Result<Option<rustyline::Cmd>, Runt
         }
     };
 
-    use rustyline::Cmd;
+    use rustyline::{Cmd, Movement};
     let cmd = match action.as_str() {
         "accept" => Cmd::AcceptLine,
         "newline" => Cmd::Newline,
@@ -534,6 +617,26 @@ pub fn bind_result_to_cmd(result: &Value) -> Result<Option<rustyline::Cmd>, Runt
         "previous_history" => Cmd::PreviousHistory,
         "next_history" => Cmd::NextHistory,
         "interrupt" => Cmd::Interrupt,
+        "set_line" => {
+            let text = match obj.get("text") {
+                Some(Value::String(s)) => s.clone(),
+                Some(other) => {
+                    return Err(RuntimeError::new(
+                        0,
+                        RuntimeErrorKind::TypeMismatch,
+                        format!("set_line text must be String, got {}", other.type_name()),
+                    ));
+                }
+                None => {
+                    return Err(RuntimeError::new(
+                        0,
+                        RuntimeErrorKind::TypeMismatch,
+                        "set_line action requires 'text' field",
+                    ));
+                }
+            };
+            Cmd::Replace(Movement::WholeBuffer, Some(text))
+        }
         "insert" => {
             let text = match obj.get("text") {
                 Some(Value::String(s)) => s.clone(),
@@ -583,7 +686,7 @@ pub fn invoke_bind_callback(
 
     let result = invoke_callback(
         &handler,
-        bind_context(key, line, cursor),
+        bind_context(key, line, cursor, &state.command_history),
         &state.script_env,
         state,
         "bind",
@@ -593,12 +696,17 @@ pub fn invoke_bind_callback(
 }
 #[cfg(test)]
 mod tests {
-    use super::{bind_result_to_cmd, object, prompt_context};
-    use crate::ecscript::{Environment, Value};
+    use super::{
+        bind_context, bind_result_to_cmd, completion_items_from_value, invoke_bind_callback,
+        object, prompt_context, resolve_completion, resolve_prompt,
+    };
+    use crate::ecscript::{
+        Environment, Value, eval_top_level_script_with_ctx, lexer, parse_top_level_script,
+    };
     use crate::extensions::new_extensions;
     use crate::test_support::env_lock;
     use crate::types::{CommandStatus, ShellState};
-    use rustyline::Cmd;
+    use rustyline::{Cmd, Movement};
     use std::collections::HashMap;
     use std::rc::Rc;
 
@@ -618,6 +726,12 @@ mod tests {
             extensions: new_extensions(),
             module_loader: None,
         }
+    }
+
+    fn register(src: &str, state: &ShellState) {
+        let _ = lexer::tokenize(src).unwrap();
+        let stmts = parse_top_level_script(src).unwrap().unwrap();
+        eval_top_level_script_with_ctx(&stmts, &state.script_env, Some(state)).unwrap();
     }
 
     #[test]
@@ -712,5 +826,262 @@ mod tests {
     fn bind_result_non_object_errors() {
         let err = bind_result_to_cmd(&Value::Int(1)).unwrap_err();
         assert!(err.message.contains("must return nil or Object"));
+    }
+
+    #[test]
+    fn bind_result_set_line_maps_to_replace_whole_buffer() {
+        let cmd = bind_result_to_cmd(&object([
+            ("action", Value::String("set_line".into())),
+            ("text", Value::String("new line".into())),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            cmd,
+            Cmd::Replace(Movement::WholeBuffer, Some("new line".into()))
+        );
+    }
+
+    #[test]
+    fn bind_result_set_line_missing_text_errors() {
+        let err = bind_result_to_cmd(&object([("action", Value::String("set_line".into()))]))
+            .unwrap_err();
+        assert!(
+            err.message
+                .contains("set_line action requires 'text' field")
+        );
+    }
+
+    #[test]
+    fn bind_result_set_line_wrong_text_type_errors() {
+        let err = bind_result_to_cmd(&object([
+            ("action", Value::String("set_line".into())),
+            ("text", Value::Int(1)),
+        ]))
+        .unwrap_err();
+        assert!(err.message.contains("set_line text must be String"));
+    }
+
+    #[test]
+    fn bind_context_includes_history() {
+        let history = vec!["cmd1".to_string(), "cmd2".to_string()];
+        let ctx = bind_context("ctrl-r", "current", 3, &history);
+        let obj = match ctx {
+            Value::Object(obj) => obj,
+            _ => panic!("expected Object"),
+        };
+        let obj = obj.borrow();
+
+        assert_eq!(obj.get("key"), Some(&Value::String("ctrl-r".into())));
+        assert_eq!(obj.get("line"), Some(&Value::String("current".into())));
+        assert_eq!(obj.get("cursor"), Some(&Value::Int(3)));
+        assert!(matches!(obj.get("cwd"), Some(Value::String(_))));
+
+        let history_val = obj.get("history").expect("history field missing");
+        match history_val {
+            Value::Array(arr) => {
+                let arr = arr.borrow();
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], Value::String("cmd1".into()));
+                assert_eq!(arr[1], Value::String("cmd2".into()));
+            }
+            _ => panic!("history must be Array"),
+        }
+    }
+
+    #[test]
+    fn bind_callback_can_read_history_and_set_line() {
+        let mut s = state();
+        s.command_history = vec!["old".into(), "new".into()];
+        register(
+            r#"
+bind("ctrl-r", (ctx) => {
+    return { action: "set_line", text: ctx.history[1] };
+})
+"#,
+            &s,
+        );
+
+        let cmd = invoke_bind_callback("ctrl-r", "ignored", 0, &s).unwrap();
+        assert_eq!(
+            cmd,
+            Some(Cmd::Replace(Movement::WholeBuffer, Some("new".into())))
+        );
+    }
+
+    // ── resolve_prompt error fallback ──────────────────────────────────
+
+    #[test]
+    fn resolve_prompt_returns_none_without_handler() {
+        let s = state();
+        let result = resolve_prompt(&s).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_prompt_falls_back_on_non_string_return() {
+        let s = state();
+        register(r#"prompt((ctx) => { return 1; })"#, &s);
+
+        let result = resolve_prompt(&s).unwrap();
+        assert!(result.is_none());
+        assert!(
+            s.extensions
+                .borrow()
+                .prompt_seen_errors
+                .contains("prompt handler must return String, got Int")
+        );
+    }
+
+    // ── resolve_completion error fallback ──────────────────────────────
+
+    #[test]
+    fn resolve_completion_returns_none_without_handler() {
+        let s = state();
+        let result = resolve_completion(&s, "git", "", "", vec![], 0).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_completion_returns_empty_on_non_array_result() {
+        let s = state();
+        register(r#"complete("git", (ctx) => { return 1; })"#, &s);
+
+        let result = resolve_completion(&s, "git", "git", "git", vec!["git".into()], 0).unwrap();
+        assert!(result.is_some());
+        assert!(result.unwrap().is_empty());
+        assert!(
+            s.extensions
+                .borrow()
+                .completion_seen_errors
+                .get("git")
+                .is_some_and(|seen| seen.contains("ecscript runtime error at 1:1: complete handler must return Array<Object>, got Int\n 1 | \n   | ^"))
+        );
+    }
+
+    // ── completion_items_from_value malformed item resilience ──────────
+
+    #[test]
+    fn completion_items_missing_value_field_is_skipped() {
+        // Array with one good item and one missing value field.
+        let items = Value::Array(std::rc::Rc::new(std::cell::RefCell::new(vec![
+            object([("value", Value::String("ok".into()))]),
+            object([]), // missing "value"
+        ])));
+        let (result, warnings) = completion_items_from_value(items).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].value, "ok");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn completion_items_wrong_type_fields_are_skipped() {
+        let items = Value::Array(std::rc::Rc::new(std::cell::RefCell::new(vec![
+            object([("value", Value::String("ok".into()))]),
+            object([("value", Value::Int(1))]), // wrong type for "value"
+        ])));
+        let (result, warnings) = completion_items_from_value(items).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].value, "ok");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn completion_items_non_object_item_is_skipped() {
+        let items = Value::Array(std::rc::Rc::new(std::cell::RefCell::new(vec![
+            object([("value", Value::String("ok".into()))]),
+            Value::Int(42), // not an Object at all
+        ])));
+        let (result, warnings) = completion_items_from_value(items).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].value, "ok");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn completion_items_non_array_top_level_still_errors() {
+        // Non-Array return at top level is still an error.
+        let result = completion_items_from_value(Value::Int(42));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("must return Array"));
+    }
+
+    // ── after_cd reentry guard ─────────────────────────────────────────
+
+    #[test]
+    fn after_cd_reentry_guard_prevents_recursion() {
+        let _guard = crate::test_support::env_lock().lock().unwrap();
+        let old_pwd = std::env::var_os("PWD");
+        let old_oldpwd = std::env::var_os("OLDPWD");
+        let old_cwd = std::env::current_dir().unwrap();
+        let first = std::env::temp_dir().join(format!("ecsh-ext-first-{}", std::process::id()));
+        let second = std::env::temp_dir().join(format!("ecsh-ext-second-{}", std::process::id()));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+
+        let s = state();
+        register(
+            &format!(
+                "hook(\"after_cd\", (ctx) => {{ if ctx.cwd == {:?} {{ set_cwd({:?}); }} }})",
+                first.display().to_string(),
+                second.display().to_string()
+            ),
+            &s,
+        );
+
+        let result = crate::builtin::set_current_dir_with_hooks(&first.display().to_string(), &s);
+        assert!(result.is_ok());
+        assert_eq!(std::env::current_dir().unwrap(), second);
+
+        let new_pwd = std::env::var("PWD").unwrap();
+        let new_oldpwd = std::env::var("OLDPWD").unwrap();
+        assert_eq!(new_pwd, second.display().to_string());
+        assert_eq!(new_oldpwd, first.display().to_string());
+
+        std::env::set_current_dir(&old_cwd).unwrap();
+        match old_pwd {
+            Some(v) => unsafe { std::env::set_var("PWD", v) },
+            None => unsafe { std::env::remove_var("PWD") },
+        }
+        match old_oldpwd {
+            Some(v) => unsafe { std::env::set_var("OLDPWD", v) },
+            None => unsafe { std::env::remove_var("OLDPWD") },
+        }
+        let _ = std::fs::remove_dir_all(first);
+        let _ = std::fs::remove_dir_all(second);
+    }
+
+    #[test]
+    fn set_cwd_with_normal_after_cd_triggers_hook_once() {
+        let _guard = crate::test_support::env_lock().lock().unwrap();
+        let old_pwd = std::env::var_os("PWD");
+        let old_oldpwd = std::env::var_os("OLDPWD");
+        let old_cwd = std::env::current_dir().unwrap();
+        let dir = std::env::temp_dir().join(format!("ecsh-ext-once-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let s = state();
+        register(r#"hook("after_cd", (ctx) => {})"#, &s);
+
+        let result = crate::builtin::set_current_dir_with_hooks(&dir.display().to_string(), &s);
+        assert!(result.is_ok());
+        assert_eq!(std::env::var("PWD").unwrap(), dir.display().to_string());
+        assert_eq!(
+            std::env::var("OLDPWD").unwrap(),
+            old_cwd.display().to_string()
+        );
+
+        assert!(!s.extensions.borrow().after_cd_reentry);
+
+        std::env::set_current_dir(&old_cwd).unwrap();
+        match old_pwd {
+            Some(v) => unsafe { std::env::set_var("PWD", v) },
+            None => unsafe { std::env::remove_var("PWD") },
+        }
+        match old_oldpwd {
+            Some(v) => unsafe { std::env::set_var("OLDPWD", v) },
+            None => unsafe { std::env::remove_var("OLDPWD") },
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

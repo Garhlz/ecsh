@@ -71,16 +71,75 @@ impl ConditionalEventHandler for BindDispatcher {
         BIND_SHELL_STATE.with(|slot| {
             let state = slot.borrow();
             let state = state.as_ref()?;
-            match invoke_bind_callback(&self.key, &line, cursor, state) {
+            match with_cooked_tty(|| invoke_bind_callback(&self.key, &line, cursor, state)) {
                 Ok(Some(cmd)) => Some(cmd),
-                Ok(None) => None,
+                // A registered bind callback that returns nil has handled the key
+                // and should suppress rustyline's built-in fallback binding.
+                Ok(None) => Some(Cmd::Noop),
                 Err(err) => {
                     print_error(err.format_with_source(""));
-                    None
+                    Some(Cmd::Noop)
                 }
             }
         })
     }
+}
+
+#[cfg(unix)]
+fn with_cooked_tty<T>(
+    f: impl FnOnce() -> Result<T, crate::ecscript::RuntimeError>,
+) -> Result<T, crate::ecscript::RuntimeError> {
+    use nix::sys::termios::{
+        self, ControlFlags, InputFlags, LocalFlags, SetArg, SpecialCharacterIndices as SCI,
+    };
+
+    let stdin = std::io::stdin();
+    let original = termios::tcgetattr(&stdin).map_err(|err| {
+        crate::ecscript::RuntimeError::new(
+            0,
+            crate::ecscript::RuntimeErrorKind::IoError,
+            format!("failed to read tty mode: {err}"),
+        )
+    })?;
+
+    let mut cooked = original.clone();
+    cooked.input_flags |= InputFlags::BRKINT | InputFlags::ICRNL | InputFlags::IXON;
+    cooked.control_flags |= ControlFlags::CS8;
+    cooked.local_flags |=
+        LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::IEXTEN | LocalFlags::ISIG;
+    cooked.control_chars[SCI::VMIN as usize] = 1;
+    cooked.control_chars[SCI::VTIME as usize] = 0;
+
+    termios::tcsetattr(&stdin, SetArg::TCSADRAIN, &cooked).map_err(|err| {
+        crate::ecscript::RuntimeError::new(
+            0,
+            crate::ecscript::RuntimeErrorKind::IoError,
+            format!("failed to switch tty to cooked mode: {err}"),
+        )
+    })?;
+
+    let result = f();
+
+    let restore_result = termios::tcsetattr(&stdin, SetArg::TCSADRAIN, &original).map_err(|err| {
+        crate::ecscript::RuntimeError::new(
+            0,
+            crate::ecscript::RuntimeErrorKind::IoError,
+            format!("failed to restore tty raw mode: {err}"),
+        )
+    });
+
+    match (result, restore_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(err), Ok(())) => Err(err),
+        (_, Err(err)) => Err(err),
+    }
+}
+
+#[cfg(not(unix))]
+fn with_cooked_tty<T>(
+    f: impl FnOnce() -> Result<T, crate::ecscript::RuntimeError>,
+) -> Result<T, crate::ecscript::RuntimeError> {
+    f()
 }
 
 pub fn sync_editor_shell_state(editor: &mut EcshEditor, state: &ShellState) {
@@ -162,22 +221,29 @@ impl EcshHelper {
         let command = argv.first()?.clone();
 
         match resolve_completion(state, &command, line, current, argv, arg_index) {
-            Ok(Some(items)) => Some((
-                word_start,
-                items
-                    .into_iter()
-                    .map(|item| {
-                        let display = item.display.unwrap_or_else(|| item.value.clone());
-                        Pair {
-                            display,
-                            replacement: item.value,
-                        }
-                    })
-                    .collect(),
-            )),
+            Ok(Some(items)) => {
+                if items.is_empty() {
+                    // Scripted handler ran but produced no candidates; fall through to
+                    // non-scripted completion so that builtin/file candidates can appear.
+                    return None;
+                }
+                Some((
+                    word_start,
+                    items
+                        .into_iter()
+                        .map(|item| {
+                            let display = item.display.unwrap_or_else(|| item.value.clone());
+                            Pair {
+                                display,
+                                replacement: item.value,
+                            }
+                        })
+                        .collect(),
+                ))
+            }
             Ok(None) => None,
-            Err(err) => {
-                print_error(err.format_with_source(""));
+            Err(_err) => {
+                // resolve_completion already handles error printing internally
                 None
             }
         }

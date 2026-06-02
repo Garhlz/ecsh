@@ -487,6 +487,34 @@ fn smoke_source_can_override_prompt() {
 }
 
 #[test]
+fn smoke_prompt_invalid_return_falls_back_once() {
+    let path = temp_path("stage10-prompt-invalid.ecs");
+    std::fs::write(&path, "prompt((ctx) => { return 1; })\n")
+        .expect("failed to write invalid prompt script");
+
+    let output = run_ecsh_output(&format!(
+        "source {}\nstatus\nstatus\nexit\n",
+        path.display()
+    ));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("[ecsh]"),
+        "stdout should contain default prompt, got:\n{stdout}"
+    );
+    assert_eq!(
+        stderr
+            .matches("prompt handler must return String, got Int")
+            .count(),
+        1,
+        "stderr was:\n{stderr}"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn smoke_source_runs_after_cd_hook() {
     let path = temp_path("stage10-after-cd.ecs");
     std::fs::write(
@@ -502,6 +530,53 @@ fn smoke_source_runs_after_cd_hook() {
     );
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn smoke_after_cd_reentry_updates_cwd_without_recursive_hook() {
+    let first = temp_path("stage10-after-cd-first");
+    let second = temp_path("stage10-after-cd-second");
+    std::fs::create_dir_all(&first).expect("failed to create first dir");
+    std::fs::create_dir_all(&second).expect("failed to create second dir");
+
+    let path = temp_path("stage10-after-cd-reentry.ecs");
+    std::fs::write(
+        &path,
+        format!(
+            "hook(\"after_cd\", (ctx) => {{\n\
+                 print(\"cd:\")\n\
+                 println(ctx.cwd)\n\
+                 if ctx.cwd == {:?} {{\n\
+                     set_cwd({:?})\n\
+                 }}\n\
+             }})\n",
+            first.display().to_string(),
+            second.display().to_string(),
+        ),
+    )
+    .expect("failed to write reentry after_cd hook script");
+
+    let output = run_ecsh(&format!(
+        "source {}\ncd {}\npwd\nexit\n",
+        path.display(),
+        first.display()
+    ));
+    let hook_lines = output
+        .lines()
+        .filter(|line| line.starts_with("cd:"))
+        .collect::<Vec<_>>();
+    assert_eq!(hook_lines.len(), 1, "output was:\n{output}");
+    assert_eq!(hook_lines[0], format!("cd:{}", first.display()));
+    assert!(
+        output
+            .lines()
+            .any(|line| line == second.display().to_string()),
+        "output was:\n{output}"
+    );
+
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_dir_all(first);
+    let _ = std::fs::remove_dir_all(second);
 }
 
 #[test]
@@ -522,6 +597,39 @@ fn smoke_source_runs_preexec_and_postexec_hooks() {
     assert!(
         output.lines().any(|line| line == "post:0"),
         "output was:\n{output}"
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn smoke_postexec_runs_on_parse_error_without_preexec() {
+    let path = temp_path("stage10-postexec-parse-error.ecs");
+    std::fs::write(
+        &path,
+        "hook(\"preexec\", (ctx) => { println(\"preexec-fired\"); })\n\
+         hook(\"postexec\", (ctx) => { print(\"post_status:\"); println(ctx.status); })\n",
+    )
+    .expect("failed to write pre/post parse error hook script");
+
+    let output = run_ecsh_output(&format!(
+        "source {}\necho \"unterminated\nexit\n",
+        path.display()
+    ));
+    let stdout = visible_output(&String::from_utf8_lossy(&output.stdout));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stdout.lines().any(|line| line == "preexec-fired"),
+        "stdout was:\n{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "post_status:1"),
+        "stdout was:\n{stdout}\nstderr was:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("shell parse error"),
+        "stderr was:\n{stderr}"
     );
 
     let _ = std::fs::remove_file(path);
@@ -800,16 +908,16 @@ fn smoke_zoxide_adapter_registers_commands() {
 #[test]
 fn smoke_bind_examples_can_be_sourced() {
     let output = run_ecsh_output(&format!(
-        "use {} as bind_accept_hint\n\
-         use {} as bind_insert_template\n\
+        "use {} as bind_insert_template\n\
          use {} as bind_history_search\n\
-         bind_accept_hint.init()\n\
+         use {} as fzf_history\n\
          bind_insert_template.init()\n\
          bind_history_search.init()\n\
+         fzf_history.init()\n\
          exit\n",
-        example_path("bind_accept_hint.ecs").display(),
         example_path("bind_insert_template.ecs").display(),
         example_path("bind_history_search.ecs").display(),
+        example_path("fzf_history.ecs").display(),
     ));
 
     assert!(
@@ -823,6 +931,42 @@ fn smoke_bind_examples_can_be_sourced() {
         "stderr was:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn smoke_reload_rc_reloads_module_based_rc_without_duplicate_use_errors() {
+    let home = std::env::temp_dir().join(format!("ecsh_reload_rc_home_{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("failed to create rc home");
+
+    let module_path = home.join("rcprobe.ecs");
+    std::fs::write(
+        &module_path,
+        "pub func init() {\n    register_command(\"rcprobe\", (ctx) => {\n        println(\"rcprobe\");\n    });\n}\n",
+    )
+    .expect("failed to write rc module");
+    std::fs::write(
+        home.join(".ecshrc"),
+        format!("use {} as rcprobe\nrcprobe.init()\n", module_path.display()),
+    )
+    .expect("failed to write rc file");
+
+    let output = run_ecsh_output_with_env(
+        "reload_rc\nrcprobe\nreload_rc\nrcprobe\nexit\n",
+        &[("HOME", home.to_str().unwrap())],
+    );
+    let stdout = visible_output(&String::from_utf8_lossy(&output.stdout));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        stdout.lines().filter(|line| *line == "rcprobe").count(),
+        2,
+        "stdout was:\n{stdout}\nstderr was:\n{stderr}"
+    );
+    assert!(!stderr.contains("already defined"), "stderr was:\n{stderr}");
+
+    let _ = std::fs::remove_file(home.join(".ecshrc"));
+    let _ = std::fs::remove_file(module_path);
+    let _ = std::fs::remove_dir(home);
 }
 
 #[test]

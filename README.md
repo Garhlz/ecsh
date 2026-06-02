@@ -43,10 +43,10 @@ cargo test
 - shell 交互与体验：Tab 补全、alias / unalias、`trap EXIT|INT`、`type` / `which` / `history`
 - shell 运行时展开：`$VAR`、`${expr}`、`${env("VAR")}`、`$(cmd)`、`${...arr}`
 - `ecscript` stage 1-6：表达式、语句、数组/对象、控制流、函数/闭包、独立解释器入口、源码定位错误格式化、`env()` / `set_env()` / `unset_env()` / `range()`
-- 阶段 7：`ecsh` 顶层脚本模式、`ecsh file.ecs`、`source` / `.`、`.ecshrc` 已接通
+- 阶段 7：`ecsh` 顶层脚本模式、`ecsh file.ecs`、`source` / `.`、`.ecshrc`、`reload_rc` 已接通
 - 阶段 8：`cmd{ ... }` 命令字面量、`command(...)` builder、`run` / `capture` / `text` / `lines`、`stdin` / `read_lines` / `write_lines`、`from_json` / `to_json`、`with_env` / `with_cwd` 已接通；单命令纯输出 builtin 也可走命令桥
 - 阶段 9（进行中）：`|>` 值流语法糖、`map` / `filter` / `reduce` / `each` / `any` / `all` / `find` / `join`、`slice`
-- 阶段 10（进行中）：文件级模块 MVP 已接通 `pub let` / `pub func` 与 `use ./foo.ecs as foo`，最小 `hook(...)` / `prompt(...)` / `complete(...)` / `bind(...)` / `register_command(...)` 已接通
+- 阶段 10（已收口）：文件级模块 MVP 已接通 `pub let` / `pub func` 与 `use ./foo.ecs as foo`，`hook(...)` / `prompt(...)` / `complete(...)` / `bind(...)` / `register_command(...)` 已收口错误语义与生命周期加固
 - 阶段 7.5：shell 诊断与交互收口已完成，当前已具备结构化 `ParseError`、续行读取和 shell parse 错误定位输出
 
 当前仍未完成：

@@ -52,6 +52,7 @@
 - `ecscript` 已经可以独立运行：REPL、文件执行、`-e`、stdin 都可用
 - `ecsh` 已经会在运行时调用 `ecscript` 表达式求值，支撑 `${expr}` 和 `${...arr}`
 - `ecsh` 顶层输入已经接入“shell 模式 / script 模式”分派，`.ecs` 文件、`source` / `.`、`.ecshrc` 都复用同一套 ecscript 文件执行入口
+- 交互 shell 提供 `reload_rc`，用于在当前 session 中以全新脚本环境、扩展注册表和模块缓存重载 `~/.ecshrc`
 - `ecscript` 现在也可以通过 `cmd{ ... }` 结构化命令字面量进入 shell 命令桥，再由 `run` / `capture` / `text` / `lines` 消费执行
 - `ecscript` 现在支持 `|>` 值流语法糖：`x |> f(a, b)` 等价于 `f(x, a, b)`
 - 命令桥当前也支持单命令纯输出 shell builtin；pipeline 内 builtin 仍未接通
@@ -738,7 +739,7 @@ slice(range(0, 5), 1, 4) // => [1, 2, 3]
 | `all(arr, func)` | 全称量词 | 回调必须返回 `Bool` |
 | `find(arr, func)` | 返回首个匹配元素 | 没有匹配时返回 `nil` |
 | `join(arr, sep)` | 按 display 文本连接数组元素 | `sep` 必须是 `String` |
-| `bind(key, func)` | 注册交互式按键绑定 | 回调接收 `{ key, line, cursor, cwd }` |
+| `bind(key, func)` | 注册交互式按键绑定 | 回调接收 `{ key, line, cursor, cwd, history }` |
 | `register_command(name, func)` | 注册 ecsh 顶层命令 | 回调接收 `{ name, args, cwd }` |
 
 ### 9.6 脚本命令
@@ -1038,3 +1039,76 @@ ecscript parse error at 3:17: expected ')'
 - shell 集成
 - 把源码格式化错误默认接入解释器入口
 - 字节码 VM / 后端演化
+
+---
+
+## 15. Shell 扩展系统（ecsh 集成）
+
+以下 builtin 仅在 `ecsh` 交互环境下可用；独立 `ecscript` 解释器中调用会报 `... is not available in this context`。
+
+### 15.1 `hook(name, func)`
+
+注册一个钩子回调。支持的钩子名称：
+
+| 名称 | 触发时机 |
+|------|---------|
+| `"before_prompt"` | 读取用户输入之前 |
+| `"after_cd"` | 工作目录变更后（含 `cd` 命令和 `set_cwd()`） |
+| `"preexec"` | 命令解析成功、即将执行之前 |
+| `"postexec"` | 命令执行完成（含解析错误、执行失败、`exit`）之后 |
+
+钩子生命周期细节：
+
+- **`preexec`**：仅在 shell 成功解析并即将执行一条命令时触发。解析错误（如语法错误、未闭合引号）不会触发 `preexec`。
+- **`postexec`**：在提交的命令达到最终结果后触发，包括解析错误和执行失败的情况。`exit` 也会触发 `postexec`（在 shell 退出之前）。
+- **`after_cd`**：当 `set_cwd()` 或 `cd` 命令改变当前目录时触发。如果在 `after_cd` 钩子内部再次调用 `set_cwd()`，目录和环境变量（`PWD`/`OLDPWD`）仍会更新，但不会递归触发 `after_cd` 钩子。
+- **错误处理**：钩子回调中的运行时错误按 best-effort 处理：打印错误信息，跳过该 handler，继续执行后续 handler。
+
+### 15.2 `prompt(func)`
+
+注册一个提示符生成函数。
+
+- 入参 ctx 包含 `cwd`、`shell`、`status`、`jobs`、`shlvl`、`terminal_width`、`duration_ms`
+- 必须返回 String，否则打印错误并回退到默认 prompt
+- 回调中发生运行时错误：打印错误（同类错误同会话只打印一次），回退到默认 prompt
+- 只能注册一个 prompt handler；多次调用会覆盖
+
+### 15.3 `complete(name, func)`
+
+为命令 `name` 注册一个补全 handler。
+
+- 入参 ctx 包含 `line`、`word`、`argv`、`arg_index`、`cwd`
+- 必须返回 `Array<Object>`，每个 Object 必须有 String 字段 `value`，可选 `display`、`desc`、`kind`
+- 返回非 Array 类型：打印错误（同命令同错误同会话只打印一次），回退到无脚本候选
+- 数组中单个 item 格式错误（缺失 `value`、类型不对、非 Object）：打印错误并跳过该 item，继续处理其余 item
+- 数组中所有 item 都被跳过时，回退到无脚本候选（不会 panic）
+
+### 15.4 `register_command(name, func)`
+
+将一个 ecscript shell 命令注册为交互 shell 命令。
+
+- 入参 ctx 包含 `name`、`args`、`cwd`
+- 返回 `nil` 表示成功（退出码 0），返回非负 `Int` 表示退出码，返回其他类型打印错误并返回失败状态
+- 脚本命令不支持后台执行（`&`）、管道（`|`）、重定向（`<`/`>`/`>>`）
+- 可以在脚本命令内部调用 `set_cwd(path)` 来修改当前工作目录
+
+### 15.5 `set_cwd(path)`
+
+修改当前 shell 工作目录。
+
+- 内部调用 `std::env::set_current_dir`，并同步 `PWD` 和 `OLDPWD` 环境变量
+- 如果存在 `after_cd` 钩子且当前不在 `after_cd` 分派中，会触发钩子
+- 如果已经在 `after_cd` 钩子内部，不会递归触发钩子（reentry guard）
+
+### 15.6 `bind(key, func)`
+
+为按键序列注册回调。
+
+- 入参 ctx 包含 `key`、`line`、`cursor`、`cwd`、`history`
+  - `history` 是 `Array<String>`，包含启动时从 `~/.ecsh_history` 加载的历史以及当前会话新输入的命令（按时间从旧到新排列）
+- 返回 `nil` 表示不执行动作，返回 Object 包含 `action` 字段指定 rustyline 动作
+- 支持的动作：
+  - 无参数动作：`"accept"`、`"newline"`、`"complete"`、`"complete_hint"`、`"clear_screen"`、`"interrupt"`
+  - 历史动作：`"history_search_backward"`、`"history_search_forward"`、`"previous_history"`、`"next_history"`
+  - `"insert"`（需要 `text` 字段）：在光标处插入文本
+  - `"set_line"`（需要 `text` 字段）：用给定文本替换整个当前输入行
