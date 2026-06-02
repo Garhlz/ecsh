@@ -11,5 +11,6 @@ pub mod prompt;
 pub mod redirection;
 pub mod shell_error;
 pub mod signals;
+pub mod specs;
 pub mod test_support;
 pub mod types;

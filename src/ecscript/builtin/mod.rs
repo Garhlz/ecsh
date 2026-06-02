@@ -9,6 +9,7 @@ use crate::extensions::HookName;
 
 mod collections;
 mod command;
+mod introspection;
 mod io;
 mod json;
 mod support;
@@ -22,6 +23,7 @@ use command::{
     capture_command_builtin, command_builder_builtin, command_result_object, lines_from_command,
     run_builtin_command, text_from_command,
 };
+use introspection::{builtins_builtin, commands_builtin, extensions_builtin, help_builtin};
 use io::{format_print_args, write_stdout};
 use json::{from_json_value, to_json_value};
 use support::{expect_arity, expect_array, expect_function, expect_shell_state};
@@ -74,6 +76,10 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
         "set_cwd" => Some(Builtin::SetCwd),
         "trim" => Some(Builtin::Trim),
         "bind" => Some(Builtin::Bind),
+        "help" => Some(Builtin::Help),
+        "builtins" => Some(Builtin::Builtins),
+        "extensions" => Some(Builtin::Extensions),
+        "commands" => Some(Builtin::Commands),
         _ => None,
     }
 }
@@ -471,6 +477,10 @@ pub fn run_builtin(
                 .insert(key.clone(), Value::Function(func));
             Ok(Value::Nil)
         }
+        Builtin::Help => help_builtin(&args, span, &ctx),
+        Builtin::Builtins => builtins_builtin(&args, span, &ctx),
+        Builtin::Extensions => extensions_builtin(&args, span, &ctx),
+        Builtin::Commands => commands_builtin(&args, span, &ctx),
     }
 }
 

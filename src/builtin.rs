@@ -253,13 +253,33 @@ pub(crate) fn set_current_dir_with_hooks(dir: &str, state: &ShellState) -> Resul
     };
 
     if !already_running {
+        // Guard: reset reentry flag even if a hook callback panics, so
+        // after_cd hooks are not permanently disabled for the session.
+        struct ResetAfterCdReentry<'a>(&'a std::cell::RefCell<crate::extensions::ExtensionRegistry>);
+        impl Drop for ResetAfterCdReentry<'_> {
+            fn drop(&mut self) {
+                // Best-effort reset — if the RefCell is already borrowed
+                // mutably (e.g. due to a double panic), skip the reset
+                // rather than panicking a second time.
+                if let Ok(mut ext) = self.0.try_borrow_mut() {
+                    ext.after_cd_reentry = false;
+                }
+            }
+        }
+
+        let _guard = ResetAfterCdReentry(&state.extensions);
         run_hooks(HookName::AfterCd, after_cd_context(old_cwd, new_cwd), state);
-        state.extensions.borrow_mut().after_cd_reentry = false;
     }
 
     Ok(())
 }
 
+/// Update OLDPWD / PWD environment variables after a directory change.
+///
+/// # Safety
+///
+/// `std::env::set_var` is unsafe in Rust because it can cause data races
+/// in multithreaded programs.  ecsh is single-threaded, so this is sound.
 fn sync_pwd_env(old_cwd: &str, new_cwd: &str) {
     unsafe {
         std::env::set_var("OLDPWD", old_cwd);
@@ -628,10 +648,19 @@ fn run_rc_file_with_fresh_runtime(
     path: &Path,
     state: &mut ShellState,
 ) -> Result<(), crate::ecscript::ScriptFileError> {
+    // Build a minimal staged state — start with fresh script-scoped
+    // fields so that entries removed from .ecshrc do not survive the
+    // reload.  Only clone session-global fields that the rc file should
+    // inherit; skip large collections (jobs, command_history) that are
+    // never consumed by rc evaluation.
     let mut staged = state.clone();
     staged.script_env = Rc::new(Environment::new());
+    staged.aliases.clear();
+    staged.traps.clear();
     staged.extensions = new_extensions();
     staged.module_loader = Some(Rc::new(ModuleLoader::new()));
+    staged.jobs.clear();
+    staged.command_history.clear();
 
     run_script_file_with_ctx(path, &staged.script_env, &staged, None)?;
 
@@ -749,6 +778,7 @@ mod tests {
 
     #[test]
     fn reload_rc_keeps_old_script_env_on_failure() {
+        let _guard = crate::test_support::env_lock().lock().unwrap();
         let home = std::env::temp_dir().join(format!("ecsh-reload-rc-fail-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join(".ecshrc"), "let replacement = \n").unwrap();

@@ -213,8 +213,11 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - `postexec`：命令到达最终结果后触发，包含解析错误和执行失败场景
 - `prompt` 错误或非 String 返回：打印错误（同类错误同会话只打印一次），回退到默认 prompt
 - `complete` 错误或无效候选：打印错误（同命令同错误同会话只打印一次），回退到无脚本候选；非法 item 跳过不 panic
-- `after_cd` 钩子内调用 `set_cwd()`：目录和 `PWD`/`OLDPWD` 正常更新，但不递归触发 `after_cd`（reentry guard）
+- `after_cd` 钩子内调用 `set_cwd()`：目录和 `PWD`/`OLDPWD` 正常更新，但不递归触发 `after_cd`（reentry guard + Drop 守卫确保 panic 时也复位）
+- `bind` 回调的 cooked tty 切换：通过 Drop 守卫确保回调 panic 时终端属性仍然恢复
+- `reload_rc` 现在以 rc 文件为唯一真相源启动 staged 状态（别名/陷阱/作业/历史均清除后重载，防止已删除配置残留）
 - `register_command` 保持原有语义：handler 错误打印并返回失败；组合限制不变（禁止后台/管道/重定向）
+- `commands()` / `help()` 现在共享同一份 specs 数据源，shell builtins 优先从 specs 表查询再补充运行时命名表
 
 当前边界：
 

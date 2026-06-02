@@ -1025,51 +1025,138 @@ complete("git", (ctx) => {
 
 ### 阶段 11：调用元信息与外部命令适配层
 
-**目标**：借鉴 Nushell extern 和 fish completion，把外部命令从“PATH 里的黑盒程序”逐步纳入 `ecsh` 的 help、completion 和脚本工具链；同时在不引入完整类型系统的前提下，为 builtin、命令桥和扩展点补上一层统一的调用元信息与参数 shape。
+**目标**：把阶段 10 已接通的 builtin、命令桥和 shell 扩展点，从“只能读代码和文档猜接口”收口成统一的可查询元信息层；先解决 help / introspection / hover 的数据源问题，再进入更通用的外部命令适配层。
 
-**本阶段要做的事**
+这一阶段的主题不是继续堆新能力，而是先让现有能力变得：
 
-- [ ] 设计最小 `Shape` / `CallableMeta` 模型：
-      名称、参数个数、参数名、参数 shape、返回 shape、summary
+- 可描述
+- 可查询
+- 可复用
+- 可被编辑器消费
+
+#### 11.1 元信息核心层
+
+- [ ] 设计统一 `Spec` / `CallableSpec` 模型，而不是只做零散 `BuiltinSpec`
+- [ ] 第一版字段先收紧到：
+      `name`、`kind`、`category`、`signature`、`summary`、`details`、`examples`
+- [ ] 暂不引入完整类型系统；`arity` / 参数名 /签名文本先以最小可维护形式表达
 - [ ] 先只做内部元数据，不新增语言表面语法
-- [ ] 先覆盖现有 ecscript builtin：
-      `env`、`range`、`len`、`to_json`、`keys`、`values`、`push`、`pop`、`insert`、`remove`、`print`、`println`
-- [ ] 用统一元数据生成更清楚的 arity/type mismatch 错误，而不是每个 builtin 各自手写文案
-- [ ] 为命令桥预留 shape：
-      `run(cmd)`、`capture(cmd)`、`text(cmd)`、`lines(cmd)`、`with_env(cmd, obj)`、`with_cwd(cmd, path)`
-- [ ] 为 shell 扩展点预留 shape：
-      `hook(name, func)`、`complete(name, func)`、`prompt(func)`、`bind(key, func)`
-- [ ] 设计 `external(...)` / `extern(...)` 元数据对象
-- [ ] 支持为外部命令声明 subcommand、flag、参数补全和简短 help
-- [ ] 将 extern 元数据接入 `type` / `which` / `help` / completion
-- [ ] 为常见工具写 adapter 示例：`git`、`cargo`、`zoxide`、`direnv`
-- [ ] 支持按模块加载 extern 描述，避免硬编码进 shell 本体
+- [ ] spec 类型至少覆盖三类：
+      builtin、shell extension、shell builtin
 
-**推荐的 shape 粒度**
+第一批必须覆盖：
 
-- [ ] 值种类级：`Int`、`Float`、`Bool`、`String`、`Nil`、`Array`、`Object`、`Function`、`Command`、`CommandResult`
-- [ ] 结构约束级：`Array<String>`、`CompletionContext`、`CompletionItem`、`HookContext`
-- [ ] 暂不做接口 / trait / protocol；先不引入行为类型系统
+- [ ] 语言 builtin：
+      `env`、`set_env`、`unset_env`、`cwd`、`join_path`、`range`、`trim`、
+      `len`、`keys`、`values`、`push`、`pop`、`insert`、`remove`、
+      `print`、`println`、`to_json`、`from_json`、
+      `stdin`、`read_lines`、`write_lines`、
+      `command`、`run`、`capture`、`text`、`lines`、`with_env`、`with_cwd`、
+      `map`、`filter`、`reduce`、`each`、`any`、`all`、`find`、`join`
+- [ ] shell 扩展点：
+      `hook`、`prompt`、`complete`、`bind`、`register_command`、`set_cwd`
+- [ ] shell builtin：
+      `cd`、`pwd`、`history`、`type`、`which`、`source`、`reload_rc`
 
-**示例形态**
+#### 11.2 Help / Introspection
+
+- [ ] 基于统一 spec 实现 `help()`
+- [ ] 支持 `help("name")`
+- [ ] 支持 `builtins()`
+- [ ] 支持 `extensions()`
+- [ ] 支持 `commands()`
+- [ ] `help("map")` / `help("prompt")` 输出稳定的签名 + summary + details + examples
+- [ ] `help("unknown")` 返回明确错误，而不是静默失败
+
+建议语义：
+
+- [ ] `help()`：按类别列出可查询条目
+- [ ] `builtins()`：列出语言 builtin 名称
+- [ ] `extensions()`：列出 shell 扩展点名称
+- [ ] `commands()`：列出当前 shell 中可见命令及其来源
+
+`commands()` 推荐返回结构化对象，而不是只打印文本：
 
 ```sh
-pub let git = external({
-    name: "git",
-    help: "distributed version control",
-    complete: (ctx) => {
-        ...
-    }
-})
+[
+  { name: "cd", kind: "shell_builtin" },
+  { name: "map", kind: "builtin" },
+  { name: "z", kind: "registered_command" },
+  { name: "ll", kind: "alias" }
+]
 ```
+
+#### 11.3 命令来源与解析可见性
+
+- [ ] 增强 `type` / `which` 的来源区分
+- [ ] 至少区分：
+      alias、shell builtin、ecscript builtin、registered command、external command
+- [ ] 明确 `help(...)` 与 `type` / `which` 的职责边界：
+      `help(...)` 解释接口语义，`type` / `which` 解释名字解析来源
+
+#### 11.4 VS Code Hover 复用
+
+- [ ] VS Code hover 改为优先显示 spec 文档，而不是只显示 AST/debug 信息
+- [ ] 第一版只支持静态 hover：
+      builtin、shell extension、命令桥相关 builtin
+- [ ] hover 至少包含：
+      signature、summary、短 example
+- [ ] 暂不做类型推导、跳转定义、symbol resolution
+
+#### 11.5 标准示例包整理
+
+- [ ] 把现有 adapter / bind 示例整理到更清晰的目录
+- [ ] 推荐目录：
+
+```text
+examples/ecscript/plugins/
+  starship.ecs
+  zoxide.ecs
+  git_complete.ecs
+  fzf_history.ecs
+  default_bindings.ecs
+```
+
+- [ ] 提供一份推荐 `.ecshrc` 片段，能直接组合：
+      prompt、目录跳转、git 补全、fzf 历史
+- [ ] 示例目录整理属于阶段 11 后半段，不应阻塞前面的 spec / help / hover 主线
+
+#### 11.6 外部命令适配层（收敛版）
+
+这一部分只做“最小闭环”，不要一上来做大而全的 extern 协议。
+
+- [ ] 先不要引入完整 `external(...)` / `extern(...)` 表面语法
+- [ ] 先允许按模块注册外部命令补全 / help provider
+- [ ] 先选 1 到 2 个代表性命令做通路：
+      `git`、`docker` 或 `cargo`
+- [ ] 接通：
+      按命令名分发、补全 provider、help/provider 元信息、错误降级
+- [ ] adapter 仍然只是模块能力，不改变 `execvp` 的基础执行模型
+
+#### 暂不纳入本阶段
+
+- [ ] 完整 `Shape` / 行为类型系统
+- [ ] protocol / trait / interface
+- [ ] `ecsh doctor`
+- [ ] 大规模语言服务能力
+- [ ] 自动生成整份完整手册站点
+
+**推荐顺序**
+
+- [ ] 先做 11.1 元信息核心层
+- [ ] 再做 11.2 Help / Introspection
+- [ ] 然后做 11.3 `type` / `which` 来源增强
+- [ ] 再接 11.4 VS Code hover
+- [ ] 最后收 11.5 示例包整理和 11.6 最小外部命令适配
 
 **完成标准**
 
-- [ ] 现有 ecscript builtin 已经有统一的参数 shape 描述
-- [ ] 新增 API 不再需要散落的手写 usage/type error 文案
-- [ ] 外部命令可以拥有脚本定义的补全和 help 信息
-- [ ] adapter 仍然只是模块能力，不改变 `execvp` 的基础执行模型
-- [ ] 这套元数据能自然扩展到命令桥、completion 和 extern/adapter，而无需先引入完整类型系统
+- [ ] builtin / extension 的说明不再主要依赖散落文档维护
+- [ ] shell 内已经可以查询 `help()` / `help("name")`
+- [ ] shell 内已经可以查询 `builtins()` / `extensions()` / `commands()`
+- [ ] `type` / `which` 能稳定区分 alias / builtin / registered / external 来源
+- [ ] VS Code hover 已复用统一 spec，而不是额外维护一份散表
+- [ ] 示例插件目录已经整理，但它只是消费前面元信息和扩展系统，不单独发明新协议
 
 ### 阶段 12：Shell 语义补完
 

@@ -114,6 +114,10 @@ pub enum Builtin {
     SetCwd,
     Bind,
     Trim,
+    Help,
+    Builtins,
+    Extensions,
+    Commands,
 }
 
 impl Builtin {
@@ -162,6 +166,10 @@ impl Builtin {
             Builtin::SetCwd => "set_cwd",
             Builtin::Trim => "trim",
             Builtin::Bind => "bind",
+            Builtin::Help => "help",
+            Builtin::Builtins => "builtins",
+            Builtin::Extensions => "extensions",
+            Builtin::Commands => "commands",
         }
     }
 }

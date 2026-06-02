@@ -776,3 +776,236 @@ fn range_reversed_returns_empty() {
     };
     assert!(arr.borrow().is_empty());
 }
+
+// ── introspection builtins ──────────────────────────────────────────
+
+#[test]
+fn help_no_args_returns_overview() {
+    let result = run_builtin(Builtin::Help, vec![], 0, ctx()).unwrap();
+    let Value::String(text) = result else {
+        panic!("expected string");
+    };
+    assert!(text.contains("ecsh Help Overview"));
+    assert!(text.contains("Ecscript Builtins"));
+    assert!(text.contains("Shell Extensions"));
+    assert!(text.contains("Shell Builtins"));
+    // Should mention at least some known names
+    assert!(text.contains("map"));
+    assert!(text.contains("hook"));
+    assert!(text.contains("cd"));
+    assert!(text.contains("Use help(\"name\")"));
+}
+
+#[test]
+fn help_with_name_returns_formatted_help() {
+    let result = run_builtin(Builtin::Help, vec![Value::String("map".into())], 0, ctx()).unwrap();
+    let Value::String(text) = result else {
+        panic!("expected string");
+    };
+    assert!(text.contains("map (ecscript builtin)"));
+    assert!(text.contains("Signature:"));
+    assert!(text.contains("Summary:"));
+    assert!(text.contains("Details:"));
+    assert!(text.contains("Examples:"));
+    assert!(text.contains("map(array, func)"));
+}
+
+#[test]
+fn help_unknown_name_returns_error() {
+    let err = run_builtin(
+        Builtin::Help,
+        vec![Value::String("nonexistent_fn".into())],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::UndefinedVariable);
+    assert!(err.message.contains("nonexistent_fn"));
+}
+
+#[test]
+fn help_too_many_args_returns_arity_error() {
+    let err = run_builtin(
+        Builtin::Help,
+        vec![Value::String("a".into()), Value::String("b".into())],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::ArityMismatch);
+}
+
+#[test]
+fn help_wrong_arg_type_returns_type_error() {
+    let err = run_builtin(Builtin::Help, vec![Value::Int(42)], 0, ctx()).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+}
+
+#[test]
+fn builtins_returns_sorted_array_of_names() {
+    let result = run_builtin(Builtin::Builtins, vec![], 0, ctx()).unwrap();
+    let Value::Array(arr) = result else {
+        panic!("expected array");
+    };
+    let names: Vec<String> = arr
+        .borrow()
+        .iter()
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            _ => panic!("expected string"),
+        })
+        .collect();
+    // Must be sorted
+    assert!(
+        names.windows(2).all(|w| w[0] <= w[1]),
+        "names not sorted: {names:?}"
+    );
+    // Should include known builtins
+    assert!(names.contains(&"map".to_string()));
+    assert!(names.contains(&"range".to_string()));
+    assert!(names.contains(&"help".to_string()));
+    assert!(names.contains(&"builtins".to_string()));
+    // Must not include shell extensions or shell builtins
+    assert!(!names.contains(&"hook".to_string()));
+    assert!(!names.contains(&"cd".to_string()));
+    // Must be deduplicated
+    let mut unique = names.clone();
+    unique.dedup();
+    assert_eq!(names.len(), unique.len());
+}
+
+#[test]
+fn builtins_rejects_args() {
+    let err =
+        run_builtin(Builtin::Builtins, vec![Value::String("a".into())], 0, ctx()).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::ArityMismatch);
+}
+
+#[test]
+fn extensions_returns_sorted_array_of_names() {
+    let result = run_builtin(Builtin::Extensions, vec![], 0, ctx()).unwrap();
+    let Value::Array(arr) = result else {
+        panic!("expected array");
+    };
+    let names: Vec<String> = arr
+        .borrow()
+        .iter()
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            _ => panic!("expected string"),
+        })
+        .collect();
+    assert!(
+        names.windows(2).all(|w| w[0] <= w[1]),
+        "names not sorted: {names:?}"
+    );
+    assert!(names.contains(&"hook".to_string()));
+    assert!(names.contains(&"prompt".to_string()));
+    assert!(names.contains(&"bind".to_string()));
+    assert!(!names.contains(&"map".to_string()));
+    // Deduplicated
+    let mut unique = names.clone();
+    unique.dedup();
+    assert_eq!(names.len(), unique.len());
+}
+
+#[test]
+fn extensions_rejects_args() {
+    let err = run_builtin(
+        Builtin::Extensions,
+        vec![Value::String("a".into())],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::ArityMismatch);
+}
+
+#[test]
+fn commands_requires_shell_context() {
+    let err = run_builtin(Builtin::Commands, vec![], 0, ctx()).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::IoError);
+    assert!(err.message.contains("shell context"));
+}
+
+/// Extract `(name, kind)` tuple from a {name, kind} Value::Object.
+fn extract_name_kind(item: &Value) -> (String, String) {
+    let Value::Object(obj) = item else {
+        panic!("expected Object, got {:?}", item);
+    };
+    let obj_ref = obj.borrow();
+    let name = match obj_ref.get("name") {
+        Some(Value::String(s)) => s.clone(),
+        other => panic!("name must be String, got {:?}", other),
+    };
+    let kind = match obj_ref.get("kind") {
+        Some(Value::String(s)) => s.clone(),
+        other => panic!("kind must be String, got {:?}", other),
+    };
+    (name, kind)
+}
+
+#[test]
+fn commands_returns_objects_with_name_and_kind() {
+    let env = Environment::new();
+    let mut state = interactive_state();
+    state.aliases.insert("ll".into(), "ls -la".into());
+    state
+        .extensions
+        .borrow_mut()
+        .script_commands
+        .insert("mycmd".into(), no_op_func());
+
+    let result = run_builtin(Builtin::Commands, vec![], 0, shell_ctx(&state, &env)).unwrap();
+    let Value::Array(arr) = result else {
+        panic!("expected array");
+    };
+    let items = arr.borrow();
+    assert!(!items.is_empty(), "commands should not be empty");
+
+    for item in items.iter() {
+        let (name, kind) = extract_name_kind(item);
+        assert!(
+            kind == "builtin"
+                || kind == "shell_builtin"
+                || kind == "alias"
+                || kind == "registered_command",
+            "unexpected kind '{kind}' for '{name}'"
+        );
+    }
+
+    // Verify sorted deterministically by (name, kind)
+    let pairs: Vec<(String, String)> = items.iter().map(|item| extract_name_kind(item)).collect();
+    assert!(
+        pairs.windows(2).all(|w| w[0] <= w[1]),
+        "commands not sorted: {pairs:?}"
+    );
+
+    // Should include shell builtins
+    let has_shell_builtin = items.iter().any(|item| {
+        let (name, kind) = extract_name_kind(item);
+        name == "cd" && kind == "shell_builtin"
+    });
+    assert!(has_shell_builtin, "should include shell builtin 'cd'");
+
+    // Should include aliases
+    let has_alias = items.iter().any(|item| {
+        let (name, kind) = extract_name_kind(item);
+        name == "ll" && kind == "alias"
+    });
+    assert!(has_alias, "should include alias 'll'");
+
+    // Should include registered commands
+    let has_registered = items.iter().any(|item| {
+        let (name, kind) = extract_name_kind(item);
+        name == "mycmd" && kind == "registered_command"
+    });
+    assert!(has_registered, "should include registered_command 'mycmd'");
+}
+
+#[test]
+fn commands_rejects_args() {
+    let err =
+        run_builtin(Builtin::Commands, vec![Value::String("a".into())], 0, ctx()).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::ArityMismatch);
+}

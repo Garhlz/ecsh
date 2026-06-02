@@ -71,6 +71,11 @@ impl ConditionalEventHandler for BindDispatcher {
         BIND_SHELL_STATE.with(|slot| {
             let state = slot.borrow();
             let state = state.as_ref()?;
+            // If this key was removed from the config (e.g. via reload_rc),
+            // fall through so rustyline applies its built-in default binding.
+            if !state.extensions.borrow().key_bindings.contains_key(&self.key) {
+                return None;
+            }
             match with_cooked_tty(|| invoke_bind_callback(&self.key, &line, cursor, state)) {
                 Ok(Some(cmd)) => Some(cmd),
                 // A registered bind callback that returns nil has handled the key
@@ -118,21 +123,23 @@ fn with_cooked_tty<T>(
         )
     })?;
 
-    let result = f();
-
-    let restore_result = termios::tcsetattr(&stdin, SetArg::TCSADRAIN, &original).map_err(|err| {
-        crate::ecscript::RuntimeError::new(
-            0,
-            crate::ecscript::RuntimeErrorKind::IoError,
-            format!("failed to restore tty raw mode: {err}"),
-        )
-    });
-
-    match (result, restore_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(err), Ok(())) => Err(err),
-        (_, Err(err)) => Err(err),
+    // Guard restores original terminal attributes even if f() panics.
+    struct CookedGuard {
+        stdin: std::io::Stdin,
+        original: termios::Termios,
     }
+    impl Drop for CookedGuard {
+        fn drop(&mut self) {
+            let _ = termios::tcsetattr(&self.stdin, SetArg::TCSADRAIN, &self.original);
+        }
+    }
+
+    let _guard = CookedGuard {
+        stdin: std::io::stdin(),
+        original,
+    };
+
+    f()
 }
 
 #[cfg(not(unix))]

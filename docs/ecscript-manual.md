@@ -1,4 +1,4 @@
-# ecscript 当前实现手册（stage 9 / 10 过渡期）
+# ecscript 当前实现手册（stage 10 / 11）
 
 本文描述 ecscript **当前已经实现** 的语法与语义。
 按当前提交历史，`ecscript` 内核主体已经完成，`ecsh` 顶层、命令桥、值流原语和模块 MVP 都已经接通。本文优先描述**当前语法事实**，方便直接作为 Tree-sitter grammar 的参考基线。
@@ -38,6 +38,8 @@
 - 独立 `ecscript` 解释器入口：REPL / 文件执行 / `-e` / stdin
 - 模块缓存：同一路径模块只初始化一次
 - 循环导入检测：`a -> b -> a` 会报错
+- **内省 builtin**：`help(name)` / `builtins()` / `commands()` / `extensions()` — 查询 callable 文档、列出已注册命令与扩展
+- **统一元信息模型**：`Spec` / `CallableSpec` 为 builtin 和 shell 扩展提供统一的可查询接口，`commands()` 与 `help()` 共享数据源
 
 当前未实现：
 
@@ -741,6 +743,10 @@ slice(range(0, 5), 1, 4) // => [1, 2, 3]
 | `join(arr, sep)` | 按 display 文本连接数组元素 | `sep` 必须是 `String` |
 | `bind(key, func)` | 注册交互式按键绑定 | 回调接收 `{ key, line, cursor, cwd, history }` |
 | `register_command(name, func)` | 注册 ecsh 顶层命令 | 回调接收 `{ name, args, cwd }` |
+| `help(name)` | 返回指定 callable 的详细帮助文本 | 从统一 `Spec` / `CallableSpec` 表查询；未找到返回错误 |
+| `builtins()` | 列出所有 ecscript builtin 名称 | 返回 `Array<String>`，去重排序 |
+| `commands()` | 列出所有可调用命令（builtin + shell builtin + alias + script command） | 返回 `Array<Object>`，每项含 `name` / `kind` |
+| `extensions()` | 列出所有已注册 shell 扩展（hook / prompt / complete / bind / script command） | 返回 `Object`，每类一个 `Array<String>` |
 
 ### 9.6 脚本命令
 
