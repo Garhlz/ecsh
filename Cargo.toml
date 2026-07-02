@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Elaine"]
 description = "Elaine & Cornelia's shell: a learning-oriented Unix-like shell written in Rust"
+default-run = "ecsh"
 
 [dependencies]
 dirs-next = "2.0.0"
