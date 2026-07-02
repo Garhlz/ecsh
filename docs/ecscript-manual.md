@@ -38,7 +38,7 @@
 - 独立 `ecscript` 解释器入口：REPL / 文件执行 / `-e` / stdin
 - 模块缓存：同一路径模块只初始化一次
 - 循环导入检测：`a -> b -> a` 会报错
-- **内省 builtin**：`help(name)` / `builtins()` / `commands()` / `extensions()` — 查询 callable 文档、列出已注册命令与扩展
+- **内省 builtin**：`help(name)` / `builtins()` / `commands()` / `extensions()` — 查询 callable 文档、列出可用 builtin / 命令来源 / shell extension 名称
 - **统一元信息模型**：`Spec` / `CallableSpec` 为 builtin 和 shell 扩展提供统一的可查询接口，`commands()` 与 `help()` 共享数据源
 
 当前未实现：
@@ -743,10 +743,10 @@ slice(range(0, 5), 1, 4) // => [1, 2, 3]
 | `join(arr, sep)` | 按 display 文本连接数组元素 | `sep` 必须是 `String` |
 | `bind(key, func)` | 注册交互式按键绑定 | 回调接收 `{ key, line, cursor, cwd, history }` |
 | `register_command(name, func)` | 注册 ecsh 顶层命令 | 回调接收 `{ name, args, cwd }` |
-| `help(name)` | 返回指定 callable 的详细帮助文本 | 从统一 `Spec` / `CallableSpec` 表查询；未找到返回错误 |
+| `help([name])` | 返回 callable 总览或指定 callable 的详细帮助文本 | 无参返回 overview；传入名称时从统一 `Spec` / `CallableSpec` 表查询；未找到返回错误 |
 | `builtins()` | 列出所有 ecscript builtin 名称 | 返回 `Array<String>`，去重排序 |
 | `commands()` | 列出所有可调用命令（builtin + shell builtin + alias + script command） | 返回 `Array<Object>`，每项含 `name` / `kind` |
-| `extensions()` | 列出所有已注册 shell 扩展（hook / prompt / complete / bind / script command） | 返回 `Object`，每类一个 `Array<String>` |
+| `extensions()` | 列出所有 shell extension 名称 | 返回去重排序后的 `Array<String>` |
 
 ### 9.6 脚本命令
 

@@ -1036,44 +1036,44 @@ complete("git", (ctx) => {
 
 #### 11.1 元信息核心层
 
-- [ ] 设计统一 `Spec` / `CallableSpec` 模型，而不是只做零散 `BuiltinSpec`
-- [ ] 第一版字段先收紧到：
+- [x] 设计统一 `Spec` / `CallableSpec` 模型，而不是只做零散 `BuiltinSpec`
+- [x] 第一版字段先收紧到：
       `name`、`kind`、`category`、`signature`、`summary`、`details`、`examples`
-- [ ] 暂不引入完整类型系统；`arity` / 参数名 /签名文本先以最小可维护形式表达
-- [ ] 先只做内部元数据，不新增语言表面语法
-- [ ] spec 类型至少覆盖三类：
+- [x] 暂不引入完整类型系统；`arity` / 参数名 /签名文本先以最小可维护形式表达
+- [x] 先只做内部元数据，不新增语言表面语法
+- [x] spec 类型至少覆盖三类：
       builtin、shell extension、shell builtin
 
 第一批必须覆盖：
 
-- [ ] 语言 builtin：
+- [x] 语言 builtin：
       `env`、`set_env`、`unset_env`、`cwd`、`join_path`、`range`、`trim`、
       `len`、`keys`、`values`、`push`、`pop`、`insert`、`remove`、
       `print`、`println`、`to_json`、`from_json`、
       `stdin`、`read_lines`、`write_lines`、
       `command`、`run`、`capture`、`text`、`lines`、`with_env`、`with_cwd`、
       `map`、`filter`、`reduce`、`each`、`any`、`all`、`find`、`join`
-- [ ] shell 扩展点：
+- [x] shell 扩展点：
       `hook`、`prompt`、`complete`、`bind`、`register_command`、`set_cwd`
-- [ ] shell builtin：
+- [x] shell builtin：
       `cd`、`pwd`、`history`、`type`、`which`、`source`、`reload_rc`
 
 #### 11.2 Help / Introspection
 
-- [ ] 基于统一 spec 实现 `help()`
-- [ ] 支持 `help("name")`
-- [ ] 支持 `builtins()`
-- [ ] 支持 `extensions()`
-- [ ] 支持 `commands()`
-- [ ] `help("map")` / `help("prompt")` 输出稳定的签名 + summary + details + examples
-- [ ] `help("unknown")` 返回明确错误，而不是静默失败
+- [x] 基于统一 spec 实现 `help()`
+- [x] 支持 `help("name")`
+- [x] 支持 `builtins()`
+- [x] 支持 `extensions()`
+- [x] 支持 `commands()`
+- [x] `help("map")` / `help("prompt")` 输出稳定的签名 + summary + details + examples
+- [x] `help("unknown")` 返回明确错误，而不是静默失败
 
 建议语义：
 
-- [ ] `help()`：按类别列出可查询条目
-- [ ] `builtins()`：列出语言 builtin 名称
-- [ ] `extensions()`：列出 shell 扩展点名称
-- [ ] `commands()`：列出当前 shell 中可见命令及其来源
+- [x] `help()`：按类别列出可查询条目
+- [x] `builtins()`：列出语言 builtin 名称
+- [x] `extensions()`：列出 shell 扩展点名称
+- [x] `commands()`：列出当前 shell 中可见命令及其来源
 
 `commands()` 推荐返回结构化对象，而不是只打印文本：
 
@@ -1088,18 +1088,19 @@ complete("git", (ctx) => {
 
 #### 11.3 命令来源与解析可见性
 
-- [ ] 增强 `type` / `which` 的来源区分
-- [ ] 至少区分：
-      alias、shell builtin、ecscript builtin、registered command、external command
+- [x] `type` / `which` 已能区分：
+      alias、shell builtin、registered command、external command
+- [ ] 明确 ecscript builtin 与 shell builtin 同名时的展示边界：
+      `help("env")` 解释 ecscript builtin，`type env` / `which env` 解释 shell 命令解析来源
 - [ ] 明确 `help(...)` 与 `type` / `which` 的职责边界：
       `help(...)` 解释接口语义，`type` / `which` 解释名字解析来源
 
 #### 11.4 VS Code Hover 复用
 
-- [ ] VS Code hover 改为优先显示 spec 文档，而不是只显示 AST/debug 信息
-- [ ] 第一版只支持静态 hover：
+- [x] VS Code hover 改为优先显示 spec 文档，而不是只显示 AST/debug 信息
+- [x] 第一版只支持静态 hover：
       builtin、shell extension、命令桥相关 builtin
-- [ ] hover 至少包含：
+- [x] hover 至少包含：
       signature、summary、短 example
 - [ ] 暂不做类型推导、跳转定义、symbol resolution
 
@@ -1143,19 +1144,19 @@ examples/ecscript/plugins/
 
 **推荐顺序**
 
-- [ ] 先做 11.1 元信息核心层
-- [ ] 再做 11.2 Help / Introspection
-- [ ] 然后做 11.3 `type` / `which` 来源增强
-- [ ] 再接 11.4 VS Code hover
+- [x] 先做 11.1 元信息核心层
+- [x] 再做 11.2 Help / Introspection
+- [ ] 然后收口 11.3 `help(...)` 与 `type` / `which` 的边界文档
+- [x] 再接 11.4 VS Code hover
 - [ ] 最后收 11.5 示例包整理和 11.6 最小外部命令适配
 
 **完成标准**
 
 - [ ] builtin / extension 的说明不再主要依赖散落文档维护
-- [ ] shell 内已经可以查询 `help()` / `help("name")`
-- [ ] shell 内已经可以查询 `builtins()` / `extensions()` / `commands()`
-- [ ] `type` / `which` 能稳定区分 alias / builtin / registered / external 来源
-- [ ] VS Code hover 已复用统一 spec，而不是额外维护一份散表
+- [x] shell 内已经可以查询 `help()` / `help("name")`
+- [x] shell 内已经可以查询 `builtins()` / `extensions()` / `commands()`
+- [x] `type` / `which` 能稳定区分 alias / shell builtin / registered / external 来源
+- [x] VS Code hover 已复用统一 spec，而不是额外维护一份散表
 - [ ] 示例插件目录已经整理，但它只是消费前面元信息和扩展系统，不单独发明新协议
 
 ### 阶段 12：Shell 语义补完

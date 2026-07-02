@@ -235,6 +235,33 @@ shell 当前采用 `ShellWord` 运行时展开模型，而不是在词法阶段�
 - builtin / 命令桥 API 的参数 shape 与帮助信息
 - 外部命令 adapter / completion 元数据
 
+阶段 11 当前已经落地：
+
+- 统一 callable 元信息表：`Spec` / `CallableSpec`
+- spec 当前覆盖三类：
+  - ecscript builtin
+  - shell extension
+  - shell builtin
+- 第一版 introspection builtin：
+  - `help()`：按 kind / category 返回 overview 文本
+  - `help("name")`：返回匹配 callable 的签名、摘要、详细说明与示例
+  - `builtins()`：返回去重排序后的 builtin 名称数组
+  - `extensions()`：返回去重排序后的 shell extension 名称数组
+  - `commands()`：返回当前 shell 中可见命令来源数组，元素形如 `{ name, kind }`
+- `commands()` 与 `help()` 当前共享同一份 specs 数据源；shell builtin 先查 specs，再补运行时命名表
+- `type` / `which` 已能区分 alias、shell builtin、registered command、external command
+- VS Code hover 当前在调用目标位置优先显示统一 spec 文档；未命中 spec 时再回退到 AST/debug 节点类型
+- panic 安全加固：
+  - `bind` 的 cooked tty 恢复由 Drop 守卫兜底
+  - `after_cd` reentry flag 由 Drop 守卫兜底复位
+  - `reload_rc` 以 rc 文件为 staged 状态唯一真相源重新装载
+
+阶段 11 当前仍未完成：
+
+- `help("name")` 与 `type` / `which` 对同名 ecscript builtin / shell builtin 的展示边界文档
+- 示例插件目录整理与推荐 `.ecshrc` 组合片段
+- 更通用的外部命令 adapter / help/completion provider
+
 ### 3. shell 语义补完
 
 对应 `TODO.md` 中的阶段 12：
