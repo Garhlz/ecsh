@@ -730,6 +730,7 @@ mod tests {
     use rustyline::{Cmd, Movement};
     use std::collections::{HashMap, HashSet};
     use std::rc::Rc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn state() -> ShellState {
         ShellState {
@@ -753,6 +754,29 @@ mod tests {
         let _ = lexer::tokenize(src).unwrap();
         let stmts = parse_top_level_script(src).unwrap().unwrap();
         eval_top_level_script_with_ctx(&stmts, &state.script_env, Some(state)).unwrap();
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ecsh-ext-{}-{}-{}",
+            name,
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        path.canonicalize().unwrap()
     }
 
     #[test]
@@ -1063,10 +1087,8 @@ bind("ctrl-r", (ctx) => {
         let old_pwd = std::env::var_os("PWD");
         let old_oldpwd = std::env::var_os("OLDPWD");
         let old_cwd = std::env::current_dir().unwrap();
-        let first = std::env::temp_dir().join(format!("ecsh-ext-first-{}", std::process::id()));
-        let second = std::env::temp_dir().join(format!("ecsh-ext-second-{}", std::process::id()));
-        std::fs::create_dir_all(&first).unwrap();
-        std::fs::create_dir_all(&second).unwrap();
+        let first = temp_dir("first");
+        let second = temp_dir("second");
 
         let s = state();
         register(
@@ -1106,8 +1128,7 @@ bind("ctrl-r", (ctx) => {
         let old_pwd = std::env::var_os("PWD");
         let old_oldpwd = std::env::var_os("OLDPWD");
         let old_cwd = std::env::current_dir().unwrap();
-        let dir = std::env::temp_dir().join(format!("ecsh-ext-once-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("once");
 
         let s = state();
         register(r#"hook("after_cd", (ctx) => {})"#, &s);

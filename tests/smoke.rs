@@ -67,6 +67,14 @@ fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("ecsh-{}-{}", std::process::id(), name))
 }
 
+fn canonical_tmp() -> String {
+    std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temp dir")
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn visible_output(raw: &str) -> String {
     raw.lines()
         .filter_map(|line| {
@@ -194,21 +202,25 @@ exit
 
 #[test]
 fn smoke_expands_builtin_args_and_redirection_targets() {
+    let tmp = canonical_tmp();
     let out_path = format!(
         "{}/ecsh-stage6-redirection-out",
         std::env::temp_dir().display()
     );
     let output = run_ecsh_with_env(
-        r#"cd ${"/tmp"}
+        &format!(
+            r#"cd ${{{:?}}}
 pwd
 echo hi > $OUT_PATH
-cat < ${env("OUT_PATH")}
+cat < ${{env("OUT_PATH")}}
 exit
 "#,
+            tmp
+        ),
         &[("OUT_PATH", &out_path)],
     );
 
-    assert!(output.lines().any(|line| line == "/tmp"));
+    assert!(output.lines().any(|line| line == tmp));
     assert!(output.lines().any(|line| line == "hi"));
 
     let _ = std::fs::remove_file(out_path);
@@ -381,17 +393,19 @@ fn smoke_initializes_shell_environment_variables() {
 
 #[test]
 fn smoke_cd_updates_pwd_and_oldpwd_env() {
+    let tmp = canonical_tmp();
     let cwd = std::env::current_dir()
         .expect("cwd")
         .to_string_lossy()
         .into_owned();
-    let output = run_ecsh(
-        "println(env(\"PWD\"))\ncd /tmp\nprintln(env(\"OLDPWD\"))\nprintln(env(\"PWD\"))\nexit\n",
-    );
+    let output = run_ecsh(&format!(
+        "println(env(\"PWD\"))\ncd {}\nprintln(env(\"OLDPWD\"))\nprintln(env(\"PWD\"))\nexit\n",
+        tmp
+    ));
     let lines = output.lines().collect::<Vec<_>>();
 
     assert!(lines.contains(&cwd.as_str()), "output was:\n{output}");
-    assert!(lines.contains(&"/tmp"), "output was:\n{output}");
+    assert!(lines.contains(&tmp.as_str()), "output was:\n{output}");
 }
 
 #[test]
@@ -516,6 +530,7 @@ fn smoke_prompt_invalid_return_falls_back_once() {
 
 #[test]
 fn smoke_source_runs_after_cd_hook() {
+    let tmp = canonical_tmp();
     let path = temp_path("stage10-after-cd.ecs");
     std::fs::write(
         &path,
@@ -523,9 +538,9 @@ fn smoke_source_runs_after_cd_hook() {
     )
     .expect("failed to write after_cd hook script");
 
-    let output = run_ecsh(&format!("source {}\ncd /tmp\nexit\n", path.display()));
+    let output = run_ecsh(&format!("source {}\ncd {}\nexit\n", path.display(), tmp));
     assert!(
-        output.lines().any(|line| line == "cd:/tmp"),
+        output.lines().any(|line| line == format!("cd:{tmp}")),
         "output was:\n{output}"
     );
 
@@ -538,6 +553,8 @@ fn smoke_after_cd_reentry_updates_cwd_without_recursive_hook() {
     let second = temp_path("stage10-after-cd-second");
     std::fs::create_dir_all(&first).expect("failed to create first dir");
     std::fs::create_dir_all(&second).expect("failed to create second dir");
+    let first = first.canonicalize().expect("canonical first dir");
+    let second = second.canonicalize().expect("canonical second dir");
 
     let path = temp_path("stage10-after-cd-reentry.ecs");
     std::fs::write(
@@ -820,27 +837,31 @@ fn smoke_source_registers_ecscript_shell_command() {
 
 #[test]
 fn smoke_registered_command_set_cwd_runs_after_cd_hook() {
+    let tmp = canonical_tmp();
     let path = temp_path("stage10-register-command-set-cwd.ecs");
     std::fs::write(
         &path,
-        "hook(\"after_cd\", (ctx) => {\n\
+        format!(
+            "hook(\"after_cd\", (ctx) => {{\n\
              print(\"cd:\")\n\
              println(ctx.cwd)\n\
-         })\n\
-         register_command(\"jump_tmp\", (ctx) => {\n\
-             set_cwd(\"/tmp\")\n\
-         })\n",
+         }})\n\
+         register_command(\"jump_tmp\", (ctx) => {{\n\
+             set_cwd({:?})\n\
+         }})\n",
+            tmp
+        ),
     )
     .expect("failed to write set_cwd source script");
 
     let output = run_ecsh(&format!("source {}\njump_tmp\npwd\nexit\n", path.display()));
 
     assert!(
-        output.lines().any(|line| line == "cd:/tmp"),
+        output.lines().any(|line| line == format!("cd:{tmp}")),
         "output was:\n{output}"
     );
     assert!(
-        output.lines().any(|line| line == "/tmp"),
+        output.lines().any(|line| line == tmp),
         "output was:\n{output}"
     );
 
@@ -849,12 +870,16 @@ fn smoke_registered_command_set_cwd_runs_after_cd_hook() {
 
 #[test]
 fn smoke_zoxide_adapter_registers_commands() {
+    let tmp = canonical_tmp();
     let bin_dir = temp_path("stage10-zoxide-bin");
     std::fs::create_dir_all(&bin_dir).expect("failed to create fake zoxide dir");
     let zoxide_path = bin_dir.join("zoxide");
     std::fs::write(
         &zoxide_path,
-        "#!/bin/sh\nif [ \"$1\" = query ]; then printf /tmp; fi\n",
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = query ]; then printf %s {:?}; fi\n",
+            tmp
+        ),
     )
     .expect("failed to write fake zoxide");
     #[cfg(unix)]
@@ -896,7 +921,7 @@ fn smoke_zoxide_adapter_registers_commands() {
     assert!(stdout.contains("z is an ecscript shell command"));
     assert!(stdout.contains("zi is an ecscript shell command"));
     assert!(
-        stdout.lines().any(|line| line == "/tmp"),
+        stdout.lines().any(|line| line == tmp),
         "stdout was:\n{stdout}\nstderr was:\n{stderr}"
     );
 
@@ -1145,14 +1170,16 @@ exit
 
 #[test]
 fn smoke_ecscript_with_cwd_derives_command_value() {
-    let output = run_ecsh(
-        r#"let proc = with_cwd(cmd{ /bin/pwd }, "/tmp")
+    let tmp = canonical_tmp();
+    let output = run_ecsh(&format!(
+        r#"let proc = with_cwd(cmd{{ /bin/pwd }}, {:?})
 println(text(proc))
 exit
 "#,
-    );
+        tmp
+    ));
 
-    assert!(output.lines().any(|line| line == "/tmp"));
+    assert!(output.lines().any(|line| line == tmp));
 }
 
 #[test]
