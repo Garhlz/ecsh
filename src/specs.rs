@@ -8,8 +8,11 @@
 //! examples, etc.) for each entry. Lookup and execution behaviour is unchanged;
 //! this layer only adds queryable documentation-shaped data.
 
+use serde::Serialize;
+
 /// Kinds of callables the shell knows about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SpecKind {
     /// An ecscript language-level builtin function (e.g. `map`, `to_json`).
     Builtin,
@@ -20,7 +23,7 @@ pub enum SpecKind {
 }
 
 /// Metadata describing one callable (builtin / extension / shell-builtin).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CallableSpec {
     pub name: &'static str,
     pub kind: SpecKind,
@@ -114,7 +117,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "For Strings, length is counted in Unicode scalar values.",
         "len([1, 2, 3])",
         "len({a: 1})",
-        "len('ecsh')"
+        "len(\"ecsh\")"
     ),
     spec!(
         "keys",
@@ -160,7 +163,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "insert(array, index, value)",
         "Insert a value at the given index, shifting later elements right.",
         "Mutates the array in place and returns Nil. Out-of-bounds indices raise a runtime error.",
-        "insert(arr, 0, 'hi')"
+        "insert(arr, 0, \"hi\")"
     ),
     spec!(
         "remove",
@@ -250,7 +253,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "join(array, separator)",
         "Join array elements into a single string with separator between them.",
         "Each element is converted to its string representation.",
-        "join(['a','b'], ',')"
+        "join([\"a\", \"b\"], \",\")"
     ),
     spec!(
         "join_path",
@@ -259,7 +262,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "join_path(left, right)",
         "Join two path segments with the OS path separator.",
         "Useful for constructing filesystem paths portably.",
-        "join_path('/home/user', 'file.txt')"
+        "join_path(\"/home/user\", \"file.txt\")"
     ),
     // I/O
     spec!(
@@ -269,7 +272,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "print(values...)",
         "Print values to stdout without a trailing newline.",
         "Multiple values are printed separated by spaces.",
-        "print('Hello', 'World')"
+        "print(\"Hello\", \"World\")"
     ),
     spec!(
         "println",
@@ -278,7 +281,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "println(values...)",
         "Print values to stdout followed by a newline.",
         "Equivalent to print(...) + newline.",
-        "println('Hello')"
+        "println(\"Hello\")"
     ),
     spec!(
         "stdin",
@@ -305,7 +308,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "write_lines(lines)",
         "Write an array of strings to stdout, one per line.",
         "Each element is followed by a newline.",
-        "write_lines(['a', 'b'])"
+        "write_lines([\"a\", \"b\"])"
     ),
     // Command execution
     spec!(
@@ -315,7 +318,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "command(program, args...)",
         "Build a command value from a program name and arguments.",
         "Returns a Command value that can be passed to run/capture.",
-        "command('ls', '-l')"
+        "command(\"ls\", \"-l\")"
     ),
     spec!(
         "run",
@@ -324,7 +327,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "run(cmd)",
         "Execute a command, forwarding its stdout/stderr directly.",
         "Returns the exit status object.",
-        "run(command('ls'))"
+        "run(command(\"ls\"))"
     ),
     spec!(
         "capture",
@@ -333,7 +336,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "capture(cmd)",
         "Execute a command and capture its result as an object.",
         "Returns { code, signal, stdout, stderr, duration_ms, ok }.",
-        "capture(command('echo', 'hi'))"
+        "capture(command(\"echo\", \"hi\"))"
     ),
     spec!(
         "text",
@@ -342,7 +345,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "text(cmd)",
         "Execute a command and return its output as a single String.",
         "Raises a runtime error if the command exits non-zero or is terminated by signal.",
-        "text(command('cat', 'file.txt'))"
+        "text(command(\"cat\", \"file.txt\"))"
     ),
     spec!(
         "lines",
@@ -351,7 +354,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "lines(cmd)",
         "Execute a command and return its output lines as an Array.",
         "Raises a runtime error if the command exits non-zero or is terminated by signal.",
-        "lines(command('ls'))"
+        "lines(command(\"ls\"))"
     ),
     spec!(
         "with_env",
@@ -360,7 +363,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "with_env(cmd, env_map)",
         "Return a new command with additional environment variables.",
         "env_map is an Object of String→String pairs.",
-        "with_env(command('printenv'), {FOO: 'bar'})"
+        "with_env(command(\"printenv\"), {FOO: \"bar\"})"
     ),
     spec!(
         "with_cwd",
@@ -369,7 +372,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "with_cwd(cmd, dir)",
         "Return a new command that runs in the given working directory.",
         "Does not change the shell's current directory.",
-        "with_cwd(command('ls'), '/tmp')"
+        "with_cwd(command(\"ls\"), \"/tmp\")"
     ),
     // Environment
     spec!(
@@ -379,7 +382,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "env(name)",
         "Get the value of an environment variable, or Nil if unset.",
         "Reads from the process environment.",
-        "env('HOME')"
+        "env(\"HOME\")"
     ),
     spec!(
         "set_env",
@@ -388,7 +391,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "set_env(name, value)",
         "Set an environment variable in the current process.",
         "Both name and value must be Strings.",
-        "set_env('FOO', 'bar')"
+        "set_env(\"FOO\", \"bar\")"
     ),
     spec!(
         "unset_env",
@@ -397,7 +400,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "unset_env(name)",
         "Remove an environment variable from the current process.",
         "No error if the variable was not set.",
-        "unset_env('FOO')"
+        "unset_env(\"FOO\")"
     ),
     spec!(
         "cwd",
@@ -425,7 +428,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "from_json(string)",
         "Parse a JSON string into an ecscript value.",
         "Returns the parsed value or raises an error on invalid JSON.",
-        "from_json('[1,2,3]')"
+        "from_json(\"[1,2,3]\")"
     ),
     // String
     spec!(
@@ -435,7 +438,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "trim(string)",
         "Return the string with leading and trailing whitespace removed.",
         "Whitespace is defined by Unicode rules.",
-        "trim('  hello  ')"
+        "trim(\"  hello  \")"
     ),
     // Introspection
     spec!(
@@ -483,7 +486,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "hook(name, func)",
         "Register a function to be called when a shell hook event fires.",
         "Valid hook names: before_prompt, after_cd, preexec, postexec.",
-        "hook('after_cd', (ctx) => { println(ctx.cwd); })"
+        "hook(\"after_cd\", (ctx) => { println(ctx.cwd); })"
     ),
     spec!(
         "prompt",
@@ -492,7 +495,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "prompt(func)",
         "Register a function that returns the shell prompt string.",
         "func receives a context object with shell metadata and must return a String.",
-        "prompt((ctx) => ctx.cwd + ' $ ')"
+        "prompt((ctx) => ctx.cwd + \" $ \")"
     ),
     spec!(
         "complete",
@@ -501,7 +504,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "complete(command_name, func)",
         "Register a tab-completion handler for a command.",
         "func receives a context object and returns Array<Object> completion candidates.",
-        "complete('git', (ctx) => [{ value: 'status' }])"
+        "complete(\"git\", (ctx) => [{ value: \"status\" }])"
     ),
     spec!(
         "bind",
@@ -509,8 +512,8 @@ static ALL_SPECS: &[CallableSpec] = &[
         "Extension",
         "bind(key_sequence, func)",
         "Bind a key sequence to a function that is called when the key is pressed.",
-        "func receives a context object and may return an action object such as { action: 'set_line', text: '...' }.",
-        "bind('ctrl-r', (ctx) => { return nil; })"
+        "func receives a context object and may return an action object such as { action: \"set_line\", text: \"...\" }.",
+        "bind(\"ctrl-r\", (ctx) => { return nil; })"
     ),
     spec!(
         "register_command",
@@ -519,7 +522,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "register_command(name, func)",
         "Register an ecscript function as a shell command.",
         "func receives a context object and may return Nil or a non-negative Int exit code.",
-        "register_command('greet', (ctx) => { println('hi'); })"
+        "register_command(\"greet\", (ctx) => { println(\"hi\"); })"
     ),
     spec!(
         "set_cwd",
@@ -528,7 +531,7 @@ static ALL_SPECS: &[CallableSpec] = &[
         "set_cwd(path)",
         "Change the shell's current working directory, triggering after_cd hooks.",
         "Prefer this over raw chdir so hooks run.",
-        "set_cwd('/tmp')"
+        "set_cwd(\"/tmp\")"
     ),
     // ── Shell builtin commands ───────────────────────────────────────
     spec!(
@@ -816,5 +819,19 @@ mod tests {
     fn total_spec_count() {
         // 41 ecscript builtins + 6 shell extensions + 7 shell builtins
         assert_eq!(all_specs().len(), 54);
+    }
+
+    #[test]
+    fn examples_use_ecscript_double_quoted_strings() {
+        for spec in all_specs() {
+            for example in spec.examples {
+                assert!(
+                    !example.contains('\''),
+                    "example for {} contains single quote syntax: {}",
+                    spec.name,
+                    example
+                );
+            }
+        }
     }
 }
