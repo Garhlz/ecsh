@@ -9,6 +9,8 @@ mkdir -p "$ROOT/packages/vscode-ecscript/assets/queries"
 cp "$ROOT/packages/tree-sitter-ecscript/queries/"*.scm \
    "$ROOT/packages/vscode-ecscript/assets/queries/"
 
+cargo run --quiet --bin export_specs > "$ROOT/packages/vscode-ecscript/assets/specs.json"
+
 if [[ ! -x "$TREE_SITTER_CLI" ]]; then
   echo "missing tree-sitter CLI at $TREE_SITTER_CLI; run npm install in packages/tree-sitter-ecscript first" >&2
   exit 1
