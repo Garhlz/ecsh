@@ -1,5 +1,5 @@
 use crate::diagnostics::print_error;
-use crate::ecscript::{Environment, RuntimeError, RuntimeErrorKind, Value, call_function_with_ctx};
+use crate::ecscript::{call_function_with_ctx, Environment, RuntimeError, RuntimeErrorKind, Value};
 use crate::types::{CommandStatus, JobStatus, ShellState};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -46,6 +46,7 @@ pub struct ExtensionRegistry {
     pub after_cd_reentry: bool,
     prompt_seen_errors: HashSet<String>,
     completion_seen_errors: HashMap<String, HashSet<String>>,
+    hook_seen_errors: HashMap<HookName, HashSet<String>>,
 }
 
 impl ExtensionRegistry {
@@ -77,6 +78,17 @@ impl ExtensionRegistry {
 
     pub fn clear_completion_errors(&mut self, key: &str) {
         self.completion_seen_errors.remove(key);
+    }
+
+    pub fn throttled_hook_error(&mut self, hook: HookName, msg: &str) {
+        let seen = self.hook_seen_errors.entry(hook).or_default();
+        if seen.insert(msg.to_string()) {
+            print_error(msg.to_string());
+        }
+    }
+
+    pub fn clear_hook_errors(&mut self, hook: &HookName) {
+        self.hook_seen_errors.remove(hook);
     }
 }
 
@@ -119,10 +131,19 @@ pub fn run_hooks(name: HookName, ctx: Value, state: &ShellState) {
         .get(&name)
         .cloned()
         .unwrap_or_default();
+    let mut had_error = false;
     for handler in handlers {
         if let Err(err) = invoke_callback(&handler, ctx.clone(), &state.script_env, state, "hook") {
-            print_error(err.format_with_source(""));
+            had_error = true;
+            let msg = err.format_with_source("");
+            state
+                .extensions
+                .borrow_mut()
+                .throttled_hook_error(name.clone(), &msg);
         }
+    }
+    if !had_error {
+        state.extensions.borrow_mut().clear_hook_errors(&name);
     }
 }
 
@@ -698,16 +719,16 @@ pub fn invoke_bind_callback(
 mod tests {
     use super::{
         bind_context, bind_result_to_cmd, completion_items_from_value, invoke_bind_callback,
-        object, prompt_context, resolve_completion, resolve_prompt,
+        object, prompt_context, resolve_completion, resolve_prompt, run_hooks, HookName,
     };
     use crate::ecscript::{
-        Environment, Value, eval_top_level_script_with_ctx, lexer, parse_top_level_script,
+        eval_top_level_script_with_ctx, lexer, parse_top_level_script, Environment, Value,
     };
     use crate::extensions::new_extensions;
     use crate::test_support::env_lock;
     use crate::types::{CommandStatus, ShellState};
     use rustyline::{Cmd, Movement};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::rc::Rc;
 
     fn state() -> ShellState {
@@ -846,10 +867,9 @@ mod tests {
     fn bind_result_set_line_missing_text_errors() {
         let err = bind_result_to_cmd(&object([("action", Value::String("set_line".into()))]))
             .unwrap_err();
-        assert!(
-            err.message
-                .contains("set_line action requires 'text' field")
-        );
+        assert!(err
+            .message
+            .contains("set_line action requires 'text' field"));
     }
 
     #[test]
@@ -925,12 +945,41 @@ bind("ctrl-r", (ctx) => {
 
         let result = resolve_prompt(&s).unwrap();
         assert!(result.is_none());
-        assert!(
-            s.extensions
-                .borrow()
-                .prompt_seen_errors
-                .contains("prompt handler must return String, got Int")
-        );
+        assert!(s
+            .extensions
+            .borrow()
+            .prompt_seen_errors
+            .contains("prompt handler must return String, got Int"));
+    }
+
+    #[test]
+    fn run_hooks_throttles_repeated_errors_until_success() {
+        let s = state();
+        register(r#"hook("before_prompt", (ctx) => { missing_name(); })"#, &s);
+
+        run_hooks(HookName::BeforePrompt, object([]), &s);
+        run_hooks(HookName::BeforePrompt, object([]), &s);
+
+        let seen_len = s
+            .extensions
+            .borrow()
+            .hook_seen_errors
+            .get(&HookName::BeforePrompt)
+            .map(HashSet::len)
+            .unwrap_or(0);
+        assert_eq!(seen_len, 1);
+
+        s.extensions
+            .borrow_mut()
+            .hooks
+            .insert(HookName::BeforePrompt, Vec::new());
+        run_hooks(HookName::BeforePrompt, object([]), &s);
+
+        assert!(!s
+            .extensions
+            .borrow()
+            .hook_seen_errors
+            .contains_key(&HookName::BeforePrompt));
     }
 
     // ── resolve_completion error fallback ──────────────────────────────
