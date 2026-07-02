@@ -86,10 +86,11 @@ fn starts_with_top_level_keyword(src: &str) -> bool {
     })
 }
 
-/// 消费赋值语句左侧目标，支持三种形式：
+/// 消费可能的赋值/调用左侧目标，支持：
 /// - `ident`
 /// - `ident.field`
-/// - `ident[idx]`（支持嵌套括号）
+/// - `ident[idx]`
+/// - `ident.field[idx].field` 这类链式后缀
 ///
 /// 返回是否成功匹配。
 fn is_assign_target(stream: &mut pratt::TokenStream<'_>) -> bool {
@@ -98,35 +99,68 @@ fn is_assign_target(stream: &mut pratt::TokenStream<'_>) -> bool {
     }
     stream.consume();
 
-    if stream.check(&lexer::TokenKind::Delimiter(lexer::Delimiter::Dot)) {
-        stream.consume();
-        if matches!(stream.peek().kind, lexer::TokenKind::Identifier(_)) {
+    loop {
+        if stream.check(&lexer::TokenKind::Delimiter(lexer::Delimiter::Dot)) {
             stream.consume();
-            return true;
-        }
-        return false;
-    }
-
-    if stream.check(&lexer::TokenKind::Delimiter(lexer::Delimiter::LBracket)) {
-        let mut depth = 1;
-        loop {
-            match &stream.peek().kind {
-                lexer::TokenKind::Delimiter(lexer::Delimiter::LBracket) => {
-                    depth += 1;
-                    stream.consume();
-                }
-                lexer::TokenKind::Delimiter(lexer::Delimiter::RBracket) => {
-                    depth -= 1;
-                    stream.consume();
-                    if depth == 0 {
-                        return true;
-                    }
-                }
-                lexer::TokenKind::EOF => return false,
-                _ => stream.consume(),
+            if matches!(stream.peek().kind, lexer::TokenKind::Identifier(_)) {
+                stream.consume();
+                continue;
             }
+            return false;
         }
+
+        if stream.check(&lexer::TokenKind::Delimiter(lexer::Delimiter::LBracket)) {
+            let mut depth = 1;
+            stream.consume();
+            loop {
+                match &stream.peek().kind {
+                    lexer::TokenKind::Delimiter(lexer::Delimiter::LBracket) => {
+                        depth += 1;
+                        stream.consume();
+                    }
+                    lexer::TokenKind::Delimiter(lexer::Delimiter::RBracket) => {
+                        depth -= 1;
+                        stream.consume();
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    lexer::TokenKind::EOF => return false,
+                    _ => stream.consume(),
+                }
+            }
+            continue;
+        }
+
+        return true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_top_level_script;
+
+    fn parses_as_top_level_script(src: &str) -> bool {
+        parse_top_level_script(src).is_some_and(|result| result.is_ok())
     }
 
-    true
+    #[test]
+    fn detects_index_assignment_as_script() {
+        assert!(parses_as_top_level_script("a[2] = 1"));
+    }
+
+    #[test]
+    fn detects_chained_index_assignment_as_script() {
+        assert!(parses_as_top_level_script("e.b[1] = 200"));
+    }
+
+    #[test]
+    fn detects_field_assignment_as_script() {
+        assert!(parses_as_top_level_script("a.b = 1"));
+    }
+
+    #[test]
+    fn leaves_bare_identifier_for_shell() {
+        assert!(parse_top_level_script("a").is_none());
+    }
 }
