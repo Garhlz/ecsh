@@ -1,65 +1,38 @@
-# ecscript 当前实现手册（stage 10 / 11）
+# ecscript 实现手册
 
-本文描述 ecscript **当前已经实现** 的语法与语义。
-按当前提交历史，`ecscript` 内核主体已经完成，`ecsh` 顶层、命令桥、值流原语和模块 MVP 都已经接通。本文优先描述**当前语法事实**，方便直接作为 Tree-sitter grammar 的参考基线。
+本文是 `ecscript` 的实现级手册，主要面向维护 parser、evaluator、runtime、错误格式化和 tree-sitter grammar 的读者。
+
+如果只是想写 `.ecs` 脚本，先看 [ecscript-reference.md](ecscript-reference.md)。如果想确认项目当前进度和边界，先看 [status.md](status.md)。后续路线见 [roadmap.md](roadmap.md)。
+
+本文只解释实现结构、语法模型、运行时语义和维护约定。用户可见 API 的完整清单以 reference 为准，当前完成/未完成状态以 status 为准。
 
 ---
 
-## 1. 当前范围
+## 维护入口
 
-当前已实现：
+代码入口：
 
-- expression lexer / Pratt parser / evaluator
-- script / stmt parser
-- `let`、赋值、复合赋值、表达式语句、block
-- 注释：`// ...` 与 `/* ... */`
-- 词法作用域与父环境查找（Slot/Binding 模型）
-- 数组 / 对象字面量
-- 字段访问、索引访问
-- 字段赋值、索引赋值
-- 全局 builtin：`env` / `cwd` / `join_path` / `stdin` / `read_lines` / `write_lines` / `range` / `len` / `print` / `println` / `push` / `pop` / `insert` / `remove` / `slice` / `keys` / `values` / `to_json` / `from_json`
-- 命令桥：`cmd{ ... }` / `command(...)` / `run` / `capture` / `text` / `lines` / `with_env` / `with_cwd`
-- 值流原语：`map` / `filter` / `reduce` / `each` / `any` / `all` / `find` / `join`
-- `if / else if / else`
-- `while`
-- `for in`：遍历数组 / 对象 key / 区间
-- `break` / `continue`
-- `func name(args) { ... }` — 命名函数声明
-- `pub let` / `pub func`
-- `use ./foo.ecs as foo`
-- `(args) => expr` / `(args) => { stmts }` — 匿名函数（lambda/func literal）
-- 普通函数调用：`f(x, y)`、`obj.method()`
-- `return expr;` / `return;`
-- 原始字符串：`r"..."`
-- 输出 builtin：`print(...)` / `println(...)`
-- **强闭包**：自由变量自动提升为 heap slot，闭包共享可变绑定
-- 基于字节偏移的 parse/runtime 错误定位
-- `ParseError::format_with_source(src)` / `RuntimeError::format_with_source(src)` 的源码定位格式化
-- 独立 `ecscript` 解释器入口：REPL / 文件执行 / `-e` / stdin
-- 模块缓存：同一路径模块只初始化一次
-- 循环导入检测：`a -> b -> a` 会报错
-- **内省 builtin**：`help(name)` / `builtins()` / `commands()` / `extensions()` — 查询 callable 文档、列出可用 builtin / 命令来源 / shell extension 名称
-- **统一元信息模型**：`Spec` / `CallableSpec` 为 builtin 和 shell 扩展提供统一的可查询接口，`commands()` 与 `help()` 共享数据源
+- 词法：`src/ecscript/lexer.rs`
+- Pratt 表达式 parser：`src/ecscript/pratt.rs`
+- 语句 parser：`src/ecscript/parser.rs`
+- AST：`src/ecscript/ast.rs`
+- evaluator：`src/ecscript/eval.rs`
+- 环境和闭包 slot：`src/ecscript/env.rs`
+- 运行时值：`src/ecscript/value.rs`
+- builtin 分发：`src/ecscript/builtin/mod.rs`
+- 模块加载：`src/ecscript/module.rs`
+- 顶层分派：`src/ecscript/top_level.rs`
+- CLI / REPL：`src/bin/ecscript.rs`
+- 命令桥：`src/executor/command_value.rs`
+- shell 扩展点：`src/extensions.rs`
+- callable 元信息：`src/specs.rs`
 
-当前未实现：
+测试入口：
 
-- block value / 尾表达式返回值
-- 搜索路径、命名导入、`pub use`
-- 字符串插值 / 多行字符串等更完整的字符串系统
-
-### 与 ecsh 的当前关系
-
-当前 `ecscript` 与 `ecsh` 的关系如下：
-
-- `ecscript` 已经可以独立运行：REPL、文件执行、`-e`、stdin 都可用
-- `ecsh` 已经会在运行时调用 `ecscript` 表达式求值，支撑 `${expr}` 和 `${...arr}`
-- `ecsh` 顶层输入已经接入“shell 模式 / script 模式”分派，`.ecs` 文件、`source` / `.`、`.ecshrc` 都复用同一套 ecscript 文件执行入口
-- 交互 shell 提供 `reload_rc`，用于在当前 session 中以全新脚本环境、扩展注册表和模块缓存重载 `~/.ecshrc`
-- `ecscript` 现在也可以通过 `cmd{ ... }` 结构化命令字面量进入 shell 命令桥，再由 `run` / `capture` / `text` / `lines` 消费执行
-- `ecscript` 现在支持 `|>` 值流语法糖：`x |> f(a, b)` 等价于 `f(x, a, b)`
-- 命令桥当前也支持单命令纯输出 shell builtin；pipeline 内 builtin 仍未接通
-- 文件级模块 MVP 已接通：`.ecs` 文件里可以 `use ./foo.ecs as foo`
-- 同一路径模块当前会复用同一个缓存对象，并检测循环导入
+- parser / lexer 行为：`tests/lexer.rs`、`tests/parser.rs`
+- 解释器 CLI 和示例脚本：`tests/ecscript_cli.rs`
+- shell 集成和命令桥：`tests/smoke.rs`
+- 纯 evaluator / builtin 单元测试：`src/ecscript/**`
 
 ### 已知边界（非 bug）
 
@@ -75,9 +48,11 @@
 
 6. **命令桥当前只在 shell-backed 执行上下文可用。** `run/capture/text/lines/with_env/with_cwd` 需要宿主提供 `ShellState`；独立 `ecscript` 解释器以及 `ecsh file.ecs` 这类纯文件脚本路径下，目前会报 `... is not available in this context`。
 
+7. **reference 才是 builtin/API 清单。** 本文会解释 builtin 的实现分组和运行时语义，但完整名称、签名和用户可见说明以 [ecscript-reference.md](ecscript-reference.md) 为准。
+
 ---
 
-## 1.1 运行入口
+## 运行入口
 
 当前已经可以直接运行独立解释器：
 
@@ -107,9 +82,9 @@ REPL 中：
 
 ---
 
-## 2. 词法
+## 词法
 
-### 2.1 空白与注释
+### 空白与注释
 
 空白字符被忽略，不产生 token。  
 注释也在 lexer 阶段直接跳过，不产生 token：
@@ -117,7 +92,7 @@ REPL 中：
 - `// ...`：单行注释，跳过直到换行
 - `/* ... */`：多行注释，跳过直到 `*/`
 
-### 2.2 标识符
+### 标识符
 
 ```text
 [A-Za-z_][A-Za-z0-9_]*
@@ -147,7 +122,7 @@ REPL 中：
 - `cmd` 在词法上是保留字；当后面紧跟 `{` 时，lexer 会直接把整个 `cmd{ ... }` 识别成单个 `CommandLiteral` token。
 - `true` / `false` / `nil` 在词法上是专门的 literal token，不是普通 `Identifier`。
 
-### 2.3 数字
+### 数字
 
 | 格式 | 示例 | 说明 |
 |------|------|------|
@@ -174,7 +149,7 @@ REPL 中：
 - `expected operator or ';' after expression, found keyword 'true'`
 - `expected operator or ';' after expression, found string literal`
 
-### 2.4 字符串
+### 字符串
 
 支持两种字符串：
 
@@ -202,7 +177,7 @@ let pattern = r"\d+\.\d+";
 `r"..."` 中的反斜杠按字面量保留，不会把 `\n` / `\t` 当成转义。  
 当前版本的 raw string 仍然以 `"` 结束，因此不能直接包含双引号本身。
 
-### 2.5 运算符
+### 运算符
 
 | 类别 | 符号 |
 |------|------|
@@ -213,7 +188,7 @@ let pattern = r"\d+\.\d+";
 
 单独的 `&` 或 `|` 会报错并提示使用 `&&` 或 `||`。
 
-### 2.6 分隔符与换行
+### 分隔符与换行
 
 `(` `)` `{` `}` `[` `]` `,` `.` `;` `:` `=` `+=` `-=` `*=` `/=` `%=` `..` `..=` `=>`
 
@@ -236,7 +211,7 @@ let pattern = r"\d+\.\d+";
 
 ---
 
-## 3. 语法
+## 语法
 
 当前 parser 接受的是 **script**，也就是一串语句。对 Tree-sitter 来说，最重要的是区分：
 
@@ -327,7 +302,7 @@ object_entry    = (identifier | string) ":" expr
 - `module_path` 当前不是单个 token；parser 会把 `Identifier` / `String` / `.` / `..` / `/` / `-` 这几类 token 拼起来，直到读到 `as`。
 - `command_literal` 当前在 lexer 阶段就是单 token；Tree-sitter 第一版更适合把它当一整块特殊语法岛，而不是完整复刻内部 shell parser。
 
-### 3.1 `{ ... }` 的歧义
+### `{ ... }` 的歧义
 
 在 **statement 位置** 遇到 `{ ... }` 会解析成 block。  
 对象字面量只在 **expression 位置** 解析，例如：
@@ -336,7 +311,7 @@ object_entry    = (identifier | string) ":" expr
 let x = {name: 1};
 ```
 
-### 3.2 `for in` 的三种来源
+### `for in` 的三种来源
 
 当前 `for x in expr { ... }` 支持：
 
@@ -349,7 +324,7 @@ for i in 0..=10 { ... }
 
 其中 `0..10` / `0..=10` 会在 parser 阶段直接产出 `Range` AST。
 
-### 3.3 Lambda 语法
+### Lambda 语法
 
 `(params) => expr` 或 `(params) => { stmts }`：
 
@@ -361,7 +336,7 @@ let no_args = () => 42;
 
 括号内参数可选。`=>` 后可跟单表达式（不需要 `return`）或 block。
 
-### 3.4 模块语法（MVP）
+### 模块语法（MVP）
 
 当前最小模块语法包括：
 
@@ -389,9 +364,9 @@ println(foo.name)
 
 ---
 
-## 4. 分号与块规则
+## 分号与块规则
 
-### 4.1 简单语句的终止规则
+### 简单语句的终止规则
 
 下列语句都走“简单语句终止”规则：
 
@@ -422,7 +397,7 @@ let z = 3
 
 但同一行里如果两个表达式/语句直接相邻，没有 `;` 或换行分隔，仍然会报错。
 
-### 4.2 不依赖分号的语句
+### 不依赖分号的语句
 
 - `if ... { ... }`
 - `while ... { ... }`
@@ -430,14 +405,14 @@ let z = 3
 - `func name(args) { ... }`
 - block 本身
 
-### 4.3 block 与尾表达式
+### block 与尾表达式
 
 当前 **不支持 block value / 尾表达式返回值**。
 但 block 内最后一条普通语句已经**不必**强制写分号，只要它后面跟着 `}` 即可。
 
 ---
 
-## 5. 优先级与结合性
+## 优先级与结合性
 
 从高到低：
 
@@ -462,9 +437,9 @@ let z = 3
 
 ---
 
-## 6. AST
+## AST
 
-### 6.1 语句节点
+### 语句节点
 
 ```rust
 pub enum StmtKind {
@@ -504,7 +479,7 @@ pub enum AssignTarget {
 }
 ```
 
-### 6.2 表达式节点
+### 表达式节点
 
 ```rust
 pub enum ExprKind {
@@ -535,7 +510,7 @@ pub struct RangeExpr {
 
 ---
 
-## 7. 运行时值
+## 运行时值
 
 ```rust
 pub enum Value {
@@ -558,7 +533,7 @@ pub enum Value {
 - `Function` 支持命名函数和匿名 lambda，闭包捕获自由变量
 - builtin 也是普通运行时值，可被遮蔽
 
-### 7.1 闭包模型：Slot / Binding / 自由变量提升
+### 闭包模型：Slot / Binding / 自由变量提升
 
 ```rust
 pub type Slot = Rc<RefCell<Value>>;
@@ -594,7 +569,7 @@ local env (params + locals)
 
 ---
 
-## 8. 环境与名字查找
+## 环境与名字查找
 
 `Environment` 支持父链：
 
@@ -637,9 +612,9 @@ func f() { return x; }
 
 ---
 
-## 9. 表达式求值语义
+## 表达式求值语义
 
-### 9.1 字面量
+### 字面量
 
 | 输入 | 输出 |
 |------|------|
@@ -651,7 +626,7 @@ func f() { return x; }
 | `[1, 2]` | `Value::Array(...)` |
 | `{name: 1}` | `Value::Object(...)` |
 
-### 9.2 调用
+### 调用
 
 当前可调用值有两类：
 
@@ -674,13 +649,13 @@ func f() { return x; }
 - `func(...) { ... }` 这种关键字形式的函数字面量
 - 普通 block / 函数体的尾表达式隐式返回
 
-### 9.3 容器访问
+### 容器访问
 
 - `arr[i]`：数组索引，`i` 必须是 `Int`
 - `obj["name"]`：对象索引，索引必须是 `String`
 - `obj.name`：对象字段访问
 
-### 9.4 区间表达式
+### 区间表达式
 
 当前支持：
 
@@ -699,56 +674,29 @@ range(0, 3)   // => [0, 1, 2, 3]
 slice(range(0, 5), 1, 4) // => [1, 2, 3]
 ```
 
-### 9.5 builtin
+### builtin 分发
 
-| 名字 | 语义 | 备注 |
-|------|------|------|
-| `env(name)` | 读取环境变量 | `name` 必须是 `String`，不存在时返回 `nil` |
-| `set_env(name, value)` | 设置当前进程环境变量 | 参数必须是 `String`；后续外部命令会继承 |
-| `unset_env(name)` | 删除当前进程环境变量 | `name` 必须是合法环境变量名 |
-| `cwd()` | 返回当前工作目录 | 返回绝对路径字符串 |
-| `set_cwd(path)` | 修改当前 shell 工作目录 | 同步 `PWD` / `OLDPWD` 并触发 `after_cd` |
-| `join_path(a, b)` | 按平台规则拼接两段路径 | 参数都必须是 `String` |
-| `trim(text)` | 去掉字符串两端空白 | 参数必须是 `String` |
-| `range(start, end)` | 生成闭区间整数数组 | `start` / `end` 必须是 `Int` |
-| `len(x)` | 返回长度 | 支持 `Array` / `Object` / `String` |
-| `print(v...)` | 输出一个或多个值 | 参数之间用空格分隔，不自动换行 |
-| `println(v...)` | 输出一个或多个值并换行 | 参数之间用空格分隔 |
-| `push(arr, v...)` | 向数组尾部追加一个或多个值 | 返回 `nil` |
-| `pop(arr)` | 弹出尾元素 | 空数组返回 `nil` |
-| `insert(arr, i, v)` | 在位置 `i` 插入 | `i == len` 合法 |
-| `remove(arr, i)` | 删除并返回位置 `i` 的元素 | 越界报错 |
-| `slice(arr, start, end)` | 返回半开区间子数组 | 结果是 `arr[start..end)` |
-| `command(program, arg...)` | 以 argv-first 方式构造命令值 | 不解析 shell 语法 |
-| `keys(obj)` | 返回对象 key 数组 | 按 key 排序 |
-| `values(obj)` | 返回对象 value 数组 | 顺序与排序后的 key 一致 |
-| `stdin()` | 读取当前脚本输入文本 | 文件执行和管道输入场景返回完整文本；交互 REPL 默认空字符串 |
-| `read_lines()` | 按行读取当前脚本输入 | 基于 `stdin()` 的文本桥，返回 `Array<String>` |
-| `write_lines(xs)` | 将数组逐项按行写到 stdout | 使用元素的 display 文本，每项自动换行 |
-| `to_json(x)` | 转成 JSON 字符串 | 对象 key 排序；检测循环引用 |
-| `from_json(text)` | 把 JSON 字符串解析成语言值 | 失败时报 `ParseInExpr` |
-| `run(cmd)` | 继承当前终端执行命令值 | 当前要求 shell-backed 执行上下文 |
-| `capture(cmd)` | 执行并返回结果对象 | 返回 `{ code, signal, stdout, stderr, duration_ms, ok }` |
-| `text(cmd)` | 返回命令 stdout 文本 | 当前要求 shell-backed 执行上下文 |
-| `lines(cmd)` | 返回命令 stdout 行数组 | 当前要求 shell-backed 执行上下文 |
-| `with_env(cmd, obj)` | 返回附加环境覆盖的新命令值 | 不修改当前 shell 全局环境 |
-| `with_cwd(cmd, path)` | 返回附加 cwd 覆盖的新命令值 | 不修改当前 shell 当前目录 |
-| `map(arr, func)` | 对数组逐项映射 | 缺失 `return` 视为 `nil` |
-| `filter(arr, func)` | 只保留谓词为 `true` 的元素 | 回调必须返回 `Bool` |
-| `reduce(arr, init, func)` | 左折叠 | 回调接收 `(acc, x)` |
-| `each(arr, func)` | 逐项执行回调 | 返回 `nil` |
-| `any(arr, func)` | 存在量词 | 回调必须返回 `Bool` |
-| `all(arr, func)` | 全称量词 | 回调必须返回 `Bool` |
-| `find(arr, func)` | 返回首个匹配元素 | 没有匹配时返回 `nil` |
-| `join(arr, sep)` | 按 display 文本连接数组元素 | `sep` 必须是 `String` |
-| `bind(key, func)` | 注册交互式按键绑定 | 回调接收 `{ key, line, cursor, cwd, history }` |
-| `register_command(name, func)` | 注册 ecsh 顶层命令 | 回调接收 `{ name, args, cwd }` |
-| `help([name])` | 返回 callable 总览或指定 callable 的详细帮助文本 | 无参返回 overview；传入名称时从统一 `Spec` / `CallableSpec` 表查询；未找到返回错误 |
-| `builtins()` | 列出所有 ecscript builtin 名称 | 返回 `Array<String>`，去重排序 |
-| `commands()` | 列出所有可调用命令（builtin + shell builtin + alias + script command） | 返回 `Array<Object>`，每项含 `name` / `kind` |
-| `extensions()` | 列出所有 shell extension 名称 | 返回去重排序后的 `Array<String>` |
+builtin 名称到实现的入口是 `src/ecscript/builtin/mod.rs::lookup_builtin`。完整用户可见清单、签名和示例以 [ecscript-reference.md](ecscript-reference.md#内置函数) 为准，本文只记录维护时需要注意的实现分组。
 
-### 9.6 脚本命令
+主要分组：
+
+- 环境和路径：读取/修改进程环境、当前目录和路径拼接。
+- IO：`stdin` 快照、按行读写、`print` / `println`。
+- 容器：数组长度、增删、切片、对象 key/value。
+- JSON：语言值和 JSON 文本互转，序列化时检测循环引用。
+- 命令桥：构造、执行、捕获和派生命令值。
+- 集合高阶函数：eager Array 上的 map/filter/reduce/each/any/all/find/join。
+- shell 扩展点：prompt、completion、bind、hook、脚本命令注册和受控目录切换。
+- introspection：`help`、`builtins`、`commands`、`extensions`，数据来源是统一 `Spec` / `CallableSpec`。
+
+维护规则：
+
+- 新增 builtin 时必须同时更新 `lookup_builtin`、`Value::Builtin`、`src/specs.rs` 和 reference。
+- 删除或重命名 builtin 时必须同步更新 `docs-check` 覆盖结果、测试和 examples。
+- 需要 shell 状态的 builtin 必须通过上下文显式检查，不应在独立解释器中隐式创建 shell 状态。
+- `help(...)` 和 VS Code hover 应复用 `src/specs.rs`，不要另建一份文档表。
+
+### 脚本命令
 
 `register_command(name, func)` 用于从 `.ecshrc` 或显式初始化的模块注册真正的 ecsh 命令，而不是文本 alias：
 
@@ -761,7 +709,7 @@ register_command("hello", (ctx) => {
 
 命令解析顺序为 shell builtin、脚本命令、PATH 外部命令。脚本命令回调返回 `nil` 时退出码为 `0`，也可以返回非负 `Int` 作为退出码。当前 MVP 只支持顶层前台执行，不支持管道、后台执行和重定向。
 
-### 9.x bridge 常见组合
+### bridge 常见组合
 
 text/value bridge 的最小用法：
 
@@ -818,9 +766,9 @@ let c2 = command("printf", "hello")
 
 ---
 
-## 10. 语句执行语义
+## 语句执行语义
 
-### 10.1 `let`
+### `let`
 
 ```ecs
 let x = expr;
@@ -830,7 +778,7 @@ let x = expr;
 - 再写入当前作用域
 - 当前作用域重复定义报 `DuplicateVariable`
 
-### 10.2 赋值
+### 赋值
 
 当前允许三种赋值目标：
 
@@ -848,7 +796,7 @@ let x = expr;
 
 当前实现不会把 `x += y` 直接粗暴降级成 `x = x + y`；对于字段/索引左值，会先解析一次目标，再完成读-改-写，避免 `arr[next_idx()] += 2` 这类情况把左值副作用执行两次。
 
-### 10.3 `if / else if / else`
+### `if / else if / else`
 
 ```ecs
 if cond { ... }
@@ -859,7 +807,7 @@ if cond { ... } else if cond2 { ... } else { ... }
 - `cond` 必须求值为 `Bool`
 - `then_body` / `else_body` 通过 block 语义执行
 
-### 10.4 `while`
+### `while`
 
 ```ecs
 while cond { ... }
@@ -869,7 +817,7 @@ while cond { ... }
 - `cond` 必须是 `Bool`
 - 支持 `break` / `continue`
 
-### 10.5 `for in`
+### `for in`
 
 ```ecs
 for v in arr { ... }
@@ -894,12 +842,12 @@ for i in 0..10 { ... }
 - `a..=b`：包含 `b`
 - 起点和终点都必须是 `Int`
 
-### 10.6 `break` / `continue`
+### `break` / `continue`
 
 - 只能在循环中使用
 - 顶层或普通 block 中使用会在运行时报错
 
-### 10.7 `func`
+### `func`
 
 ```ecs
 func add(a, b) {
@@ -918,7 +866,7 @@ func add(a, b) {
   - builtin
 - 当前**不会**透传调用者局部变量
 
-### 10.8 `return`
+### `return`
 
 - `return expr;`：返回表达式结果
 - `return;`：返回 `nil`
@@ -927,9 +875,9 @@ func add(a, b) {
 
 ---
 
-## 11. 错误模型
+## 错误模型
 
-### 11.1 ParseError
+### ParseError
 
 典型场景：
 
@@ -949,7 +897,7 @@ func add(a, b) {
 - `expected operator or ';' after expression, found string literal`
 - `unexpected '}' at top level`
 
-### 11.2 RuntimeError
+### RuntimeError
 
 当前运行时错误种类：
 
@@ -982,7 +930,7 @@ func add(a, b) {
 
 ---
 
-## 12. 偏移定位与源码格式化
+## 偏移定位与源码格式化
 
 `ParseError.offset` 和 `RuntimeError.offset` 都是**字节偏移**。
 
@@ -1013,46 +961,13 @@ ecscript parse error at 3:17: expected ')'
 
 ---
 
-## 13. 当前阶段速记
-
-- 已经支持 block、作用域、复合数据和 builtin
-- 已经支持 `if / else if / else`
-- 已经支持 `while`
-- 已经支持 `for in` 遍历数组、对象 key 和区间
-- 已经支持 `break` / `continue`
-- 已经支持命名函数、匿名函数、闭包捕获和 `return`
-- 已经支持 `//` / `/* */` 注释
-- 已经支持原始字符串 `r"..."`
-- 已经支持复合赋值 `+= -= *= /= %=`
-- 已经支持独立 `ecscript` 入口（REPL / file / `-e` / stdin）
-- 已经支持 `print(...)` / `println(...)`
-- `for in obj` 当前遍历的是 **排序后的 key**
-- `for in array` 当前使用 **迭代快照**，循环体修改原数组不会影响本轮迭代序列
-- 当前函数调用链是 **local → captures → global/root**，不继承调用者局部变量
-- 闭包只捕获自由变量，不会复制整个外层环境
-- 导出函数可以捕获模块私有顶层变量；模块对象只暴露 `pub` 名字，不暴露私有绑定
-- parse/runtime error 已经可以格式化成 `line:column + 源码行 + caret`
-
----
-
-## 14. 后续扩展方向
-
-从当前实现继续向下扩展时，后续工作通常会落在以下几类：
-
-- 多层闭包自动透传捕获（让 `() => () => x` 直接成立）
-- block value / 尾表达式
-- 搜索路径 / 命名导入 / `pub use`
-- shell 集成
-- 把源码格式化错误默认接入解释器入口
-- 字节码 VM / 后端演化
-
----
-
-## 15. Shell 扩展系统（ecsh 集成）
+## Shell 扩展系统实现注意
 
 以下 builtin 仅在 `ecsh` 交互环境下可用；独立 `ecscript` 解释器中调用会报 `... is not available in this context`。
 
-### 15.1 `hook(name, func)`
+用户可见 API、参数和返回协议见 [ecscript-reference.md](ecscript-reference.md#扩展-api)。这里仅记录实现层的生命周期和错误处理规则。
+
+### `hook(name, func)`
 
 注册一个钩子回调。支持的钩子名称：
 
@@ -1070,7 +985,7 @@ ecscript parse error at 3:17: expected ')'
 - **`after_cd`**：当 `set_cwd()` 或 `cd` 命令改变当前目录时触发。如果在 `after_cd` 钩子内部再次调用 `set_cwd()`，目录和环境变量（`PWD`/`OLDPWD`）仍会更新，但不会递归触发 `after_cd` 钩子。
 - **错误处理**：钩子回调中的运行时错误按 best-effort 处理：打印错误信息，跳过该 handler，继续执行后续 handler。
 
-### 15.2 `prompt(func)`
+### `prompt(func)`
 
 注册一个提示符生成函数。
 
@@ -1079,7 +994,7 @@ ecscript parse error at 3:17: expected ')'
 - 回调中发生运行时错误：打印错误（同类错误同会话只打印一次），回退到默认 prompt
 - 只能注册一个 prompt handler；多次调用会覆盖
 
-### 15.3 `complete(name, func)`
+### `complete(name, func)`
 
 为命令 `name` 注册一个补全 handler。
 
@@ -1089,7 +1004,7 @@ ecscript parse error at 3:17: expected ')'
 - 数组中单个 item 格式错误（缺失 `value`、类型不对、非 Object）：打印错误并跳过该 item，继续处理其余 item
 - 数组中所有 item 都被跳过时，回退到无脚本候选（不会 panic）
 
-### 15.4 `register_command(name, func)`
+### `register_command(name, func)`
 
 将一个 ecscript shell 命令注册为交互 shell 命令。
 
@@ -1098,7 +1013,7 @@ ecscript parse error at 3:17: expected ')'
 - 脚本命令不支持后台执行（`&`）、管道（`|`）、重定向（`<`/`>`/`>>`）
 - 可以在脚本命令内部调用 `set_cwd(path)` 来修改当前工作目录
 
-### 15.5 `set_cwd(path)`
+### `set_cwd(path)`
 
 修改当前 shell 工作目录。
 
@@ -1106,7 +1021,7 @@ ecscript parse error at 3:17: expected ')'
 - 如果存在 `after_cd` 钩子且当前不在 `after_cd` 分派中，会触发钩子
 - 如果已经在 `after_cd` 钩子内部，不会递归触发钩子（reentry guard）
 
-### 15.6 `bind(key, func)`
+### `bind(key, func)`
 
 为按键序列注册回调。
 

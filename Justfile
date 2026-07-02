@@ -6,6 +6,9 @@ test:
     cargo test --workspace
     cd packages/tree-sitter-ecscript && npm test
 
+docs-check:
+    bash ./scripts/docs-check.sh
+
 ts-generate:
     cd packages/tree-sitter-ecscript && npm run generate
 

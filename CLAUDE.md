@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-This repository uses [AGENT.md](AGENT.md) as
+This repository uses [AGENTS.md](AGENTS.md) as
 the canonical collaboration guide.
 
 When editing code, comments, tests, or documents in this project, follow
-`AGENT.md` directly.
+`AGENTS.md` directly.
