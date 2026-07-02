@@ -120,6 +120,15 @@ static ALL_SPECS: &[CallableSpec] = &[
         "len(\"ecsh\")"
     ),
     spec!(
+        "clone",
+        SpecKind::Builtin,
+        "Collection",
+        "clone(value)",
+        "Return an explicit deep copy of Arrays and Objects.",
+        "Array and Object values normally have reference semantics. clone(value) recursively allocates new containers. Function, Builtin, and Command values are not cloneable. Circular Array/Object references raise a runtime error.",
+        "let b = clone(a)"
+    ),
+    spec!(
         "keys",
         SpecKind::Builtin,
         "Collection",
@@ -624,6 +633,7 @@ mod tests {
             "read_lines",
             "range",
             "len",
+            "clone",
             "to_json",
             "from_json",
             "keys",
@@ -817,8 +827,8 @@ mod tests {
 
     #[test]
     fn total_spec_count() {
-        // 41 ecscript builtins + 6 shell extensions + 7 shell builtins
-        assert_eq!(all_specs().len(), 54);
+        // 42 ecscript builtins + 6 shell extensions + 7 shell builtins
+        assert_eq!(all_specs().len(), 55);
     }
 
     #[test]

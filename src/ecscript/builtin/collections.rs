@@ -1,4 +1,4 @@
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, path::PathBuf, rc::Rc};
 
 use crate::ecscript::{
     error::{RuntimeError, RuntimeErrorKind},
@@ -47,6 +47,67 @@ pub(super) fn len_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeE
                 other.type_name()
             ),
         )),
+    }
+}
+
+pub(super) fn clone_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
+    expect_arity(args, 1, span, "clone")?;
+    let mut visiting = HashSet::new();
+    clone_value(&args[0], span, &mut visiting)
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum VisitKey {
+    Array(*const RefCell<Vec<Value>>),
+    Object(*const RefCell<std::collections::HashMap<String, Value>>),
+}
+
+fn clone_value(
+    value: &Value,
+    span: usize,
+    visiting: &mut HashSet<VisitKey>,
+) -> Result<Value, RuntimeError> {
+    match value {
+        Value::Array(arr) => {
+            let key = VisitKey::Array(Rc::as_ptr(arr));
+            if !visiting.insert(key) {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::CircularReference,
+                    "clone cannot copy circular Array reference",
+                ));
+            }
+            let cloned_items = arr
+                .borrow()
+                .iter()
+                .map(|item| clone_value(item, span, visiting))
+                .collect::<Result<Vec<_>, _>>()?;
+            visiting.remove(&key);
+            Ok(Value::Array(Rc::new(RefCell::new(cloned_items))))
+        }
+        Value::Object(obj) => {
+            let key = VisitKey::Object(Rc::as_ptr(obj));
+            if !visiting.insert(key) {
+                return Err(RuntimeError::new(
+                    span,
+                    RuntimeErrorKind::CircularReference,
+                    "clone cannot copy circular Object reference",
+                ));
+            }
+            let cloned_fields = obj
+                .borrow()
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), clone_value(value, span, visiting)?)))
+                .collect::<Result<std::collections::HashMap<_, _>, RuntimeError>>()?;
+            visiting.remove(&key);
+            Ok(Value::Object(Rc::new(RefCell::new(cloned_fields))))
+        }
+        Value::Function(_) | Value::Builtin(_) | Value::Command(_) => Err(RuntimeError::new(
+            span,
+            RuntimeErrorKind::TypeMismatch,
+            format!("clone cannot copy {} values", value.type_name()),
+        )),
+        other => Ok(other.clone()),
     }
 }
 

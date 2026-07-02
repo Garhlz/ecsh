@@ -106,6 +106,25 @@ println(user.stats.commits);
 let obj = { name: "ecs", "long-key": 1 };
 ```
 
+Object 是字符串键的可变 record / map，不是 class，也不是任意 key 的 HashMap。规则：
+
+- Object key 类型只有 String。
+- `{ name: 1 }` 中的 `name` 是字段名语法糖，不会读取变量 `name`。
+- `{ name: 1 }` 等价于 `{ "name": 1 }`。
+- `obj.name` 是 `obj["name"]` 的短写，只能用于标识符形式的字段名。
+- `obj[key]` 会先求值 `key`，求值结果必须是 String。
+- 当前没有 `this`、method binding、class、prototype、inheritance。
+
+```ecs
+let key = "name";
+let obj = { name: "ecs", "long-key": 1 };
+
+println(obj.name);
+println(obj["name"]);
+println(obj[key]);
+println(obj["long-key"]);
+```
+
 ### 控制流
 
 ```ecs
@@ -332,7 +351,7 @@ let in_tmp = with_cwd(cmd{ /bin/pwd }, "/tmp");
 下列名称由 `just docs-check` 对照 `src/ecscript/builtin/mod.rs::lookup_builtin` 检查，确保本页没有漏掉当前已注册的 `ecscript` builtin。
 
 <!-- BEGIN CHECKED ECSCRIPT BUILTIN INDEX -->
-`all`, `any`, `builtins`, `capture`, `command`, `commands`, `complete`, `cwd`, `each`, `env`, `extensions`, `filter`, `find`, `from_json`, `help`, `hook`, `insert`, `join`, `join_path`, `keys`, `len`, `lines`, `map`, `pop`, `print`, `println`, `prompt`, `push`, `range`, `read_lines`, `reduce`, `register_command`, `remove`, `run`, `set_cwd`, `set_env`, `slice`, `stdin`, `text`, `to_json`, `trim`, `unset_env`, `values`, `with_cwd`, `with_env`, `write_lines`
+`all`, `any`, `builtins`, `capture`, `clone`, `command`, `commands`, `complete`, `cwd`, `each`, `env`, `extensions`, `filter`, `find`, `from_json`, `help`, `hook`, `insert`, `join`, `join_path`, `keys`, `len`, `lines`, `map`, `pop`, `print`, `println`, `prompt`, `push`, `range`, `read_lines`, `reduce`, `register_command`, `remove`, `run`, `set_cwd`, `set_env`, `slice`, `stdin`, `text`, `to_json`, `trim`, `unset_env`, `values`, `with_cwd`, `with_env`, `write_lines`
 <!-- END CHECKED ECSCRIPT BUILTIN INDEX -->
 
 ### 环境
@@ -373,6 +392,7 @@ println("done");
 |---------|------|
 | `range(start, end)` | 返回闭区间整数数组，`start > end` 时为空 |
 | `len(value)` | 返回 Array / Object / String 长度 |
+| `clone(value)` | 显式深拷贝 Array / Object；Function / Builtin / Command 不可拷贝 |
 | `push(array, value...)` | 追加元素 |
 | `pop(array)` | 弹出并返回最后一个元素，空数组返回 `nil` |
 | `insert(array, index, value)` | 插入元素 |
@@ -393,6 +413,22 @@ println("done");
 let xs = range(1, 5);
 println(xs |> filter((x) => x > 2) |> map((x) => x * 10) |> join(","));
 ```
+
+Array 和 Object 是引用语义：
+
+```ecs
+let a = [1, 2, 3];
+let b = a;
+b[0] = 9;
+println(a);      // [9, 2, 3]
+
+let c = clone(a);
+c[0] = 1;
+println(a);      // [9, 2, 3]
+println(c);      // [1, 2, 3]
+```
+
+`clone(value)` 会递归复制 Array / Object。Function、Builtin、Command 值不可拷贝；循环引用的容器会报 runtime error。标量值可以传给 `clone`，结果仍是同值。
 
 ### JSON
 

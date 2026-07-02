@@ -561,6 +561,55 @@ fn slice_rejects_start_after_end() {
 }
 
 #[test]
+fn clone_deep_copies_arrays_and_objects() {
+    let inner = Value::Array(Rc::new(RefCell::new(vec![Value::Int(1)])));
+    let original = Rc::new(RefCell::new(HashMap::from([("inner".into(), inner)])));
+
+    let result = run_builtin(
+        Builtin::Clone,
+        vec![Value::Object(original.clone())],
+        0,
+        ctx(),
+    )
+    .unwrap();
+
+    let Value::Object(copy) = result else {
+        panic!("expected object");
+    };
+    let Value::Array(copy_inner) = copy.borrow().get("inner").cloned().unwrap() else {
+        panic!("expected nested array");
+    };
+    copy_inner.borrow_mut().push(Value::Int(2));
+
+    let Value::Array(original_inner) = original.borrow().get("inner").cloned().unwrap() else {
+        panic!("expected nested array");
+    };
+    assert_eq!(*original_inner.borrow(), vec![Value::Int(1)]);
+    assert_eq!(*copy_inner.borrow(), vec![Value::Int(1), Value::Int(2)]);
+}
+
+#[test]
+fn clone_rejects_circular_arrays() {
+    let arr = Rc::new(RefCell::new(Vec::new()));
+    arr.borrow_mut().push(Value::Array(arr.clone()));
+
+    let err = run_builtin(Builtin::Clone, vec![Value::Array(arr)], 0, ctx()).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::CircularReference);
+    assert_eq!(err.message, "clone cannot copy circular Array reference");
+}
+
+#[test]
+fn clone_rejects_callable_and_command_values() {
+    let err = run_builtin(Builtin::Clone, vec![no_op_func()], 0, ctx()).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(err.message, "clone cannot copy Function values");
+
+    let err = run_builtin(Builtin::Clone, vec![Value::Builtin(Builtin::Len)], 0, ctx()).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(err.message, "clone cannot copy Builtin values");
+}
+
+#[test]
 fn map_treats_missing_return_as_nil() {
     let items = Rc::new(RefCell::new(vec![Value::Int(1), Value::Int(2)]));
     let func = Rc::new(crate::ecscript::value::Function {

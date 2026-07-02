@@ -15,9 +15,10 @@ mod json;
 mod support;
 
 use collections::{
-    all_builtin, any_builtin, each_builtin, filter_builtin, find_builtin, insert_builtin,
-    join_builtin, join_path_builtin, keys_builtin, len_builtin, map_builtin, pop_builtin,
-    push_builtin, range_builtin, reduce_builtin, remove_builtin, slice_builtin, values_builtin,
+    all_builtin, any_builtin, clone_builtin, each_builtin, filter_builtin, find_builtin,
+    insert_builtin, join_builtin, join_path_builtin, keys_builtin, len_builtin, map_builtin,
+    pop_builtin, push_builtin, range_builtin, reduce_builtin, remove_builtin, slice_builtin,
+    values_builtin,
 };
 use command::{
     capture_command_builtin, command_builder_builtin, command_result_object, lines_from_command,
@@ -42,6 +43,7 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
         "read_lines" => Some(Builtin::ReadLines),
         "range" => Some(Builtin::Range),
         "len" => Some(Builtin::Len),
+        "clone" => Some(Builtin::Clone),
         "to_json" => Some(Builtin::ToJson),
         "from_json" => Some(Builtin::FromJson),
         "keys" => Some(Builtin::Keys),
@@ -200,6 +202,7 @@ pub fn run_builtin(
             range_builtin(&args, span)
         }
         Builtin::Len => len_builtin(&args, span),
+        Builtin::Clone => clone_builtin(&args, span),
         Builtin::Push => push_builtin(&args, span),
         Builtin::Pop => pop_builtin(&args, span),
         Builtin::Insert => insert_builtin(&args, span),

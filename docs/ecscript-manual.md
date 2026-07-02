@@ -529,9 +529,12 @@ pub enum Value {
 
 说明：
 
-- `Array` / `Object` 是共享、可变容器
+- `Array` / `Object` 是共享、可变容器；`let b = a` 会复制 `Rc` 句柄，不会深拷贝内容
 - `Function` 支持命名函数和匿名 lambda，闭包捕获自由变量
+- `Function` 本身是 `Rc<Function>`，函数值赋值和传参会共享同一个函数对象
 - builtin 也是普通运行时值，可被遮蔽
+
+需要复制容器内容时，使用 `clone(value)` builtin。它会递归复制 Array / Object；Function、Builtin、Command 不可拷贝，循环引用会报 runtime error。
 
 ### 闭包模型：Slot / Binding / 自由变量提升
 
@@ -654,6 +657,16 @@ func f() { return x; }
 - `arr[i]`：数组索引，`i` 必须是 `Int`
 - `obj["name"]`：对象索引，索引必须是 `String`
 - `obj.name`：对象字段访问
+
+Object 的运行时模型是 `HashMap<String, Value>`。对象字面量中的裸 key 是 parser 语法糖：
+
+```ecs
+let obj = { name: 1 }
+```
+
+会在 AST 中保存为字符串 key `"name"`，不会读取变量 `name`。点访问 `obj.name` 同样是字符串字段访问的短写。索引访问 `obj[key]` 会正常求值 `key`，并要求结果是 String。
+
+这意味着 Object 是 string-key record / map，不是 Lua table、Python dict 或 class 系统。当前没有任意类型 key、`this`、method binding、prototype 或 inheritance。
 
 ### 区间表达式
 

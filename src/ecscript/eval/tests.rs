@@ -1080,6 +1080,25 @@ mod stmt_tests {
         );
     }
 
+    #[test]
+    fn eval_builtin_clone_breaks_array_aliasing() {
+        let env = Environment::new();
+        eval_script_src(
+            "let a = [1, 2, 3]; let b = clone(a); b[0] = 9;",
+            &env,
+        )
+        .unwrap();
+
+        let Value::Array(a) = env.get("a", 0).unwrap() else {
+            panic!("expected array");
+        };
+        let Value::Array(b) = env.get("b", 0).unwrap() else {
+            panic!("expected array");
+        };
+        assert_eq!(*a.borrow(), vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        assert_eq!(*b.borrow(), vec![Value::Int(9), Value::Int(2), Value::Int(3)]);
+    }
+
     // ── 控制流 ────────────────────────────────────────────
 
     #[test]
