@@ -11,6 +11,7 @@ The extension currently provides:
 - exposes a small status command for smoke-checking activation
 - exposes a syntax-tree command for inspecting the parsed CST
 - registers a tree-sitter-backed semantic tokens provider
+- shows spec-backed hover docs for builtin / shell extension names when available
 
 ## Planned architecture
 
@@ -50,11 +51,15 @@ just npm-install
 just vscode
 ```
 
-Refresh the copied query files and wasm from the grammar package:
+Refresh the copied query files, wasm, and exported callable specs from the monorepo:
 
 ```bash
 just sync-vscode-assets
 ```
+
+`npm run build` and `npm run watch` also run this sync step first, so direct
+extension development from `packages/vscode-ecscript/` does not start with
+missing generated assets.
 
 Then open this folder in VS Code and launch the extension host with the normal
 extension development workflow.
@@ -62,7 +67,7 @@ extension development workflow.
 The current minimum useful checks are:
 
 - `Ecscript: Show Extension Status`
-  - verifies that the extension can load the bundled parser wasm and highlight query
+  - verifies that the extension can load the bundled parser wasm, highlight query, and spec asset
 - `Ecscript: Show Syntax Tree`
   - parses the active `.ecs` document and opens its syntax tree as an S-expression
 

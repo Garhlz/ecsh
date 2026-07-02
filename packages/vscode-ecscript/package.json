@@ -82,7 +82,9 @@
     ]
   },
   "scripts": {
+    "prebuild": "bash ../../scripts/sync-vscode-assets.sh",
     "build": "tsc -p .",
+    "prewatch": "bash ../../scripts/sync-vscode-assets.sh",
     "watch": "tsc -w -p .",
     "build:wasm": "mkdir -p assets && ../tree-sitter-ecscript/node_modules/.bin/tree-sitter build --wasm -o ./assets/tree-sitter-ecscript.wasm ../tree-sitter-ecscript"
   },

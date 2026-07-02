@@ -52,6 +52,7 @@ type LoadedRuntime = {
   language: Language;
   query: Query;
   injectionQuery: Query;
+  specs: CallableSpec[];
   // NOTE: injectionQuery is loaded and exposed but not yet consumed by VS
   // Code's language injection pipeline. A future step should use
   // query.matches() to find @injection.content capture ranges and
@@ -60,6 +61,19 @@ type LoadedRuntime = {
   wasmPath: string;
   queryPath: string;
   injectionQueryPath: string;
+  specsPath: string;
+};
+
+type SpecKind = "builtin" | "shell_extension" | "shell_builtin";
+
+type CallableSpec = {
+  name: string;
+  kind: SpecKind;
+  category: string;
+  signature: string;
+  summary: string;
+  details: string;
+  examples: string[];
 };
 
 class EcscriptTreeSitterRuntime {
@@ -146,6 +160,7 @@ class EcscriptTreeSitterRuntime {
     const wasmPath = path.join(this.context.extensionPath, "assets", "tree-sitter-ecscript.wasm");
     const queryPath = path.join(this.context.extensionPath, "assets", "queries", "highlights.scm");
     const injectionQueryPath = path.join(this.context.extensionPath, "assets", "queries", "injections.scm");
+    const specsPath = path.join(this.context.extensionPath, "assets", "specs.json");
 
     await Parser.init({
       locateFile(scriptName: string) {
@@ -156,17 +171,19 @@ class EcscriptTreeSitterRuntime {
     let languageBytes: Buffer;
     let querySource: string;
     let injectionQuerySource: string;
+    let specsSource: string;
     try {
-      [languageBytes, querySource, injectionQuerySource] = await Promise.all([
+      [languageBytes, querySource, injectionQuerySource, specsSource] = await Promise.all([
         fs.readFile(wasmPath),
         fs.readFile(queryPath, "utf8"),
         fs.readFile(injectionQueryPath, "utf8"),
+        fs.readFile(specsPath, "utf8"),
       ]);
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code === "ENOENT") {
         throw new Error(
-          "Missing ecscript parser assets. Run `just sync-vscode-assets` from the monorepo root."
+          "Missing ecscript extension assets. Run `just sync-vscode-assets` from the monorepo root."
         );
       }
       throw err;
@@ -177,8 +194,19 @@ class EcscriptTreeSitterRuntime {
     parser.setLanguage(language);
     const query = new Query(language, querySource);
     const injectionQuery = new Query(language, injectionQuerySource);
+    const specs = JSON.parse(specsSource) as CallableSpec[];
 
-    return { parser, language, query, injectionQuery, wasmPath, queryPath, injectionQueryPath };
+    return {
+      parser,
+      language,
+      query,
+      injectionQuery,
+      specs,
+      wasmPath,
+      queryPath,
+      injectionQueryPath,
+      specsPath,
+    };
   }
 }
 
@@ -482,7 +510,110 @@ function readableNodeLabel(n: SyntaxNode): string {
   return label || "token";
 }
 
-// ── Hover (node type under cursor) ────────────────────────────────
+const IDENTIFIER_NODE_TYPES = new Set([
+  "identifier",
+  "variable_identifier",
+  "property_identifier",
+]);
+
+function specKindLabel(kind: SpecKind): string {
+  switch (kind) {
+    case "builtin":
+      return "ecscript builtin";
+    case "shell_extension":
+      return "shell extension";
+    case "shell_builtin":
+      return "shell builtin";
+  }
+}
+
+function nodeRange(document: vscode.TextDocument, node: SyntaxNode): vscode.Range {
+  const startLineText = document.lineAt(node.startPosition.row).text;
+  const endLineText = document.lineAt(node.endPosition.row).text;
+  return new vscode.Range(
+    node.startPosition.row,
+    byteColumnToUtf16Column(startLineText, node.startPosition.column),
+    node.endPosition.row,
+    byteColumnToUtf16Column(endLineText, node.endPosition.column),
+  );
+}
+
+type CallableTarget = {
+  name: string;
+  range: vscode.Range;
+};
+
+function sameNode(a: SyntaxNode | null | undefined, b: SyntaxNode | null | undefined): boolean {
+  return !!a
+    && !!b
+    && a.type === b.type
+    && a.startIndex === b.startIndex
+    && a.endIndex === b.endIndex;
+}
+
+function callableTargetAtNode(
+  document: vscode.TextDocument,
+  node: SyntaxNode,
+): CallableTarget | undefined {
+  let identifier: SyntaxNode | null = node;
+  while (identifier && !IDENTIFIER_NODE_TYPES.has(identifier.type)) {
+    identifier = identifier.parent;
+  }
+  if (!identifier) {
+    return undefined;
+  }
+
+  let callExpression: SyntaxNode | null | undefined = identifier.parent;
+  let callee: SyntaxNode | null | undefined = undefined;
+
+  if (callExpression?.type === "field_expression") {
+    const field = callExpression.childForFieldName("field");
+    if (!sameNode(field, identifier)) {
+      return undefined;
+    }
+    const fieldExpression = callExpression;
+    callExpression = fieldExpression.parent;
+    callee = fieldExpression;
+  } else {
+    callee = identifier;
+  }
+
+  if (callExpression?.type !== "call_expression") {
+    return undefined;
+  }
+  if (!sameNode(callExpression.childForFieldName("function"), callee)) {
+    return undefined;
+  }
+
+  const range = nodeRange(document, identifier);
+  return {
+    name: document.getText(range),
+    range,
+  };
+}
+
+function formatSpecHover(specs: CallableSpec[]): vscode.MarkdownString {
+  const md = new vscode.MarkdownString(undefined, true);
+  md.isTrusted = false;
+  for (const [index, spec] of specs.entries()) {
+    if (index > 0) {
+      md.appendMarkdown("\n---\n\n");
+    }
+    md.appendMarkdown(`**${spec.name}** (${specKindLabel(spec.kind)})\n\n`);
+    md.appendCodeblock(spec.signature, "ecscript");
+    md.appendMarkdown(`${spec.summary}\n\n`);
+    md.appendMarkdown(`${spec.details}\n\n`);
+    if (spec.examples.length > 0) {
+      md.appendMarkdown("Examples:\n");
+      for (const example of spec.examples.slice(0, 2)) {
+        md.appendCodeblock(example, "ecscript");
+      }
+    }
+  }
+  return md;
+}
+
+// ── Hover (spec docs or node type under cursor) ───────────────────
 
 class EcscriptHoverProvider implements vscode.HoverProvider {
   constructor(private readonly runtime: EcscriptTreeSitterRuntime) {}
@@ -492,31 +623,36 @@ class EcscriptHoverProvider implements vscode.HoverProvider {
     position: vscode.Position,
     _token: vscode.CancellationToken,
   ): Promise<vscode.Hover | undefined> {
-    const { parser } = await this.runtime.get();
-    const tree = parser.parse(document.getText());
+    const tree = await this.runtime.parseDocument(document);
     if (!tree) return undefined;
-    try {
-      const byteCol = byteColumnFromUtf16Column(
-        document.lineAt(position.line).text,
-        position.character,
-      );
-      // Use descendantForPosition (returns any node, including anonymous
-      // keywords/punctuation) and walk up to the nearest named ancestor.
-      let node = tree.rootNode.descendantForPosition({
-        row: position.line,
-        column: byteCol,
-      });
-      while (node && node.type === "") {
-        node = node.parent;
-      }
-      if (!node || node === tree.rootNode) return undefined;
-
-      return new vscode.Hover(
-        new vscode.MarkdownString().appendCodeblock(node.type, "ecscript"),
-      );
-    } finally {
-      tree.delete();
+    const runtime = await this.runtime.get();
+    const byteCol = byteColumnFromUtf16Column(
+      document.lineAt(position.line).text,
+      position.character,
+    );
+    // Use descendantForPosition (returns any node, including anonymous
+    // keywords/punctuation) and walk up to the nearest named ancestor.
+    let node = tree.rootNode.descendantForPosition({
+      row: position.line,
+      column: byteCol,
+    });
+    while (node && node.type === "") {
+      node = node.parent;
     }
+    if (!node || node === tree.rootNode) return undefined;
+
+    const target = callableTargetAtNode(document, node);
+    if (target) {
+      const specs = runtime.specs.filter((spec) => spec.name === target.name);
+      if (specs.length > 0) {
+        return new vscode.Hover(formatSpecHover(specs), target.range);
+      }
+    }
+
+    return new vscode.Hover(
+      new vscode.MarkdownString().appendCodeblock(node.type, "ecscript"),
+      nodeRange(document, node),
+    );
   }
 }
 
@@ -541,7 +677,7 @@ export function activate(context: vscode.ExtensionContext): void {
     try {
       const loaded = await runtime.get();
       await vscode.window.showInformationMessage(
-        `ecscript Tree-sitter runtime ready. wasm: ${path.basename(loaded.wasmPath)}, query: ${path.basename(loaded.queryPath)}, injection: ${path.basename(loaded.injectionQueryPath)}`
+        `ecscript Tree-sitter runtime ready. wasm: ${path.basename(loaded.wasmPath)}, query: ${path.basename(loaded.queryPath)}, injection: ${path.basename(loaded.injectionQueryPath)}, specs: ${path.basename(loaded.specsPath)}`
       );
     } catch (error) {
       await vscode.window.showWarningMessage(renderError(error));
