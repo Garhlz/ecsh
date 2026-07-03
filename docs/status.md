@@ -122,7 +122,7 @@
 - 没有字符串插值
 - 没有多行字符串
 - 模块没有搜索路径、命名导入和 `pub use`
-- `with_env`、`hook`、`prompt`、`complete`、`bind`、`register_command` 仍保留专门协议检查，尚未抽成通用结构签名
+- `with_env` 的 `Object<String>` 字段约束、extension 回调返回协议、hook name、key string、registered command 名称合法性仍保留专门检查
 
 ### 命令桥边界
 

@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use crate::ecscript::{
     error::{RuntimeError, RuntimeErrorKind},
@@ -293,6 +293,33 @@ pub(super) fn expect_shell_state<'a>(
             format!("{builtin_name} requires interactive ecsh shell context"),
         )
     })
+}
+
+pub(super) fn object_string_map_from_value(
+    value: &Value,
+    span: usize,
+    builtin_name: &str,
+) -> Result<BTreeMap<String, String>, RuntimeError> {
+    let Value::Object(obj) = value else {
+        unreachable!()
+    };
+
+    let mut out = BTreeMap::new();
+    for (key, value) in obj.borrow().iter() {
+        let Value::String(text) = value else {
+            return Err(RuntimeError::new(
+                span,
+                RuntimeErrorKind::TypeMismatch,
+                format!(
+                    "{builtin_name} expects Object<String>; key '{}' has {}",
+                    key,
+                    value.type_name()
+                ),
+            ));
+        };
+        out.insert(key.clone(), text.clone());
+    }
+    Ok(out)
 }
 
 pub(super) fn checked_array_index(

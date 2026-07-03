@@ -708,7 +708,7 @@ builtin 名称到实现的入口是 `src/ecscript/builtin/mod.rs::lookup_builtin
 - 简单参数协议应优先定义 `Signature` 并调用 `check_signature`，不要在 builtin 主逻辑中重复拼接参数数量和类型错误文案。
 - `ParamType::OneOf` 用于值可以接受多个类型的入口，例如 `len(Array|Object|String)`。
 - 通过签名检查后，后续 `match` / `let else` 只作为内部解包断言；用户可见错误应由签名层产生。
-- `with_env`、`hook`、`prompt`、`complete`、`bind`、`register_command` 这类结构协议仍保留专门检查，直到有通用对象字段协议抽象。
+- `with_env`、`hook`、`prompt`、`complete`、`bind`、`register_command` 的基础参数也应接入签名层；字段协议、枚举名、key string、命令名合法性和回调返回对象协议仍保留专门检查。
 - 删除或重命名 builtin 时必须同步更新 `docs-check` 覆盖结果、测试和 examples。
 - 需要 shell 状态的 builtin 必须通过上下文显式检查，不应在独立解释器中隐式创建 shell 状态。
 - `help(...)` 和 VS Code hover 应复用 `src/specs.rs`，不要另建一份文档表。

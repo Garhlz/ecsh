@@ -317,6 +317,14 @@ fn hook_rejects_unknown_name() {
 }
 
 #[test]
+fn hook_reports_name_type_from_signature() {
+    let err = run_builtin(Builtin::Hook, vec![Value::Int(1), no_op_func()], 0, ctx()).unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(err.message, "hook argument 'name' expects String, got Int");
+}
+
+#[test]
 fn prompt_and_complete_register_handlers() {
     let env = Environment::new();
     let state = interactive_state();
@@ -353,6 +361,34 @@ fn prompt_and_complete_register_handlers() {
 }
 
 #[test]
+fn prompt_reports_function_type_from_signature() {
+    let err = run_builtin(Builtin::Prompt, vec![Value::String("x".into())], 0, ctx()).unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "prompt argument 'function' expects Function, got String"
+    );
+}
+
+#[test]
+fn complete_reports_function_type_from_signature() {
+    let err = run_builtin(
+        Builtin::Complete,
+        vec![Value::String("git".into()), Value::Bool(true)],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "complete argument 'function' expects Function, got Bool"
+    );
+}
+
+#[test]
 fn register_command_registers_handler() {
     let env = Environment::new();
     let state = interactive_state();
@@ -366,6 +402,23 @@ fn register_command_registers_handler() {
     .unwrap();
 
     assert!(state.extensions.borrow().script_commands.contains_key("z"));
+}
+
+#[test]
+fn register_command_reports_name_type_from_signature() {
+    let err = run_builtin(
+        Builtin::RegisterCommand,
+        vec![Value::Int(1), no_op_func()],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "register_command argument 'name' expects String, got Int"
+    );
 }
 
 #[test]
@@ -385,6 +438,23 @@ fn register_command_rejects_shell_builtin_name() {
     assert_eq!(
         err.message,
         "register_command cannot override shell builtin: cd"
+    );
+}
+
+#[test]
+fn bind_reports_function_type_from_signature() {
+    let err = run_builtin(
+        Builtin::Bind,
+        vec![Value::String("ctrl-x".into()), Value::Nil],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "bind argument 'function' expects Function, got Nil"
     );
 }
 
@@ -961,6 +1031,35 @@ fn with_env_rejects_non_string_values() {
     assert_eq!(
         err.message,
         "with_env expects Object<String>; key 'EXTRA' has Int"
+    );
+}
+
+#[test]
+fn with_env_reports_command_type_from_signature() {
+    let env_obj = Value::Object(Rc::new(RefCell::new(HashMap::new())));
+    let err = run_builtin(Builtin::WithEnv, vec![Value::Int(1), env_obj], 0, ctx()).unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "with_env argument 'command' expects Command, got Int"
+    );
+}
+
+#[test]
+fn with_env_reports_env_map_type_from_signature() {
+    let err = run_builtin(
+        Builtin::WithEnv,
+        vec![simple_command_value("printf"), Value::String("x".into())],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "with_env argument 'env_map' expects Object, got String"
     );
 }
 

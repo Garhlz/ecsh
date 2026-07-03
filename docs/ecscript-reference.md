@@ -370,9 +370,10 @@ push argument 'array' expects Array, got Int
 - 集合和值流：`range`、`len`、`clone`、`keys`、`values`、`push`、`pop`、`insert`、`remove`、`slice`、`map`、`filter`、`reduce`、`each`、`any`、`all`、`find`、`join`、`join_path`
 - 命令值：`command`、`run`、`capture`、`text`、`lines`、`with_cwd`
 - 输出：`print`、`println`
-- shell 目录 API：`set_cwd`
+- shell 扩展注册和目录 API：`hook`、`prompt`、`complete`、`bind`、`register_command`、`set_cwd`
+- 环境派生命令：`with_env` 的基础参数类型
 
-复杂协议仍使用专门检查：`with_env` 的 `Object<String>` 字段约束，以及 `hook`、`prompt`、`complete`、`bind`、`register_command` 的扩展协议。
+下列附加协议仍使用专门检查：`with_env` 的 `Object<String>` 字段约束、`hook` 的 hook name、`bind` 的 key string、`register_command` 的命令名合法性和 shell builtin 覆盖检查，以及 `complete` / `bind` 等回调返回对象协议。
 
 ### 环境
 

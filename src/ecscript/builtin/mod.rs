@@ -28,7 +28,7 @@ use introspection::{builtins_builtin, commands_builtin, extensions_builtin, help
 use io::{format_print_args, write_stdout};
 use json::{from_json_value, to_json_value};
 use support::{
-    check_signature, expect_arity, expect_array, expect_function, expect_shell_state, param,
+    check_signature, expect_array, expect_shell_state, object_string_map_from_value, param,
     ParamType, Signature,
 };
 
@@ -48,6 +48,13 @@ const SIG_TO_JSON: Signature = Signature::exact("to_json", &[param("value", Para
 const SIG_FROM_JSON: Signature = Signature::exact("from_json", &[param("text", ParamType::String)]);
 const SIG_PRINT: Signature = Signature::at_least("print", &[], Some(ParamType::Any), 0);
 const SIG_PRINTLN: Signature = Signature::at_least("println", &[], Some(ParamType::Any), 0);
+const SIG_WITH_ENV: Signature = Signature::exact(
+    "with_env",
+    &[
+        param("command", ParamType::Command),
+        param("env_map", ParamType::Object),
+    ],
+);
 const SIG_WITH_CWD: Signature = Signature::exact(
     "with_cwd",
     &[
@@ -57,8 +64,37 @@ const SIG_WITH_CWD: Signature = Signature::exact(
 );
 const SIG_WRITE_LINES: Signature =
     Signature::exact("write_lines", &[param("array", ParamType::Array)]);
+const SIG_HOOK: Signature = Signature::exact(
+    "hook",
+    &[
+        param("name", ParamType::String),
+        param("function", ParamType::Function),
+    ],
+);
+const SIG_PROMPT: Signature = Signature::exact("prompt", &[param("function", ParamType::Function)]);
+const SIG_COMPLETE: Signature = Signature::exact(
+    "complete",
+    &[
+        param("name", ParamType::String),
+        param("function", ParamType::Function),
+    ],
+);
+const SIG_REGISTER_COMMAND: Signature = Signature::exact(
+    "register_command",
+    &[
+        param("name", ParamType::String),
+        param("function", ParamType::Function),
+    ],
+);
 const SIG_SET_CWD: Signature = Signature::exact("set_cwd", &[param("path", ParamType::String)]);
 const SIG_TRIM: Signature = Signature::exact("trim", &[param("text", ParamType::String)]);
+const SIG_BIND: Signature = Signature::exact(
+    "bind",
+    &[
+        param("key", ParamType::String),
+        param("function", ParamType::Function),
+    ],
+);
 
 /// 根据名字查找内置函数枚举。
 ///
@@ -120,8 +156,8 @@ pub fn lookup_builtin(name: &str) -> Option<Builtin> {
 /// 分发执行内置函数。
 ///
 /// 所有内置函数共享一套类型检查和错误报告模式：
-/// 先通过 [`expect_arity`] / [`expect_array`] / [`expect_function`]
-/// 验证参数，再执行具体逻辑。
+/// 简单参数先通过 [`check_signature`] 验证，复杂对象协议再由 builtin
+/// 自己做字段级检查。
 pub fn run_builtin(
     builtin: Builtin,
     args: Vec<Value>,
@@ -269,43 +305,15 @@ pub fn run_builtin(
         Builtin::WithEnv => {
             // `with_env(cmd, obj)` 返回派生后的命令值；
             // 只更新命令值自己的环境覆盖，不修改当前 shell 进程环境。
-            expect_arity(&args, 2, span, "with_env")?;
+            check_signature(&SIG_WITH_ENV, &args, span)?;
             let Value::Command(command) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!(
-                        "with_env expects Command as first argument, got {}",
-                        args[0].type_name()
-                    ),
-                ));
-            };
-            let Value::Object(env_obj) = &args[1] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!(
-                        "with_env expects Object as second argument, got {}",
-                        args[1].type_name()
-                    ),
-                ));
+                unreachable!()
             };
 
             let mut derived = command.clone();
             let mut env_override = derived.env_override.take().unwrap_or_default();
-            for (key, value) in env_obj.borrow().iter() {
-                let Value::String(text) = value else {
-                    return Err(RuntimeError::new(
-                        span,
-                        RuntimeErrorKind::TypeMismatch,
-                        format!(
-                            "with_env expects Object<String>; key '{}' has {}",
-                            key,
-                            value.type_name()
-                        ),
-                    ));
-                };
-                env_override.insert(key.clone(), text.clone());
+            for (key, value) in object_string_map_from_value(&args[1], span, "with_env")? {
+                env_override.insert(key, value);
             }
             derived.env_override = Some(env_override);
             Ok(Value::Command(derived))
@@ -345,14 +353,10 @@ pub fn run_builtin(
             Ok(Value::Nil)
         }
         Builtin::Hook => {
-            expect_arity(&args, 2, span, "hook")?;
+            check_signature(&SIG_HOOK, &args, span)?;
             let state = expect_shell_state(ctx.shell_state, span, "hook")?;
             let Value::String(name) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("hook expects String name, got {}", args[0].type_name()),
-                ));
+                unreachable!()
             };
             let hook_name = HookName::parse(name).ok_or_else(|| {
                 RuntimeError::new(
@@ -361,53 +365,48 @@ pub fn run_builtin(
                     format!("unknown hook '{}'", name),
                 )
             })?;
-            let func = expect_function(&args[1], span, "hook")?;
+            let Value::Function(func) = &args[1] else {
+                unreachable!()
+            };
             state
                 .extensions
                 .borrow_mut()
                 .hooks
                 .entry(hook_name)
                 .or_default()
-                .push(Value::Function(func));
+                .push(Value::Function(func.clone()));
             Ok(Value::Nil)
         }
         Builtin::Prompt => {
-            expect_arity(&args, 1, span, "prompt")?;
+            check_signature(&SIG_PROMPT, &args, span)?;
             let state = expect_shell_state(ctx.shell_state, span, "prompt")?;
-            let func = expect_function(&args[0], span, "prompt")?;
-            state.extensions.borrow_mut().prompt_handler = Some(Value::Function(func));
+            let Value::Function(func) = &args[0] else {
+                unreachable!()
+            };
+            state.extensions.borrow_mut().prompt_handler = Some(Value::Function(func.clone()));
             Ok(Value::Nil)
         }
         Builtin::Complete => {
-            expect_arity(&args, 2, span, "complete")?;
+            check_signature(&SIG_COMPLETE, &args, span)?;
             let state = expect_shell_state(ctx.shell_state, span, "complete")?;
             let Value::String(name) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("complete expects String name, got {}", args[0].type_name()),
-                ));
+                unreachable!()
             };
-            let func = expect_function(&args[1], span, "complete")?;
+            let Value::Function(func) = &args[1] else {
+                unreachable!()
+            };
             state
                 .extensions
                 .borrow_mut()
                 .completions
-                .insert(name.clone(), Value::Function(func));
+                .insert(name.clone(), Value::Function(func.clone()));
             Ok(Value::Nil)
         }
         Builtin::RegisterCommand => {
-            expect_arity(&args, 2, span, "register_command")?;
+            check_signature(&SIG_REGISTER_COMMAND, &args, span)?;
             let state = expect_shell_state(ctx.shell_state, span, "register_command")?;
             let Value::String(name) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!(
-                        "register_command expects String name, got {}",
-                        args[0].type_name()
-                    ),
-                ));
+                unreachable!()
             };
             if name.is_empty()
                 || name.contains('/')
@@ -426,12 +425,14 @@ pub fn run_builtin(
                     format!("register_command cannot override shell builtin: {name}"),
                 ));
             }
-            let func = expect_function(&args[1], span, "register_command")?;
+            let Value::Function(func) = &args[1] else {
+                unreachable!()
+            };
             state
                 .extensions
                 .borrow_mut()
                 .script_commands
-                .insert(name.clone(), Value::Function(func));
+                .insert(name.clone(), Value::Function(func.clone()));
             Ok(Value::Nil)
         }
         Builtin::SetCwd => {
@@ -453,22 +454,20 @@ pub fn run_builtin(
             Ok(Value::String(text.trim().to_string()))
         }
         Builtin::Bind => {
-            expect_arity(&args, 2, span, "bind")?;
+            check_signature(&SIG_BIND, &args, span)?;
             let state = expect_shell_state(ctx.shell_state, span, "bind")?;
             let Value::String(key) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("bind expects String key, got {}", args[0].type_name()),
-                ));
+                unreachable!()
             };
-            let func = expect_function(&args[1], span, "bind")?;
+            let Value::Function(func) = &args[1] else {
+                unreachable!()
+            };
             crate::extensions::parse_key_string(key, span)?;
             state
                 .extensions
                 .borrow_mut()
                 .key_bindings
-                .insert(key.clone(), Value::Function(func));
+                .insert(key.clone(), Value::Function(func.clone()));
             Ok(Value::Nil)
         }
         Builtin::Help => help_builtin(&args, span, &ctx),
