@@ -24,7 +24,7 @@
 | Shell 解析与诊断 | Done | 结构化 `ParseError`、续行读取、shell parse 错误定位、历史按完整命令写入已落地 |
 | Shell 运行时展开 | Done | 支持 `$VAR`、`${expr}`、`${env("VAR")}`、`$(cmd)`、`${...arr}` |
 | Shell 交互体验 | Done with limits | rustyline、历史、Tab 补全、alias / unalias、`trap EXIT|INT`、`type` / `which` / `history` 已可用 |
-| ecscript 核心语言 | Done with limits | 表达式、语句、数组/对象、控制流、函数、lambda、闭包、模块 MVP、源码定位错误已可用 |
+| ecscript 核心语言 | Done with limits | 表达式、语句、数组/对象、控制流、函数、lambda、闭包、模块 MVP、源码定位错误、builtin 运行时签名检查已可用 |
 | ecscript CLI / REPL / 文件模式 | Done | `ecscript` REPL、stdin、文件执行、`-e` 已可用；`ecsh file.ecs` 走文件脚本路径 |
 | 顶层集成 | Done | 交互式 `ecsh` 顶层可按输入分派到 shell 或 ecscript；`source` / `.` 共享当前 shell 的 script env |
 | 命令桥 | Done with limits | `cmd{}`、`command(...)`、`run`、`capture`、`text`、`lines`、`with_env`、`with_cwd` 已可用 |
@@ -68,6 +68,7 @@
 - 模块 MVP：`pub let`、`pub func`、`use ./foo.ecs as foo`
 - 模块缓存和循环导入检测
 - parse/runtime 错误的源码定位格式化
+- 大多数简单 builtin 已接入统一运行时签名检查，参数数量和参数类型错误包含 builtin 名、参数名、期望类型和实际类型
 
 ### 命令桥与交互扩展
 
@@ -121,6 +122,7 @@
 - 没有字符串插值
 - 没有多行字符串
 - 模块没有搜索路径、命名导入和 `pub use`
+- `with_env`、`hook`、`prompt`、`complete`、`bind`、`register_command` 仍保留专门协议检查，尚未抽成通用结构签名
 
 ### 命令桥边界
 

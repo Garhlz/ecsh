@@ -27,7 +27,38 @@ use command::{
 use introspection::{builtins_builtin, commands_builtin, extensions_builtin, help_builtin};
 use io::{format_print_args, write_stdout};
 use json::{from_json_value, to_json_value};
-use support::{expect_arity, expect_array, expect_function, expect_shell_state};
+use support::{
+    check_signature, expect_arity, expect_array, expect_function, expect_shell_state, param,
+    ParamType, Signature,
+};
+
+const SIG_ENV: Signature = Signature::exact("env", &[param("name", ParamType::String)]);
+const SIG_SET_ENV: Signature = Signature::exact(
+    "set_env",
+    &[
+        param("name", ParamType::String),
+        param("value", ParamType::String),
+    ],
+);
+const SIG_UNSET_ENV: Signature = Signature::exact("unset_env", &[param("name", ParamType::String)]);
+const SIG_CWD: Signature = Signature::exact("cwd", &[]);
+const SIG_STDIN: Signature = Signature::exact("stdin", &[]);
+const SIG_READ_LINES: Signature = Signature::exact("read_lines", &[]);
+const SIG_TO_JSON: Signature = Signature::exact("to_json", &[param("value", ParamType::Any)]);
+const SIG_FROM_JSON: Signature = Signature::exact("from_json", &[param("text", ParamType::String)]);
+const SIG_PRINT: Signature = Signature::at_least("print", &[], Some(ParamType::Any), 0);
+const SIG_PRINTLN: Signature = Signature::at_least("println", &[], Some(ParamType::Any), 0);
+const SIG_WITH_CWD: Signature = Signature::exact(
+    "with_cwd",
+    &[
+        param("command", ParamType::Command),
+        param("path", ParamType::String),
+    ],
+);
+const SIG_WRITE_LINES: Signature =
+    Signature::exact("write_lines", &[param("array", ParamType::Array)]);
+const SIG_SET_CWD: Signature = Signature::exact("set_cwd", &[param("path", ParamType::String)]);
+const SIG_TRIM: Signature = Signature::exact("trim", &[param("text", ParamType::String)]);
 
 /// 根据名字查找内置函数枚举。
 ///
@@ -104,13 +135,9 @@ pub fn run_builtin(
             command_builder_builtin(&args, span)
         }
         Builtin::Env => {
-            expect_arity(&args, 1, span, "env")?;
+            check_signature(&SIG_ENV, &args, span)?;
             let Value::String(name) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("env expects String, got {}", args[0].type_name()),
-                ));
+                unreachable!()
             };
 
             Ok(match std::env::var(name) {
@@ -119,20 +146,12 @@ pub fn run_builtin(
             })
         }
         Builtin::SetEnv => {
-            expect_arity(&args, 2, span, "set_env")?;
+            check_signature(&SIG_SET_ENV, &args, span)?;
             let Value::String(name) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("set_env expects String name, got {}", args[0].type_name()),
-                ));
+                unreachable!()
             };
             let Value::String(value) = &args[1] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("set_env expects String value, got {}", args[1].type_name()),
-                ));
+                unreachable!()
             };
             if !crate::builtin::is_valid_env_key(name) {
                 return Err(RuntimeError::new(
@@ -147,13 +166,9 @@ pub fn run_builtin(
             Ok(Value::Nil)
         }
         Builtin::UnsetEnv => {
-            expect_arity(&args, 1, span, "unset_env")?;
+            check_signature(&SIG_UNSET_ENV, &args, span)?;
             let Value::String(name) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("unset_env expects String name, got {}", args[0].type_name()),
-                ));
+                unreachable!()
             };
             if !crate::builtin::is_valid_env_key(name) {
                 return Err(RuntimeError::new(
@@ -167,7 +182,7 @@ pub fn run_builtin(
             Ok(Value::Nil)
         }
         Builtin::Cwd => {
-            expect_arity(&args, 0, span, "cwd")?;
+            check_signature(&SIG_CWD, &args, span)?;
             let cwd = std::env::current_dir().map_err(|err| {
                 RuntimeError::new(
                     span,
@@ -180,14 +195,14 @@ pub fn run_builtin(
         Builtin::Stdin => {
             // `stdin()` 返回执行入口预先提供的 stdin 文本快照。
             // 它不主动从管道阻塞读取，适合脚本参数或重定向输入场景。
-            expect_arity(&args, 0, span, "stdin")?;
+            check_signature(&SIG_STDIN, &args, span)?;
             Ok(Value::String(
                 ctx.stdin_text.unwrap_or_default().to_string(),
             ))
         }
         Builtin::ReadLines => {
             // `read_lines()` 是 `stdin()` 的按行视图，方便直接接数组高阶函数。
-            expect_arity(&args, 0, span, "read_lines")?;
+            check_signature(&SIG_READ_LINES, &args, span)?;
             let lines = ctx
                 .stdin_text
                 .unwrap_or_default()
@@ -211,18 +226,14 @@ pub fn run_builtin(
         Builtin::Keys => keys_builtin(&args, span),
         Builtin::Values => values_builtin(&args, span),
         Builtin::ToJson => {
-            expect_arity(&args, 1, span, "to_json")?;
+            check_signature(&SIG_TO_JSON, &args, span)?;
             let json = to_json_value(&args[0], span)?;
             Ok(Value::String(json.to_string()))
         }
         Builtin::FromJson => {
-            expect_arity(&args, 1, span, "from_json")?;
+            check_signature(&SIG_FROM_JSON, &args, span)?;
             let Value::String(text) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("from_json expects String, got {}", args[0].type_name()),
-                ));
+                unreachable!()
             };
             let parsed: serde_json::Value = serde_json::from_str(text).map_err(|err| {
                 RuntimeError::new(
@@ -234,11 +245,13 @@ pub fn run_builtin(
             from_json_value(&parsed, span)
         }
         Builtin::Print => {
+            check_signature(&SIG_PRINT, &args, span)?;
             let text = format_print_args(&args);
             write_stdout(&text, false, span)?;
             Ok(Value::Nil)
         }
         Builtin::Println => {
+            check_signature(&SIG_PRINTLN, &args, span)?;
             let text = format_print_args(&args);
             write_stdout(&text, true, span)?;
             Ok(Value::Nil)
@@ -299,26 +312,12 @@ pub fn run_builtin(
         }
         Builtin::WithCwd => {
             // `with_cwd(cmd, path)` 也是不可变派生：返回一个带 cwd override 的新命令值。
-            expect_arity(&args, 2, span, "with_cwd")?;
+            check_signature(&SIG_WITH_CWD, &args, span)?;
             let Value::Command(command) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!(
-                        "with_cwd expects Command as first argument, got {}",
-                        args[0].type_name()
-                    ),
-                ));
+                unreachable!()
             };
             let Value::String(path) = &args[1] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!(
-                        "with_cwd expects String as second argument, got {}",
-                        args[1].type_name()
-                    ),
-                ));
+                unreachable!()
             };
 
             let mut derived = command.clone();
@@ -337,7 +336,7 @@ pub fn run_builtin(
         Builtin::WriteLines => {
             // `write_lines(arr)` 把数组每项按 display 风格输出到 stdout，每项占一行。
             // 这是 value 流转为文本输出的反向桥接入口。
-            expect_arity(&args, 1, span, "write_lines")?;
+            check_signature(&SIG_WRITE_LINES, &args, span)?;
             let arr = expect_array(&args[0], span, "write_lines")?;
             let items = arr.borrow().clone();
             for item in items {
@@ -436,14 +435,10 @@ pub fn run_builtin(
             Ok(Value::Nil)
         }
         Builtin::SetCwd => {
-            expect_arity(&args, 1, span, "set_cwd")?;
+            check_signature(&SIG_SET_CWD, &args, span)?;
             let state = expect_shell_state(ctx.shell_state, span, "set_cwd")?;
             let Value::String(path) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("set_cwd expects String path, got {}", args[0].type_name()),
-                ));
+                unreachable!()
             };
             crate::builtin::set_current_dir_with_hooks(path, state).map_err(|err| {
                 RuntimeError::new(span, RuntimeErrorKind::IoError, format!("set_cwd: {err}"))
@@ -451,13 +446,9 @@ pub fn run_builtin(
             Ok(Value::Nil)
         }
         Builtin::Trim => {
-            expect_arity(&args, 1, span, "trim")?;
+            check_signature(&SIG_TRIM, &args, span)?;
             let Value::String(text) = &args[0] else {
-                return Err(RuntimeError::new(
-                    span,
-                    RuntimeErrorKind::TypeMismatch,
-                    format!("trim expects String, got {}", args[0].type_name()),
-                ));
+                unreachable!()
             };
             Ok(Value::String(text.trim().to_string()))
         }

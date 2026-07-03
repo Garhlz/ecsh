@@ -22,7 +22,6 @@
 
 ### P1：文档和示例
 
-- 为 `docs/ecscript-reference.md` 中的 builtin 表补齐签名和错误边界。
 - 为 [shell-reference.md](shell-reference.md) 补充更多真实交互例子。
 - 将 `examples/ecscript/` 按“语言基础 / 命令桥 / 交互扩展”分组。
 - 评估是否为 `ecscript-reference.md` 生成 GitHub Pages 页面。

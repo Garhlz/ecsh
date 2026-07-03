@@ -354,6 +354,26 @@ let in_tmp = with_cwd(cmd{ /bin/pwd }, "/tmp");
 `all`, `any`, `builtins`, `capture`, `clone`, `command`, `commands`, `complete`, `cwd`, `each`, `env`, `extensions`, `filter`, `find`, `from_json`, `help`, `hook`, `insert`, `join`, `join_path`, `keys`, `len`, `lines`, `map`, `pop`, `print`, `println`, `prompt`, `push`, `range`, `read_lines`, `reduce`, `register_command`, `remove`, `run`, `set_cwd`, `set_env`, `slice`, `stdin`, `text`, `to_json`, `trim`, `unset_env`, `values`, `with_cwd`, `with_env`, `write_lines`
 <!-- END CHECKED ECSCRIPT BUILTIN INDEX -->
 
+### 参数检查和错误格式
+
+简单 builtin 的参数数量和参数类型由运行时签名统一检查。错误信息包含 builtin 名、参数名、期望类型和实际类型：
+
+```text
+range argument 'start' expects Int, got Bool
+len argument 'value' expects Array, Object, or String, got Function
+push argument 'array' expects Array, got Int
+```
+
+已接入统一签名检查的 builtin：
+
+- 环境 / IO / JSON / 字符串：`env`、`set_env`、`unset_env`、`cwd`、`stdin`、`read_lines`、`write_lines`、`to_json`、`from_json`、`trim`
+- 集合和值流：`range`、`len`、`clone`、`keys`、`values`、`push`、`pop`、`insert`、`remove`、`slice`、`map`、`filter`、`reduce`、`each`、`any`、`all`、`find`、`join`、`join_path`
+- 命令值：`command`、`run`、`capture`、`text`、`lines`、`with_cwd`
+- 输出：`print`、`println`
+- shell 目录 API：`set_cwd`
+
+复杂协议仍使用专门检查：`with_env` 的 `Object<String>` 字段约束，以及 `hook`、`prompt`、`complete`、`bind`、`register_command` 的扩展协议。
+
 ### 环境
 
 | Builtin | 说明 |
@@ -362,7 +382,7 @@ let in_tmp = with_cwd(cmd{ /bin/pwd }, "/tmp");
 | `set_env(name, value)` | 设置当前进程环境变量 |
 | `unset_env(name)` | 删除当前进程环境变量 |
 | `cwd()` | 返回当前工作目录 |
-| `join_path(a, b, ...)` | 按平台规则拼接路径 |
+| `join_path(left, right)` | 按平台规则拼接两个路径片段 |
 
 ```ecs
 println(env("HOME"));
@@ -462,6 +482,8 @@ println(payload.ok);
 | `with_env(cmd, obj)` | 返回带环境覆盖的新命令值 |
 | `with_cwd(cmd, path)` | 返回带 cwd 覆盖的新命令值 |
 
+`command(program, arg...)` 的 `program` 必须是 String；后续 argv 片段接受 String / Int / Float / Bool / Nil，不接受 Array / Object / Function / Builtin / Command。
+
 ### 内省
 
 | Builtin | 说明 |
@@ -488,7 +510,7 @@ println(commands());
 
 | Builtin | 说明 |
 |---------|------|
-| `trim(value)` | 去掉字符串首尾空白 |
+| `trim(text)` | 去掉字符串首尾空白 |
 
 ```ecs
 println(trim("  hi  "));

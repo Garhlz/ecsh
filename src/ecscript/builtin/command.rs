@@ -6,16 +6,21 @@ use crate::ecscript::{
 };
 use crate::executor::{capture_command_invocation, run_command_invocation};
 
-use super::support::{expect_arity, shell_word_from_value};
+use super::support::{check_signature, param, shell_word_from_value, ParamType, Signature};
+
+const SIG_COMMAND: Signature = Signature::at_least(
+    "command",
+    &[param("program", ParamType::String)],
+    Some(ParamType::Any),
+    1,
+);
+const SIG_RUN: Signature = Signature::exact("run", &[param("command", ParamType::Command)]);
+const SIG_CAPTURE: Signature = Signature::exact("capture", &[param("command", ParamType::Command)]);
+const SIG_TEXT: Signature = Signature::exact("text", &[param("command", ParamType::Command)]);
+const SIG_LINES: Signature = Signature::exact("lines", &[param("command", ParamType::Command)]);
 
 pub(super) fn command_builder_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::ArityMismatch,
-            "command expects at least 1 argument, got 0",
-        ));
-    }
+    check_signature(&SIG_COMMAND, args, span)?;
 
     let program = shell_word_from_value("command", &args[0], span)?;
     let argv = args[1..]
@@ -40,13 +45,9 @@ pub(super) fn run_builtin_command(
     span: usize,
     ctx: BuiltinContext<'_>,
 ) -> Result<Value, RuntimeError> {
-    expect_arity(args, 1, span, "run")?;
+    check_signature(&SIG_RUN, args, span)?;
     let Value::Command(command) = &args[0] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!("run expects Command, got {}", args[0].type_name()),
-        ));
+        unreachable!()
     };
     let Some(state) = ctx.shell_state.as_deref() else {
         return Err(RuntimeError::new(
@@ -83,17 +84,15 @@ pub(super) fn capture_command_builtin(
     span: usize,
     ctx: BuiltinContext<'_>,
 ) -> Result<CommandResult, RuntimeError> {
-    expect_arity(args, 1, span, builtin_name)?;
+    let sig = match builtin_name {
+        "capture" => &SIG_CAPTURE,
+        "text" => &SIG_TEXT,
+        "lines" => &SIG_LINES,
+        _ => unreachable!(),
+    };
+    check_signature(sig, args, span)?;
     let Value::Command(command) = &args[0] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!(
-                "{} expects Command, got {}",
-                builtin_name,
-                args[0].type_name()
-            ),
-        ));
+        unreachable!()
     };
     let Some(state) = ctx.shell_state else {
         return Err(RuntimeError::new(

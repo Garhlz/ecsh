@@ -3,26 +3,125 @@ use std::{cell::RefCell, collections::HashSet, path::PathBuf, rc::Rc};
 use crate::ecscript::{
     error::{RuntimeError, RuntimeErrorKind},
     func::call_function_with_ctx,
-    value::{BuiltinContext, Value, display_value},
+    value::{display_value, BuiltinContext, Value},
 };
 
-use super::support::{checked_array_index, expect_arity, expect_array, expect_function};
+use super::support::{
+    check_signature, checked_array_index, expect_array, expect_function, param, ParamType,
+    Signature,
+};
+
+const LEN_TYPES: &[ParamType] = &[ParamType::Array, ParamType::Object, ParamType::String];
+const SIG_RANGE: Signature = Signature::exact(
+    "range",
+    &[param("start", ParamType::Int), param("end", ParamType::Int)],
+);
+const SIG_LEN: Signature = Signature::exact("len", &[param("value", ParamType::OneOf(LEN_TYPES))]);
+const SIG_CLONE: Signature = Signature::exact("clone", &[param("value", ParamType::Any)]);
+const SIG_PUSH: Signature = Signature::at_least(
+    "push",
+    &[param("array", ParamType::Array)],
+    Some(ParamType::Any),
+    2,
+);
+const SIG_POP: Signature = Signature::exact("pop", &[param("array", ParamType::Array)]);
+const SIG_INSERT: Signature = Signature::exact(
+    "insert",
+    &[
+        param("array", ParamType::Array),
+        param("index", ParamType::Int),
+        param("value", ParamType::Any),
+    ],
+);
+const SIG_REMOVE: Signature = Signature::exact(
+    "remove",
+    &[
+        param("array", ParamType::Array),
+        param("index", ParamType::Int),
+    ],
+);
+const SIG_SLICE: Signature = Signature::exact(
+    "slice",
+    &[
+        param("array", ParamType::Array),
+        param("start", ParamType::Int),
+        param("end", ParamType::Int),
+    ],
+);
+const SIG_KEYS: Signature = Signature::exact("keys", &[param("object", ParamType::Object)]);
+const SIG_VALUES: Signature = Signature::exact("values", &[param("object", ParamType::Object)]);
+const SIG_MAP: Signature = Signature::exact(
+    "map",
+    &[
+        param("array", ParamType::Array),
+        param("function", ParamType::Function),
+    ],
+);
+const SIG_FILTER: Signature = Signature::exact(
+    "filter",
+    &[
+        param("array", ParamType::Array),
+        param("function", ParamType::Function),
+    ],
+);
+const SIG_REDUCE: Signature = Signature::exact(
+    "reduce",
+    &[
+        param("array", ParamType::Array),
+        param("initial", ParamType::Any),
+        param("function", ParamType::Function),
+    ],
+);
+const SIG_EACH: Signature = Signature::exact(
+    "each",
+    &[
+        param("array", ParamType::Array),
+        param("function", ParamType::Function),
+    ],
+);
+const SIG_ANY: Signature = Signature::exact(
+    "any",
+    &[
+        param("array", ParamType::Array),
+        param("function", ParamType::Function),
+    ],
+);
+const SIG_ALL: Signature = Signature::exact(
+    "all",
+    &[
+        param("array", ParamType::Array),
+        param("function", ParamType::Function),
+    ],
+);
+const SIG_FIND: Signature = Signature::exact(
+    "find",
+    &[
+        param("array", ParamType::Array),
+        param("function", ParamType::Function),
+    ],
+);
+const SIG_JOIN: Signature = Signature::exact(
+    "join",
+    &[
+        param("array", ParamType::Array),
+        param("separator", ParamType::String),
+    ],
+);
+const SIG_JOIN_PATH: Signature = Signature::exact(
+    "join_path",
+    &[
+        param("left", ParamType::String),
+        param("right", ParamType::String),
+    ],
+);
 
 pub(super) fn range_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    expect_arity(args, 2, span, "range")?;
+    check_signature(&SIG_RANGE, args, span)?;
     let Value::Int(start) = args[0] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!("range expects Int start, got {}", args[0].type_name()),
-        ));
+        unreachable!()
     };
     let Value::Int(end) = args[1] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!("range expects Int end, got {}", args[1].type_name()),
-        ));
+        unreachable!()
     };
 
     let values = if start <= end {
@@ -34,24 +133,17 @@ pub(super) fn range_builtin(args: &[Value], span: usize) -> Result<Value, Runtim
 }
 
 pub(super) fn len_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    expect_arity(args, 1, span, "len")?;
+    check_signature(&SIG_LEN, args, span)?;
     match &args[0] {
         Value::Array(arr) => Ok(Value::Int(arr.borrow().len() as i64)),
         Value::Object(obj) => Ok(Value::Int(obj.borrow().len() as i64)),
         Value::String(s) => Ok(Value::Int(s.chars().count() as i64)),
-        other => Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!(
-                "len expects Array, Object or String, got {}",
-                other.type_name()
-            ),
-        )),
+        _ => unreachable!(),
     }
 }
 
 pub(super) fn clone_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    expect_arity(args, 1, span, "clone")?;
+    check_signature(&SIG_CLONE, args, span)?;
     let mut visiting = HashSet::new();
     clone_value(&args[0], span, &mut visiting)
 }
@@ -112,13 +204,7 @@ fn clone_value(
 }
 
 pub(super) fn push_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::ArityMismatch,
-            format!("push expects at least 2 arguments, got {}", args.len()),
-        ));
-    }
+    check_signature(&SIG_PUSH, args, span)?;
     let arr = expect_array(&args[0], span, "push")?;
     let mut arr_b = arr.borrow_mut();
     for arg in &args[1..] {
@@ -128,20 +214,16 @@ pub(super) fn push_builtin(args: &[Value], span: usize) -> Result<Value, Runtime
 }
 
 pub(super) fn pop_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    expect_arity(args, 1, span, "pop")?;
+    check_signature(&SIG_POP, args, span)?;
     let arr = expect_array(&args[0], span, "pop")?;
     Ok(arr.borrow_mut().pop().unwrap_or(Value::Nil))
 }
 
 pub(super) fn insert_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    expect_arity(args, 3, span, "insert")?;
+    check_signature(&SIG_INSERT, args, span)?;
     let arr = expect_array(&args[0], span, "insert")?;
     let Value::Int(index) = &args[1] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!("insert expects Int index, got {}", args[1].type_name()),
-        ));
+        unreachable!()
     };
     let insert_at = checked_array_index(*index, arr.borrow().len(), true, span, "insert")?;
     arr.borrow_mut().insert(insert_at, args[2].clone());
@@ -149,14 +231,10 @@ pub(super) fn insert_builtin(args: &[Value], span: usize) -> Result<Value, Runti
 }
 
 pub(super) fn remove_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    expect_arity(args, 2, span, "remove")?;
+    check_signature(&SIG_REMOVE, args, span)?;
     let arr = expect_array(&args[0], span, "remove")?;
     let Value::Int(index) = &args[1] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!("remove expects Int index, got {}", args[1].type_name()),
-        ));
+        unreachable!()
     };
     let mut arr_b = arr.borrow_mut();
     let remove_at = checked_array_index(*index, arr_b.len(), false, span, "remove")?;
@@ -164,21 +242,13 @@ pub(super) fn remove_builtin(args: &[Value], span: usize) -> Result<Value, Runti
 }
 
 pub(super) fn slice_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    expect_arity(args, 3, span, "slice")?;
+    check_signature(&SIG_SLICE, args, span)?;
     let arr = expect_array(&args[0], span, "slice")?;
     let Value::Int(start) = &args[1] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!("slice expects Int start, got {}", args[1].type_name()),
-        ));
+        unreachable!()
     };
     let Value::Int(end) = &args[2] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!("slice expects Int end, got {}", args[2].type_name()),
-        ));
+        unreachable!()
     };
     let values = arr.borrow();
     let start = checked_array_index(*start, values.len(), true, span, "slice")?;
@@ -196,13 +266,9 @@ pub(super) fn slice_builtin(args: &[Value], span: usize) -> Result<Value, Runtim
 }
 
 pub(super) fn keys_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    expect_arity(args, 1, span, "keys")?;
+    check_signature(&SIG_KEYS, args, span)?;
     let Value::Object(obj) = &args[0] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!("keys expects Object, got {}", args[0].type_name()),
-        ));
+        unreachable!()
     };
     let obj_b = obj.borrow();
     let mut keys = obj_b.keys().cloned().collect::<Vec<String>>();
@@ -213,13 +279,9 @@ pub(super) fn keys_builtin(args: &[Value], span: usize) -> Result<Value, Runtime
 }
 
 pub(super) fn values_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    expect_arity(args, 1, span, "values")?;
+    check_signature(&SIG_VALUES, args, span)?;
     let Value::Object(obj) = &args[0] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!("values expects Object, got {}", args[0].type_name()),
-        ));
+        unreachable!()
     };
     let obj_b = obj.borrow();
     let mut entries = obj_b.iter().collect::<Vec<_>>();
@@ -236,7 +298,7 @@ pub(super) fn map_builtin(
     span: usize,
     ctx: BuiltinContext<'_>,
 ) -> Result<Value, RuntimeError> {
-    expect_arity(args, 2, span, "map")?;
+    check_signature(&SIG_MAP, args, span)?;
     let arr = expect_array(&args[0], span, "map")?;
     let func = expect_function(&args[1], span, "map")?;
     let items = arr.borrow().clone();
@@ -262,7 +324,7 @@ pub(super) fn filter_builtin(
     span: usize,
     ctx: BuiltinContext<'_>,
 ) -> Result<Value, RuntimeError> {
-    expect_arity(args, 2, span, "filter")?;
+    check_signature(&SIG_FILTER, args, span)?;
     let arr = expect_array(&args[0], span, "filter")?;
     let func = expect_function(&args[1], span, "filter")?;
     let items = arr.borrow().clone();
@@ -300,7 +362,7 @@ pub(super) fn reduce_builtin(
     span: usize,
     ctx: BuiltinContext<'_>,
 ) -> Result<Value, RuntimeError> {
-    expect_arity(args, 3, span, "reduce")?;
+    check_signature(&SIG_REDUCE, args, span)?;
     let arr = expect_array(&args[0], span, "reduce")?;
     let initial = &args[1];
     let func = expect_function(&args[2], span, "reduce")?;
@@ -326,7 +388,7 @@ pub(super) fn each_builtin(
     span: usize,
     ctx: BuiltinContext<'_>,
 ) -> Result<Value, RuntimeError> {
-    expect_arity(args, 2, span, "each")?;
+    check_signature(&SIG_EACH, args, span)?;
     let arr = expect_array(&args[0], span, "each")?;
     let func = expect_function(&args[1], span, "each")?;
     let items = arr.borrow().clone();
@@ -349,7 +411,7 @@ pub(super) fn any_builtin(
     span: usize,
     ctx: BuiltinContext<'_>,
 ) -> Result<Value, RuntimeError> {
-    expect_arity(args, 2, span, "any")?;
+    check_signature(&SIG_ANY, args, span)?;
     let arr = expect_array(&args[0], span, "any")?;
     let func = expect_function(&args[1], span, "any")?;
     let items = arr.borrow().clone();
@@ -383,7 +445,7 @@ pub(super) fn all_builtin(
     span: usize,
     ctx: BuiltinContext<'_>,
 ) -> Result<Value, RuntimeError> {
-    expect_arity(args, 2, span, "all")?;
+    check_signature(&SIG_ALL, args, span)?;
     let arr = expect_array(&args[0], span, "all")?;
     let func = expect_function(&args[1], span, "all")?;
     let items = arr.borrow().clone();
@@ -417,7 +479,7 @@ pub(super) fn find_builtin(
     span: usize,
     ctx: BuiltinContext<'_>,
 ) -> Result<Value, RuntimeError> {
-    expect_arity(args, 2, span, "find")?;
+    check_signature(&SIG_FIND, args, span)?;
     let arr = expect_array(&args[0], span, "find")?;
     let func = expect_function(&args[1], span, "find")?;
     let items = arr.borrow().clone();
@@ -447,14 +509,10 @@ pub(super) fn find_builtin(
 }
 
 pub(super) fn join_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    expect_arity(args, 2, span, "join")?;
+    check_signature(&SIG_JOIN, args, span)?;
     let arr = expect_array(&args[0], span, "join")?;
     let Value::String(sep) = &args[1] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!("join expects String separator, got {}", args[1].type_name()),
-        ));
+        unreachable!()
     };
     let items = arr.borrow();
     let text = items
@@ -466,26 +524,12 @@ pub(super) fn join_builtin(args: &[Value], span: usize) -> Result<Value, Runtime
 }
 
 pub(super) fn join_path_builtin(args: &[Value], span: usize) -> Result<Value, RuntimeError> {
-    expect_arity(args, 2, span, "join_path")?;
+    check_signature(&SIG_JOIN_PATH, args, span)?;
     let Value::String(left) = &args[0] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!(
-                "join_path expects String left path, got {}",
-                args[0].type_name()
-            ),
-        ));
+        unreachable!()
     };
     let Value::String(right) = &args[1] else {
-        return Err(RuntimeError::new(
-            span,
-            RuntimeErrorKind::TypeMismatch,
-            format!(
-                "join_path expects String right path, got {}",
-                args[1].type_name()
-            ),
-        ));
+        unreachable!()
     };
     let joined = PathBuf::from(left).join(right);
     Ok(Value::String(joined.to_string_lossy().into_owned()))

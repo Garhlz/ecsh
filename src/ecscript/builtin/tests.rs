@@ -1,10 +1,13 @@
-use super::{format_print_args, run_builtin};
+use super::{
+    format_print_args, run_builtin,
+    support::{check_signature, param, ParamType, Signature},
+};
 use crate::ecscript::{
     env::Environment,
     error::RuntimeErrorKind,
     value::{Builtin, BuiltinContext, Function, Value},
 };
-use crate::extensions::{HookName, new_extensions};
+use crate::extensions::{new_extensions, HookName};
 use crate::types::{CommandStatus, ShellState};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
@@ -33,6 +36,19 @@ fn no_op_func() -> Value {
     }))
 }
 
+fn simple_command_value(program: &str) -> Value {
+    Value::Command(crate::ecscript::value::CommandInvocation {
+        command: crate::ecscript::value::CommandValue::Simple(crate::types::Command {
+            program: crate::types::ShellWord::lit(program),
+            args: vec![],
+            redirection: crate::types::Redirection::default(),
+        }),
+        cwd_override: None,
+        env_override: None,
+        stdin_override: None,
+    })
+}
+
 fn interactive_state() -> ShellState {
     ShellState {
         last_status: CommandStatus::success(),
@@ -48,6 +64,128 @@ fn interactive_state() -> ShellState {
         command_history: Vec::new(),
         extensions: new_extensions(),
         module_loader: None,
+    }
+}
+
+#[test]
+fn signature_exact_arity_reports_too_few_and_too_many_arguments() {
+    const SIG: Signature = Signature::exact(
+        "range",
+        &[param("start", ParamType::Int), param("end", ParamType::Int)],
+    );
+
+    let err = check_signature(&SIG, &[Value::Int(1)], 7).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::ArityMismatch);
+    assert_eq!(err.offset, 7);
+    assert_eq!(err.message, "range expects 2 arguments, got 1");
+
+    let err = check_signature(&SIG, &[Value::Int(1), Value::Int(2), Value::Int(3)], 0).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::ArityMismatch);
+    assert_eq!(err.message, "range expects 2 arguments, got 3");
+}
+
+#[test]
+fn signature_at_least_arity_reports_missing_arguments() {
+    const SIG: Signature = Signature::at_least(
+        "push",
+        &[param("array", ParamType::Array)],
+        Some(ParamType::Any),
+        2,
+    );
+
+    let err = check_signature(&SIG, &[Value::Array(Rc::new(RefCell::new(vec![])))], 0).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::ArityMismatch);
+    assert_eq!(err.message, "push expects at least 2 arguments, got 1");
+}
+
+#[test]
+fn signature_checks_variadic_argument_type() {
+    const SIG: Signature = Signature::at_least(
+        "numbers",
+        &[param("head", ParamType::Int)],
+        Some(ParamType::Int),
+        1,
+    );
+
+    let err = check_signature(&SIG, &[Value::Int(1), Value::String("x".into())], 0).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "numbers argument 'value' expects Int, got String"
+    );
+}
+
+#[test]
+fn signature_one_of_display_uses_stable_joining() {
+    const LEN_TYPES: &[ParamType] = &[ParamType::Array, ParamType::Object, ParamType::String];
+    const SIG: Signature = Signature::exact("len", &[param("value", ParamType::OneOf(LEN_TYPES))]);
+
+    let err = check_signature(&SIG, &[no_op_func()], 0).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "len argument 'value' expects Array, Object, or String, got Function"
+    );
+}
+
+#[test]
+fn signature_type_errors_include_parameter_name() {
+    const SIG: Signature = Signature::exact("env", &[param("name", ParamType::String)]);
+
+    let err = check_signature(&SIG, &[Value::Bool(true)], 0).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(err.message, "env argument 'name' expects String, got Bool");
+}
+
+#[test]
+fn migrated_builtin_names_have_spec_entries() {
+    let migrated = [
+        "command",
+        "env",
+        "set_env",
+        "unset_env",
+        "cwd",
+        "stdin",
+        "read_lines",
+        "range",
+        "len",
+        "clone",
+        "keys",
+        "values",
+        "slice",
+        "to_json",
+        "from_json",
+        "trim",
+        "print",
+        "println",
+        "push",
+        "pop",
+        "insert",
+        "remove",
+        "map",
+        "filter",
+        "reduce",
+        "each",
+        "any",
+        "all",
+        "find",
+        "join",
+        "join_path",
+        "run",
+        "capture",
+        "text",
+        "lines",
+        "with_cwd",
+        "write_lines",
+        "set_cwd",
+    ];
+    let spec_names = crate::specs::all_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<std::collections::HashSet<_>>();
+
+    for name in migrated {
+        assert!(spec_names.contains(name), "missing builtin spec for {name}");
     }
 }
 
@@ -91,7 +229,7 @@ fn env_returns_nil_for_missing_variable() {
 fn env_requires_string_argument() {
     let err = run_builtin(Builtin::Env, vec![Value::Int(1)], 0, ctx()).unwrap_err();
     assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
-    assert_eq!(err.message, "env expects String, got Int");
+    assert_eq!(err.message, "env argument 'name' expects String, got Int");
 }
 
 #[test]
@@ -263,13 +401,11 @@ fn bind_registers_handler_for_supported_key() {
     )
     .unwrap();
 
-    assert!(
-        state
-            .extensions
-            .borrow()
-            .key_bindings
-            .contains_key("ctrl-x")
-    );
+    assert!(state
+        .extensions
+        .borrow()
+        .key_bindings
+        .contains_key("ctrl-x"));
 }
 
 #[test]
@@ -388,7 +524,7 @@ fn range_requires_int_arguments() {
     )
     .unwrap_err();
     assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
-    assert_eq!(err.message, "range expects Int start, got Bool");
+    assert_eq!(err.message, "range argument 'start' expects Int, got Bool");
 
     let err = run_builtin(
         Builtin::Range,
@@ -398,7 +534,17 @@ fn range_requires_int_arguments() {
     )
     .unwrap_err();
     assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
-    assert_eq!(err.message, "range expects Int end, got Bool");
+    assert_eq!(err.message, "range argument 'end' expects Int, got Bool");
+}
+
+#[test]
+fn len_reports_one_of_signature_error() {
+    let err = run_builtin(Builtin::Len, vec![no_op_func()], 0, ctx()).unwrap_err();
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "len argument 'value' expects Array, Object, or String, got Function"
+    );
 }
 
 #[test]
@@ -456,7 +602,10 @@ fn insert_reports_index_type() {
     .unwrap_err();
 
     assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
-    assert_eq!(err.message, "insert expects Int index, got String");
+    assert_eq!(
+        err.message,
+        "insert argument 'index' expects Int, got String"
+    );
 }
 
 #[test]
@@ -509,7 +658,10 @@ fn from_json_parses_object_and_array_values() {
 fn from_json_requires_string_argument() {
     let err = run_builtin(Builtin::FromJson, vec![Value::Int(1)], 0, ctx()).unwrap_err();
     assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
-    assert_eq!(err.message, "from_json expects String, got Int");
+    assert_eq!(
+        err.message,
+        "from_json argument 'text' expects String, got Int"
+    );
 }
 
 #[test]
@@ -561,6 +713,40 @@ fn slice_rejects_start_after_end() {
 }
 
 #[test]
+fn slice_reports_start_type_from_signature() {
+    let arr = Rc::new(RefCell::new(vec![]));
+    let err = run_builtin(
+        Builtin::Slice,
+        vec![Value::Array(arr), Value::String("0".into()), Value::Int(1)],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "slice argument 'start' expects Int, got String"
+    );
+}
+
+#[test]
+fn push_reports_array_type_from_signature() {
+    let err = run_builtin(Builtin::Push, vec![Value::Int(1), Value::Int(2)], 0, ctx()).unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(err.message, "push argument 'array' expects Array, got Int");
+}
+
+#[test]
+fn pop_reports_array_type_from_signature() {
+    let err = run_builtin(Builtin::Pop, vec![Value::Int(1)], 0, ctx()).unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(err.message, "pop argument 'array' expects Array, got Int");
+}
+
+#[test]
 fn clone_deep_copies_arrays_and_objects() {
     let inner = Value::Array(Rc::new(RefCell::new(vec![Value::Int(1)])));
     let original = Rc::new(RefCell::new(HashMap::from([("inner".into(), inner)])));
@@ -604,7 +790,8 @@ fn clone_rejects_callable_and_command_values() {
     assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
     assert_eq!(err.message, "clone cannot copy Function values");
 
-    let err = run_builtin(Builtin::Clone, vec![Value::Builtin(Builtin::Len)], 0, ctx()).unwrap_err();
+    let err =
+        run_builtin(Builtin::Clone, vec![Value::Builtin(Builtin::Len)], 0, ctx()).unwrap_err();
     assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
     assert_eq!(err.message, "clone cannot copy Builtin values");
 }
@@ -631,6 +818,42 @@ fn map_treats_missing_return_as_nil() {
         panic!("expected array");
     };
     assert_eq!(*mapped.borrow(), vec![Value::Nil, Value::Nil]);
+}
+
+#[test]
+fn map_reports_function_type_from_signature() {
+    let items = Rc::new(RefCell::new(vec![Value::Int(1)]));
+    let err = run_builtin(
+        Builtin::Map,
+        vec![Value::Array(items), Value::String("not a function".into())],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "map argument 'function' expects Function, got String"
+    );
+}
+
+#[test]
+fn join_reports_separator_type_from_signature() {
+    let items = Rc::new(RefCell::new(vec![Value::Int(1)]));
+    let err = run_builtin(
+        Builtin::Join,
+        vec![Value::Array(items), Value::Bool(true)],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "join argument 'separator' expects String, got Bool"
+    );
 }
 
 #[test]
@@ -661,6 +884,28 @@ fn command_builtin_builds_simple_command() {
 }
 
 #[test]
+fn run_reports_command_type_from_signature() {
+    let err = run_builtin(Builtin::Run, vec![Value::String("echo".into())], 0, ctx()).unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "run argument 'command' expects Command, got String"
+    );
+}
+
+#[test]
+fn capture_reports_command_type_from_signature() {
+    let err = run_builtin(Builtin::Capture, vec![Value::Int(1)], 0, ctx()).unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "capture argument 'command' expects Command, got Int"
+    );
+}
+
+#[test]
 fn command_builtin_rejects_object_argument() {
     let object = Value::Object(Rc::new(RefCell::new(HashMap::new())));
     let err = run_builtin(
@@ -680,19 +925,15 @@ fn command_builtin_rejects_object_argument() {
 
 #[test]
 fn with_env_derives_command_with_merged_override() {
-    let command = Value::Command(crate::ecscript::value::CommandInvocation {
-        command: crate::ecscript::value::CommandValue::Simple(crate::types::Command {
-            program: crate::types::ShellWord::lit("printf"),
-            args: vec![crate::types::ShellWord::lit("ok")],
-            redirection: crate::types::Redirection::default(),
-        }),
-        cwd_override: None,
-        env_override: Some(std::collections::BTreeMap::from([(
-            "BASE".to_string(),
-            "1".to_string(),
-        )])),
-        stdin_override: None,
-    });
+    let mut command = match simple_command_value("printf") {
+        Value::Command(command) => command,
+        _ => unreachable!(),
+    };
+    command.env_override = Some(std::collections::BTreeMap::from([(
+        "BASE".to_string(),
+        "1".to_string(),
+    )]));
+    let command = Value::Command(command);
     let env_obj = Value::Object(Rc::new(RefCell::new(HashMap::from([(
         "EXTRA".to_string(),
         Value::String("2".into()),
@@ -709,16 +950,7 @@ fn with_env_derives_command_with_merged_override() {
 
 #[test]
 fn with_env_rejects_non_string_values() {
-    let command = Value::Command(crate::ecscript::value::CommandInvocation {
-        command: crate::ecscript::value::CommandValue::Simple(crate::types::Command {
-            program: crate::types::ShellWord::lit("printf"),
-            args: vec![crate::types::ShellWord::lit("ok")],
-            redirection: crate::types::Redirection::default(),
-        }),
-        cwd_override: None,
-        env_override: None,
-        stdin_override: None,
-    });
+    let command = simple_command_value("printf");
     let env_obj = Value::Object(Rc::new(RefCell::new(HashMap::from([(
         "EXTRA".to_string(),
         Value::Int(2),
@@ -734,16 +966,7 @@ fn with_env_rejects_non_string_values() {
 
 #[test]
 fn with_cwd_derives_command_with_override() {
-    let command = Value::Command(crate::ecscript::value::CommandInvocation {
-        command: crate::ecscript::value::CommandValue::Simple(crate::types::Command {
-            program: crate::types::ShellWord::lit("pwd"),
-            args: vec![],
-            redirection: crate::types::Redirection::default(),
-        }),
-        cwd_override: None,
-        env_override: None,
-        stdin_override: None,
-    });
+    let command = simple_command_value("pwd");
 
     let result = run_builtin(
         Builtin::WithCwd,
@@ -756,6 +979,51 @@ fn with_cwd_derives_command_with_override() {
         panic!("expected command");
     };
     assert_eq!(derived.cwd_override.as_deref(), Some("/tmp"));
+}
+
+#[test]
+fn with_cwd_reports_path_type_from_signature() {
+    let err = run_builtin(
+        Builtin::WithCwd,
+        vec![simple_command_value("pwd"), Value::Int(1)],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "with_cwd argument 'path' expects String, got Int"
+    );
+}
+
+#[test]
+fn write_lines_reports_array_type_from_signature() {
+    let err = run_builtin(
+        Builtin::WriteLines,
+        vec![Value::String("x".into())],
+        0,
+        ctx(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "write_lines argument 'array' expects Array, got String"
+    );
+}
+
+#[test]
+fn set_cwd_reports_path_type_from_signature_before_shell_context() {
+    let err = run_builtin(Builtin::SetCwd, vec![Value::Int(1)], 0, ctx()).unwrap_err();
+
+    assert_eq!(err.kind, RuntimeErrorKind::TypeMismatch);
+    assert_eq!(
+        err.message,
+        "set_cwd argument 'path' expects String, got Int"
+    );
 }
 
 #[test]
