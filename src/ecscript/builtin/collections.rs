@@ -3,12 +3,12 @@ use std::{cell::RefCell, collections::HashSet, path::PathBuf, rc::Rc};
 use crate::ecscript::{
     error::{RuntimeError, RuntimeErrorKind},
     func::call_function_with_ctx,
-    value::{display_value, BuiltinContext, Value},
+    value::{BuiltinContext, Value, display_value},
 };
 
 use super::support::{
-    check_signature, checked_array_index, expect_array, expect_function, param, ParamType,
-    Signature,
+    ParamType, Signature, check_signature, checked_array_index, expect_array, expect_function,
+    param,
 };
 
 const LEN_TYPES: &[ParamType] = &[ParamType::Array, ParamType::Object, ParamType::String];

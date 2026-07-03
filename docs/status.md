@@ -22,7 +22,7 @@
 |------|------|----------|
 | Shell 执行 | Done with limits | 外部命令、builtin、管道、重定向、`&&` / `||` / `;`、后台 `&`、`jobs` / `fg` / `bg` 已可用 |
 | Shell 解析与诊断 | Done | 结构化 `ParseError`、续行读取、shell parse 错误定位、历史按完整命令写入已落地 |
-| Shell 运行时展开 | Done | 支持 `$VAR`、`${expr}`、`${env("VAR")}`、`$(cmd)`、`${...arr}` |
+| Shell 运行时展开 | Done with limits | 支持 `$VAR`、`${expr}`、`${env("VAR")}`、`$(cmd)`、`${...arr}`、未引用 glob pattern |
 | Shell 交互体验 | Done with limits | rustyline、历史、Tab 补全、alias / unalias、`trap EXIT|INT`、`type` / `which` / `history` 已可用 |
 | ecscript 核心语言 | Done with limits | 表达式、语句、数组/对象、控制流、函数、lambda、闭包、模块 MVP、源码定位错误、builtin 运行时签名检查已可用 |
 | ecscript CLI / REPL / 文件模式 | Done | `ecscript` REPL、stdin、文件执行、`-e` 已可用；`ecsh file.ecs` 走文件脚本路径 |
@@ -34,7 +34,7 @@
 | Shell 扩展点 | Done with limits | `hook`、`prompt`、`complete`、`bind`、`register_command`、`set_cwd` 已可用 |
 | Callable specs / help / introspection | In Progress | `Spec` / `CallableSpec`、`help()`、`help("name")`、`builtins()`、`commands()`、`extensions()` 已接通；同名展示边界和 adapter 元数据仍待收口 |
 | 编辑器工具链 | In Progress | tree-sitter grammar、query、VS Code semantic tokens / folding / symbols / diagnostics / spec-backed hover 已具备基础能力 |
-| Stage 12 shell 语义补完 | Not Started | here-doc、glob、subshell、更完整 job semantics 尚未实现 |
+| Stage 12 shell 语义补完 | In Progress | glob 主路径已接通；here-doc、subshell、更完整 job semantics 尚未实现 |
 
 ## 已完成能力
 
@@ -55,6 +55,7 @@
 - `${env("VAR")}`：显式读取环境变量
 - `$(cmd)`：通过 `/bin/sh -c` 做命令替换
 - `${...arr}`：把数组展开成多个 argv
+- glob：未引用的 `*` / `?` / `[...]` 按文件系统匹配展开；无匹配保留原字面量，引用和动态展开结果不触发二次 glob
 
 ### ecscript
 
@@ -107,11 +108,11 @@
 
 - 不是完整 POSIX shell
 - 未实现 here-doc `<<`
-- 未实现 glob 展开
 - 未实现 subshell `()`
 - 未实现 `|&`、`!` 等执行语义增强
 - job spec 和异步完成通知仍然有限
-- 命令替换之外的完整 shell 展开规则尚未实现
+- glob 当前不包含 brace expansion、extglob、递归 `**` 语义和 nullglob / failglob 配置
+- 命令替换、glob 之外的完整 shell 展开规则尚未实现
 
 ### ecscript 边界
 
@@ -144,7 +145,7 @@
 1. 收口阶段 11 文档边界：明确 `help(...)` 解释接口语义，`type` / `which` 解释名字解析来源。
 2. 整理 examples：把 prompt、completion、bind、zoxide、starship 等示例组织成更清楚的推荐配置片段。
 3. 设计外部命令 adapter/provider：补齐 help/completion 元数据，而不改变基础 `execvp` 模型。
-4. 进入阶段 12 shell 语义补完：here-doc、glob、subshell、更完整 job semantics。
+4. 继续阶段 12 shell 语义补完：here-doc、subshell、更完整 job semantics。
 
 ## 工程和工具链状态
 

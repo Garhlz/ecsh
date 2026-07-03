@@ -6,7 +6,7 @@ use crate::ecscript::{
 };
 use crate::executor::{capture_command_invocation, run_command_invocation};
 
-use super::support::{check_signature, param, shell_word_from_value, ParamType, Signature};
+use super::support::{ParamType, Signature, check_signature, param, shell_word_from_value};
 
 const SIG_COMMAND: Signature = Signature::at_least(
     "command",

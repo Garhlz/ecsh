@@ -40,7 +40,7 @@ printf "%s\n" value
 | `cmd1 ; cmd2` | 顺序执行 |
 | `cmd &` | 后台执行 |
 
-当前未实现 here-doc、glob 展开、subshell、`|&` 和 `!` 执行语义。
+当前未实现 here-doc、subshell、`|&` 和 `!` 执行语义。
 
 ## Word 与引用
 
@@ -64,6 +64,7 @@ echo prefix-$HOME
 | `${expr}` | 执行 `ecscript` 表达式，结果转成单个 shell word |
 | `${...arr}` | 把数组展开为多个 argv |
 | `$(cmd)` | 通过 `/bin/sh -c` 执行命令替换 |
+| `*` / `?` / `[...]` | 对未引用 pattern 做 glob 展开 |
 
 示例：
 
@@ -73,7 +74,18 @@ echo ${env("HOME")}
 echo ${1 + 2}
 echo ${...["a", "b", "c"]}
 echo $(printf cmdsub)
+echo *.rs
 ```
+
+glob 展开发生在变量、表达式、命令替换和 `~` 展开之后。只有未引用的 glob 元字符参与匹配；单引号、双引号、反斜杠转义，以及 `$VAR` / `${expr}` / `$(cmd)` 生成的 `*`、`?`、`[` 不会触发二次 glob。
+
+当前 glob 边界：
+
+- 无匹配时保留原字面量。
+- 匹配结果按路径排序。
+- `*` 不匹配 dotfile；需要写成 `.*` 才匹配以 `.` 开头的文件。
+- `/` 必须由 pattern 中的字面量 `/` 匹配，`*` 不跨目录层级。
+- 当前不实现 brace expansion、extglob、递归 `**` 语义和 nullglob / failglob 配置。
 
 ## 顶层 ecscript
 
@@ -162,7 +174,6 @@ bg %1
 
 - 不是完整 POSIX shell。
 - 未实现 here-doc `<<`。
-- 未实现 glob 展开。
 - 未实现 subshell `()`。
 - 未实现 `|&`、`!` 等执行语义增强。
 - job spec 和异步完成通知仍然有限。

@@ -1,5 +1,5 @@
 use crate::diagnostics::print_error;
-use crate::ecscript::{call_function_with_ctx, Environment, RuntimeError, RuntimeErrorKind, Value};
+use crate::ecscript::{Environment, RuntimeError, RuntimeErrorKind, Value, call_function_with_ctx};
 use crate::types::{CommandStatus, JobStatus, ShellState};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -718,11 +718,12 @@ pub fn invoke_bind_callback(
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_context, bind_result_to_cmd, completion_items_from_value, invoke_bind_callback,
-        object, prompt_context, resolve_completion, resolve_prompt, run_hooks, HookName,
+        HookName, bind_context, bind_result_to_cmd, completion_items_from_value,
+        invoke_bind_callback, object, prompt_context, resolve_completion, resolve_prompt,
+        run_hooks,
     };
     use crate::ecscript::{
-        eval_top_level_script_with_ctx, lexer, parse_top_level_script, Environment, Value,
+        Environment, Value, eval_top_level_script_with_ctx, lexer, parse_top_level_script,
     };
     use crate::extensions::new_extensions;
     use crate::test_support::env_lock;
@@ -891,9 +892,10 @@ mod tests {
     fn bind_result_set_line_missing_text_errors() {
         let err = bind_result_to_cmd(&object([("action", Value::String("set_line".into()))]))
             .unwrap_err();
-        assert!(err
-            .message
-            .contains("set_line action requires 'text' field"));
+        assert!(
+            err.message
+                .contains("set_line action requires 'text' field")
+        );
     }
 
     #[test]
@@ -969,11 +971,12 @@ bind("ctrl-r", (ctx) => {
 
         let result = resolve_prompt(&s).unwrap();
         assert!(result.is_none());
-        assert!(s
-            .extensions
-            .borrow()
-            .prompt_seen_errors
-            .contains("prompt handler must return String, got Int"));
+        assert!(
+            s.extensions
+                .borrow()
+                .prompt_seen_errors
+                .contains("prompt handler must return String, got Int")
+        );
     }
 
     #[test]
@@ -999,11 +1002,12 @@ bind("ctrl-r", (ctx) => {
             .insert(HookName::BeforePrompt, Vec::new());
         run_hooks(HookName::BeforePrompt, object([]), &s);
 
-        assert!(!s
-            .extensions
-            .borrow()
-            .hook_seen_errors
-            .contains_key(&HookName::BeforePrompt));
+        assert!(
+            !s.extensions
+                .borrow()
+                .hook_seen_errors
+                .contains_key(&HookName::BeforePrompt)
+        );
     }
 
     // ── resolve_completion error fallback ──────────────────────────────

@@ -197,7 +197,10 @@ pub(super) fn commands_builtin(
     // Also include shell builtins that exist at runtime but lack a spec
     // entry yet — mark them so consumers know help() may not document them.
     for name in crate::builtin::BUILTIN_NAMES {
-        if !entries.iter().any(|(n, k)| n == *name && k == "shell_builtin") {
+        if !entries
+            .iter()
+            .any(|(n, k)| n == *name && k == "shell_builtin")
+        {
             entries.push(((*name).to_string(), "shell_builtin".to_string()));
         }
     }

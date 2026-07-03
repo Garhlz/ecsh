@@ -22,6 +22,12 @@ fn state() -> ShellState {
     }
 }
 
+fn quoted_lit(text: &str) -> ShellWord {
+    ShellWord {
+        fragments: vec![WordFragment::QuotedLit(text.into())],
+    }
+}
+
 #[test]
 fn tokenizes_plain_words() {
     assert_eq!(
@@ -39,7 +45,7 @@ fn tokenizes_single_and_double_quotes() {
         tokenize(r#"echo "hello world""#, &state()).unwrap(),
         vec![
             Token::Word(ShellWord::lit("echo")),
-            Token::Word(ShellWord::lit("hello world")),
+            Token::Word(quoted_lit("hello world")),
         ]
     );
 
@@ -47,7 +53,7 @@ fn tokenizes_single_and_double_quotes() {
         tokenize("echo '$HOME'", &state()).unwrap(),
         vec![
             Token::Word(ShellWord::lit("echo")),
-            Token::Word(ShellWord::lit("$HOME")),
+            Token::Word(quoted_lit("$HOME")),
         ]
     );
 }
@@ -58,8 +64,14 @@ fn joins_quoted_fragments_into_one_word() {
         tokenize(r#"echo a"b"c 'd e'"#, &state()).unwrap(),
         vec![
             Token::Word(ShellWord::lit("echo")),
-            Token::Word(ShellWord::lit("abc")),
-            Token::Word(ShellWord::lit("d e")),
+            Token::Word(ShellWord {
+                fragments: vec![
+                    WordFragment::Lit("a".into()),
+                    WordFragment::QuotedLit("b".into()),
+                    WordFragment::Lit("c".into()),
+                ]
+            }),
+            Token::Word(quoted_lit("d e")),
         ]
     );
 
@@ -75,7 +87,7 @@ fn keeps_operators_literal_inside_quotes() {
         tokenize(r#"echo "a|b && c > d""#, &state()).unwrap(),
         vec![
             Token::Word(ShellWord::lit("echo")),
-            Token::Word(ShellWord::lit("a|b && c > d")),
+            Token::Word(quoted_lit("a|b && c > d")),
         ]
     );
 }
@@ -223,8 +235,8 @@ fn tokenizes_sequence_operator() {
         tokenize(r#"echo "a;b" 'c;d'"#, &state()).unwrap(),
         vec![
             Token::Word(ShellWord::lit("echo")),
-            Token::Word(ShellWord::lit("a;b")),
-            Token::Word(ShellWord::lit("c;d")),
+            Token::Word(quoted_lit("a;b")),
+            Token::Word(quoted_lit("c;d")),
         ]
     );
 }
@@ -235,12 +247,23 @@ fn tokenizes_backslash_escapes() {
         tokenize(r#"echo hello\ world \| \$HOME \; \" \'"#, &state()).unwrap(),
         vec![
             Token::Word(ShellWord::lit("echo")),
-            Token::Word(ShellWord::lit("hello world")),
-            Token::Word(ShellWord::lit("|")),
-            Token::Word(ShellWord::lit("$HOME")),
-            Token::Word(ShellWord::lit(";")),
-            Token::Word(ShellWord::lit("\"")),
-            Token::Word(ShellWord::lit("'")),
+            Token::Word(ShellWord {
+                fragments: vec![
+                    WordFragment::Lit("hello".into()),
+                    WordFragment::QuotedLit(" ".into()),
+                    WordFragment::Lit("world".into()),
+                ]
+            }),
+            Token::Word(quoted_lit("|")),
+            Token::Word(ShellWord {
+                fragments: vec![
+                    WordFragment::QuotedLit("$".into()),
+                    WordFragment::Lit("HOME".into()),
+                ]
+            }),
+            Token::Word(quoted_lit(";")),
+            Token::Word(quoted_lit("\"")),
+            Token::Word(quoted_lit("'")),
         ]
     );
 
@@ -248,7 +271,7 @@ fn tokenizes_backslash_escapes() {
         tokenize(r#"echo 'a\ b'"#, &state()).unwrap(),
         vec![
             Token::Word(ShellWord::lit("echo")),
-            Token::Word(ShellWord::lit(r#"a\ b"#)),
+            Token::Word(quoted_lit(r#"a\ b"#)),
         ]
     );
 
@@ -256,9 +279,9 @@ fn tokenizes_backslash_escapes() {
         tokenize(r#"echo "price: \$10" "path: C:\\tmp" "a\q""#, &state()).unwrap(),
         vec![
             Token::Word(ShellWord::lit("echo")),
-            Token::Word(ShellWord::lit("price: $10")),
-            Token::Word(ShellWord::lit(r#"path: C:\tmp"#)),
-            Token::Word(ShellWord::lit(r#"a\q"#)),
+            Token::Word(quoted_lit("price: $10")),
+            Token::Word(quoted_lit(r#"path: C:\tmp"#)),
+            Token::Word(quoted_lit(r#"a\q"#)),
         ]
     );
 }

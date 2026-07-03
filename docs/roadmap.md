@@ -20,7 +20,7 @@
 候选能力：
 
 - here-doc `<<`
-- glob 展开
+- glob 后续增强：brace expansion、extglob、递归 `**`、nullglob / failglob 配置
 - subshell `()`
 - `|&`
 - `!`

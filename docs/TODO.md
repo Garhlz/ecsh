@@ -35,7 +35,6 @@
 ### P3：Shell 语义补完
 
 - here-doc `<<`。
-- glob 展开。
 - subshell `()`。
 - 更完整 job spec 和异步完成通知。
 - `|&`、`!` 等执行语义增强。

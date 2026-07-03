@@ -28,8 +28,8 @@ use introspection::{builtins_builtin, commands_builtin, extensions_builtin, help
 use io::{format_print_args, write_stdout};
 use json::{from_json_value, to_json_value};
 use support::{
-    check_signature, expect_array, expect_shell_state, object_string_map_from_value, param,
-    ParamType, Signature,
+    ParamType, Signature, check_signature, expect_array, expect_shell_state,
+    object_string_map_from_value, param,
 };
 
 const SIG_ENV: Signature = Signature::exact("env", &[param("name", ParamType::String)]);

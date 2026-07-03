@@ -73,7 +73,12 @@ impl ConditionalEventHandler for BindDispatcher {
             let state = state.as_ref()?;
             // If this key was removed from the config (e.g. via reload_rc),
             // fall through so rustyline applies its built-in default binding.
-            if !state.extensions.borrow().key_bindings.contains_key(&self.key) {
+            if !state
+                .extensions
+                .borrow()
+                .key_bindings
+                .contains_key(&self.key)
+            {
                 return None;
             }
             match with_cooked_tty(|| invoke_bind_callback(&self.key, &line, cursor, state)) {

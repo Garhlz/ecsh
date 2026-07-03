@@ -227,6 +227,30 @@ exit
 }
 
 #[test]
+fn smoke_expands_unquoted_globs() {
+    let dir = temp_path("glob");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("b.txt"), "").unwrap();
+    std::fs::write(dir.join("a.txt"), "").unwrap();
+    std::fs::write(dir.join(".hidden.txt"), "").unwrap();
+
+    let output = run_ecsh(&format!(
+        r#"cd {}
+printf "%s\n" *.txt "*.txt" \*.txt
+exit
+"#,
+        dir.display()
+    ));
+
+    let lines = output.lines().collect::<Vec<_>>();
+    assert!(lines.windows(2).any(|window| window == ["a.txt", "b.txt"]));
+    assert!(lines.iter().any(|line| *line == "*.txt"));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn smoke_continues_multiline_double_quoted_input() {
     let output = run_ecsh(
         "echo \"hello\nworld\"

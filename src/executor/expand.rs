@@ -6,6 +6,7 @@
 //!   - $(cmd)  → 通过 /bin/sh -c 执行 shell 命令，捕获 stdout
 //!   - ${...arr} → 对 Array 做 argv spread
 
+use glob::{MatchOptions, glob_with};
 use std::process::{Command as ProcessCommand, Stdio};
 
 use crate::ecscript::value::Value;
@@ -16,6 +17,35 @@ use crate::types::{
 
 pub struct ExpandEnv<'a> {
     pub script_env: &'a crate::ecscript::env::Environment<'a>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ExpandedWord {
+    text: String,
+    glob_pattern: String,
+    has_glob: bool,
+}
+
+impl ExpandedWord {
+    fn empty() -> Self {
+        Self {
+            text: String::new(),
+            glob_pattern: String::new(),
+            has_glob: false,
+        }
+    }
+
+    fn literal(text: String) -> Self {
+        Self {
+            glob_pattern: glob::Pattern::escape(&text),
+            text,
+            has_glob: false,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
 }
 
 /// 把带 fragment 的命令展开成只含ShellWord WordFragment::Lit 的可执行命令。
@@ -98,22 +128,23 @@ fn expand_single_word(word: &ShellWord, env: &ExpandEnv<'_>, context: &str) -> S
 ///
 /// 大多数 word 最终只会变成一个字符串；只有 spread fragment 会把它拆成多个 argv。
 fn expand_shell_word(word: &ShellWord, env: &ExpandEnv<'_>) -> ShellResult<Vec<String>> {
-    let mut result = vec![String::new()];
+    let mut result = vec![ExpandedWord::empty()];
 
     for frag in &word.fragments {
         match frag {
-            WordFragment::Lit(s) => append_fragment(&mut result, s),
+            WordFragment::Lit(s) => append_fragment(&mut result, s, true),
+            WordFragment::QuotedLit(s) => append_fragment(&mut result, s, false),
             WordFragment::Var(name) => {
                 let val = if let Ok(v) = env.script_env.get(name, 0) {
                     value_to_string(&v)
                 } else {
                     std::env::var(name).unwrap_or_default()
                 };
-                append_fragment(&mut result, &val);
+                append_fragment(&mut result, &val, false);
             }
             WordFragment::Cmd(src) => {
                 let output = expand_cmd(src)?;
-                append_fragment(&mut result, &output);
+                append_fragment(&mut result, &output, false);
             }
             WordFragment::Expr { src, spread: false } => {
                 let value = eval_expr_src(src, env.script_env)?;
@@ -124,7 +155,7 @@ fn expand_shell_word(word: &ShellWord, env: &ExpandEnv<'_>) -> ShellResult<Vec<S
                                 .into(),
                         );
                     }
-                    _ => append_fragment(&mut result, &value_to_string(&value)),
+                    _ => append_fragment(&mut result, &value_to_string(&value), false),
                 }
             }
             WordFragment::Expr { src, spread: true } => {
@@ -133,7 +164,11 @@ fn expand_shell_word(word: &ShellWord, env: &ExpandEnv<'_>) -> ShellResult<Vec<S
                     return Err("${...arr} expects an Array".into());
                 };
 
-                let items: Vec<String> = arr.borrow().iter().map(value_to_string).collect();
+                let items: Vec<ExpandedWord> = arr
+                    .borrow()
+                    .iter()
+                    .map(|value| ExpandedWord::literal(value_to_string(value)))
+                    .collect();
 
                 splice_spread(&mut result, items);
             }
@@ -141,7 +176,7 @@ fn expand_shell_word(word: &ShellWord, env: &ExpandEnv<'_>) -> ShellResult<Vec<S
     }
 
     expand_tilde_prefix(word, &mut result);
-    Ok(result)
+    expand_globs(result)
 }
 
 /// 最小 tilde 展开：只处理字面量开头的 `~` / `~/...`。
@@ -149,7 +184,7 @@ fn expand_shell_word(word: &ShellWord, env: &ExpandEnv<'_>) -> ShellResult<Vec<S
 /// 这里刻意不展开：
 /// - `~user`
 /// - 由 `${expr}` / `$(cmd)` 生成的 `~`
-fn expand_tilde_prefix(word: &ShellWord, result: &mut [String]) {
+fn expand_tilde_prefix(word: &ShellWord, result: &mut [ExpandedWord]) {
     let Some(WordFragment::Lit(first)) = word.fragments.first() else {
         return;
     };
@@ -163,10 +198,19 @@ fn expand_tilde_prefix(word: &ShellWord, result: &mut [String]) {
         return;
     };
 
-    if first_word == "~" {
-        *first_word = home;
-    } else if let Some(suffix) = first_word.strip_prefix("~/") {
-        *first_word = format!("{home}/{suffix}");
+    if first_word.text == "~" {
+        first_word.text = home.clone();
+        first_word.glob_pattern = glob::Pattern::escape(&home);
+        first_word.has_glob = false;
+    } else if let Some(suffix) = first_word.text.strip_prefix("~/") {
+        let suffix = suffix.to_string();
+        let pattern_suffix = first_word
+            .glob_pattern
+            .strip_prefix("~/")
+            .unwrap_or(&suffix)
+            .to_string();
+        first_word.text = format!("{home}/{suffix}");
+        first_word.glob_pattern = format!("{}/{}", glob::Pattern::escape(&home), pattern_suffix);
     }
 }
 
@@ -203,18 +247,32 @@ fn expand_cmd(cmd_str: &str) -> ShellResult<String> {
 }
 
 /// 把一个普通 fragment 追加到当前正在构造的 argv 项上。
-fn append_fragment(result: &mut Vec<String>, text: &str) {
+fn append_fragment(result: &mut Vec<ExpandedWord>, text: &str, allow_glob: bool) {
     if let Some(last) = result.last_mut() {
-        last.push_str(text);
+        last.text.push_str(text);
+        if allow_glob {
+            last.has_glob |= contains_glob_meta(text);
+            last.glob_pattern.push_str(text);
+        } else {
+            last.glob_pattern.push_str(&glob::Pattern::escape(text));
+        }
     } else {
-        result.push(text.to_string());
+        let mut word = ExpandedWord::empty();
+        word.text.push_str(text);
+        if allow_glob {
+            word.has_glob = contains_glob_meta(text);
+            word.glob_pattern.push_str(text);
+        } else {
+            word.glob_pattern.push_str(&glob::Pattern::escape(text));
+        }
+        result.push(word);
     }
 }
 
 /// 把 `${...arr}` 展开的多个元素缝到当前 word 上。
 ///
 /// 例如 `pre$[...["a", "b"]]` 会变成 `["prea", "b"]`。
-fn splice_spread(result: &mut Vec<String>, items: Vec<String>) {
+fn splice_spread(result: &mut Vec<ExpandedWord>, items: Vec<ExpandedWord>) {
     if result.len() == 1 && result[0].is_empty() {
         *result = items;
         return;
@@ -222,9 +280,60 @@ fn splice_spread(result: &mut Vec<String>, items: Vec<String>) {
 
     let prefix = result.pop().unwrap_or_default();
     let mut iter = items.into_iter();
-    let first = format!("{}{}", prefix, iter.next().unwrap_or_default());
+    let mut first = prefix;
+    if let Some(item) = iter.next() {
+        first.text.push_str(&item.text);
+        first.glob_pattern.push_str(&item.glob_pattern);
+        first.has_glob |= item.has_glob;
+    }
     result.push(first);
     result.extend(iter);
+}
+
+fn expand_globs(words: Vec<ExpandedWord>) -> ShellResult<Vec<String>> {
+    let mut expanded = Vec::new();
+
+    for word in words {
+        if !word.has_glob {
+            expanded.push(word.text);
+            continue;
+        }
+
+        let options = MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: true,
+            require_literal_leading_dot: !glob_component_starts_with_literal_dot(
+                &word.glob_pattern,
+            ),
+        };
+        let Ok(paths) = glob_with(&word.glob_pattern, options) else {
+            expanded.push(word.text);
+            continue;
+        };
+        let mut matches = paths.filter_map(Result::ok).collect::<Vec<_>>();
+        if matches.is_empty() {
+            expanded.push(word.text);
+            continue;
+        }
+
+        matches.sort();
+        expanded.extend(
+            matches
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
+    }
+
+    Ok(expanded)
+}
+
+fn contains_glob_meta(text: &str) -> bool {
+    text.contains('*') || text.contains('?') || text.contains('[')
+}
+
+fn glob_component_starts_with_literal_dot(pattern: &str) -> bool {
+    let component = pattern.rsplit('/').next().unwrap_or(pattern);
+    component.starts_with('.') || component.starts_with(r"\.")
 }
 
 #[cfg(test)]
@@ -237,6 +346,8 @@ mod tests {
         Command, CommandStatus, OutputRedirection, Redirection, ShellState, ShellWord, WordFragment,
     };
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
     use std::rc::Rc;
 
     fn state() -> ShellState {
@@ -255,6 +366,14 @@ mod tests {
             extensions: new_extensions(),
             module_loader: None,
         }
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("ecsh-expand-{}-{}", std::process::id(), name));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 
     #[test]
@@ -486,5 +605,136 @@ mod tests {
         };
         let err = expand_shell_word(&word, &env).unwrap_err();
         assert!(err.to_string().contains("cannot inline array"));
+    }
+
+    #[test]
+    fn expands_unquoted_glob_matches_in_sorted_order() {
+        let state = state();
+        let dir = unique_temp_dir("sorted-glob");
+        fs::write(dir.join("b.txt"), "").unwrap();
+        fs::write(dir.join("a.txt"), "").unwrap();
+        fs::write(dir.join("skip.log"), "").unwrap();
+
+        let word = ShellWord::lit(format!("{}/*.txt", dir.display()));
+        let env = ExpandEnv {
+            script_env: &state.script_env,
+        };
+        let expanded = expand_shell_word(&word, &env).unwrap();
+        assert_eq!(
+            expanded,
+            vec![
+                dir.join("a.txt").to_string_lossy().into_owned(),
+                dir.join("b.txt").to_string_lossy().into_owned(),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn leaves_unmatched_glob_literal_unchanged() {
+        let state = state();
+        let dir = unique_temp_dir("unmatched-glob");
+        let pattern = format!("{}/*.missing", dir.display());
+        let word = ShellWord::lit(pattern.clone());
+        let env = ExpandEnv {
+            script_env: &state.script_env,
+        };
+
+        assert_eq!(expand_shell_word(&word, &env).unwrap(), vec![pattern]);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn quoted_glob_meta_does_not_expand() {
+        let state = state();
+        let dir = unique_temp_dir("quoted-glob");
+        fs::write(dir.join("a.txt"), "").unwrap();
+        let word = ShellWord {
+            fragments: vec![
+                WordFragment::Lit(format!("{}/", dir.display())),
+                WordFragment::QuotedLit("*.txt".into()),
+            ],
+        };
+        let env = ExpandEnv {
+            script_env: &state.script_env,
+        };
+
+        assert_eq!(
+            expand_shell_word(&word, &env).unwrap(),
+            vec![format!("{}/*.txt", dir.display())]
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn expansion_results_do_not_trigger_second_pass_glob() {
+        let state = state();
+        let dir = unique_temp_dir("dynamic-glob");
+        fs::write(dir.join("a.txt"), "").unwrap();
+        let pattern = format!("{}/*.txt", dir.display());
+        let var_name = "ECSH_GLOB_PATTERN";
+        unsafe { std::env::set_var(var_name, &pattern) };
+        let word = ShellWord {
+            fragments: vec![WordFragment::Var(var_name.into())],
+        };
+        let env = ExpandEnv {
+            script_env: &state.script_env,
+        };
+
+        assert_eq!(expand_shell_word(&word, &env).unwrap(), vec![pattern]);
+
+        unsafe { std::env::remove_var(var_name) };
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unquoted_glob_does_not_match_dotfiles_without_literal_dot() {
+        let state = state();
+        let dir = unique_temp_dir("dot-glob");
+        fs::write(dir.join(".hidden"), "").unwrap();
+        fs::write(dir.join("shown"), "").unwrap();
+        let env = ExpandEnv {
+            script_env: &state.script_env,
+        };
+
+        let plain =
+            expand_shell_word(&ShellWord::lit(format!("{}/*", dir.display())), &env).unwrap();
+        assert_eq!(
+            plain,
+            vec![dir.join("shown").to_string_lossy().into_owned()]
+        );
+
+        let dot =
+            expand_shell_word(&ShellWord::lit(format!("{}/.*", dir.display())), &env).unwrap();
+        assert!(dot.contains(&dir.join(".hidden").to_string_lossy().into_owned()));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn redirection_glob_reports_multiple_words() {
+        let state = state();
+        let dir = unique_temp_dir("redir-glob");
+        fs::write(dir.join("a.txt"), "").unwrap();
+        fs::write(dir.join("b.txt"), "").unwrap();
+        let command = Command {
+            program: ShellWord::lit("cat"),
+            args: vec![],
+            redirection: Redirection {
+                stdin: Some(ShellWord::lit(format!("{}/*.txt", dir.display()))),
+                stdout: None,
+            },
+        };
+
+        let err = expand_command(&command, &state).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "stdin redirection expansion produced multiple words"
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

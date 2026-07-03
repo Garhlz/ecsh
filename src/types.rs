@@ -261,6 +261,7 @@ impl ShellWord {
     pub fn as_lit_str(&self) -> Option<&str> {
         match self.fragments.as_slice() {
             [WordFragment::Lit(s)] => Some(s.as_str()),
+            [WordFragment::QuotedLit(s)] => Some(s.as_str()),
             _ => None,
         }
     }
@@ -271,6 +272,7 @@ impl std::fmt::Display for ShellWord {
         for frag in &self.fragments {
             match frag {
                 WordFragment::Lit(s) => write!(f, "{}", s)?,
+                WordFragment::QuotedLit(s) => write!(f, "{}", s)?,
                 WordFragment::Var(name) => write!(f, "${}", name)?,
                 WordFragment::Cmd(src) => write!(f, "$({})", src)?,
                 WordFragment::Expr { src, spread } => {
@@ -288,10 +290,16 @@ impl std::fmt::Display for ShellWord {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum WordFragment {
+    /// 未引用字面量，可参与 glob pattern 解释。
     Lit(String),
+    /// 来自引号或反斜杠转义的字面量，只作为普通文本。
+    QuotedLit(String),
     Var(String),
     Cmd(String),
-    Expr { src: String, spread: bool },
+    Expr {
+        src: String,
+        spread: bool,
+    },
 }
 
 /// 词法分析器的状态机状态。

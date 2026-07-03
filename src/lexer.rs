@@ -60,9 +60,11 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseErro
                 }
                 '$' => handle_dollar(&mut chars, &mut lit_buffer, &mut fragments, &mut offset)?,
                 '\'' => {
+                    flush_buffer(&mut lit_buffer, &mut fragments, true);
                     lexer_status = LexerStatus::SingleQuoted;
                 }
                 '\"' => {
+                    flush_buffer(&mut lit_buffer, &mut fragments, true);
                     lexer_status = LexerStatus::DoubleQuoted;
                 }
                 ';' => {
@@ -72,7 +74,9 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseErro
                 '\\' => {
                     if let Some(ch) = chars.next() {
                         offset += ch.len_utf8();
+                        flush_buffer(&mut lit_buffer, &mut fragments, true);
                         lit_buffer.push(ch);
+                        flush_buffer(&mut lit_buffer, &mut fragments, false);
                     } else {
                         return Err(ParseError::new(offset, "trailing backslash"));
                     }
@@ -85,6 +89,7 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseErro
             // 单引号里完全按字面量处理，不再识别 `$` 或操作符。
             LexerStatus::SingleQuoted => match ch {
                 '\'' => {
+                    flush_buffer(&mut lit_buffer, &mut fragments, false);
                     lexer_status = LexerStatus::Normal;
                 }
                 _ => lit_buffer.push(ch),
@@ -92,8 +97,14 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseErro
 
             // 双引号保留字面量边界，但仍支持 `$` 展开和有限的反斜杠转义。
             LexerStatus::DoubleQuoted => match ch {
-                '"' => lexer_status = LexerStatus::Normal,
-                '$' => handle_dollar(&mut chars, &mut lit_buffer, &mut fragments, &mut offset)?,
+                '"' => {
+                    flush_buffer(&mut lit_buffer, &mut fragments, false);
+                    lexer_status = LexerStatus::Normal;
+                }
+                '$' => {
+                    flush_buffer(&mut lit_buffer, &mut fragments, false);
+                    handle_dollar(&mut chars, &mut lit_buffer, &mut fragments, &mut offset)?
+                }
                 '\\' => {
                     if let Some(ch) = chars.next() {
                         // 目前只能转义这三个字符
@@ -127,15 +138,20 @@ pub fn tokenize(line: &str, _state: &ShellState) -> Result<Vec<Token>, ParseErro
 }
 
 /// 把当前字面量缓冲区提交为一个 `Lit` fragment。
-fn flush_buffer(lit_buffer: &mut String, fragments: &mut Vec<WordFragment>) {
+fn flush_buffer(lit_buffer: &mut String, fragments: &mut Vec<WordFragment>, allow_glob: bool) {
     if !lit_buffer.is_empty() {
-        fragments.push(WordFragment::Lit(std::mem::take(lit_buffer)));
+        let text = std::mem::take(lit_buffer);
+        if allow_glob {
+            fragments.push(WordFragment::Lit(text));
+        } else {
+            fragments.push(WordFragment::QuotedLit(text));
+        }
     }
 }
 
 /// 结束当前 shell word，并把它提交为一个 `Token::Word`。
 fn flush_word(lit_buffer: &mut String, fragments: &mut Vec<WordFragment>, tokens: &mut Vec<Token>) {
-    flush_buffer(lit_buffer, fragments);
+    flush_buffer(lit_buffer, fragments, true);
     if !fragments.is_empty() {
         tokens.push(Token::Word(ShellWord {
             fragments: std::mem::take(fragments),
@@ -165,12 +181,12 @@ fn handle_dollar(
         Some('?') => {
             // `$?` 走和普通变量一致的 fragment 表示，后面由执行阶段解释。
             let _ = chars.next();
-            flush_buffer(lit_buffer, fragments);
+            flush_buffer(lit_buffer, fragments, true);
             fragments.push(WordFragment::Var("?".to_string()));
             Ok(())
         }
         Some('{') => {
-            flush_buffer(lit_buffer, fragments);
+            flush_buffer(lit_buffer, fragments, true);
             let _ = chars.next();
             let (src, spread) = scan_braced_expr(chars, offset)?;
             fragments.push(WordFragment::Expr { src, spread });
@@ -178,7 +194,7 @@ fn handle_dollar(
         }
         Some('(') => {
             // `$(...)` 需要自己维护括号深度，同时保留内部原始文本。
-            flush_buffer(lit_buffer, fragments);
+            flush_buffer(lit_buffer, fragments, true);
             let _ = chars.next();
             let mut depth = 1;
             let mut cmd_buffer = String::new();
@@ -302,7 +318,7 @@ fn handle_dollar(
         Some(ch) => {
             if ch == '_' || ch.is_ascii_alphabetic() {
                 // `$NAME` 采用最长匹配，执行阶段再做脚本变量优先的查找策略。
-                flush_buffer(lit_buffer, fragments);
+                flush_buffer(lit_buffer, fragments, true);
                 let _ = chars.next();
                 let mut var_buffer = String::new();
                 var_buffer.push(ch);

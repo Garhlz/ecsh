@@ -1,13 +1,13 @@
 use super::{
     format_print_args, run_builtin,
-    support::{check_signature, param, ParamType, Signature},
+    support::{ParamType, Signature, check_signature, param},
 };
 use crate::ecscript::{
     env::Environment,
     error::RuntimeErrorKind,
     value::{Builtin, BuiltinContext, Function, Value},
 };
-use crate::extensions::{new_extensions, HookName};
+use crate::extensions::{HookName, new_extensions};
 use crate::types::{CommandStatus, ShellState};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
@@ -471,11 +471,13 @@ fn bind_registers_handler_for_supported_key() {
     )
     .unwrap();
 
-    assert!(state
-        .extensions
-        .borrow()
-        .key_bindings
-        .contains_key("ctrl-x"));
+    assert!(
+        state
+            .extensions
+            .borrow()
+            .key_bindings
+            .contains_key("ctrl-x")
+    );
 }
 
 #[test]

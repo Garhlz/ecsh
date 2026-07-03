@@ -255,7 +255,9 @@ pub(crate) fn set_current_dir_with_hooks(dir: &str, state: &ShellState) -> Resul
     if !already_running {
         // Guard: reset reentry flag even if a hook callback panics, so
         // after_cd hooks are not permanently disabled for the session.
-        struct ResetAfterCdReentry<'a>(&'a std::cell::RefCell<crate::extensions::ExtensionRegistry>);
+        struct ResetAfterCdReentry<'a>(
+            &'a std::cell::RefCell<crate::extensions::ExtensionRegistry>,
+        );
         impl Drop for ResetAfterCdReentry<'_> {
             fn drop(&mut self) {
                 // Best-effort reset — if the RefCell is already borrowed

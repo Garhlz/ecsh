@@ -3,7 +3,7 @@ use ecsh::extensions::new_extensions;
 use ecsh::parser::{parse_command_literal, parse_line};
 use ecsh::types::{
     Command, CommandStatus, OutputRedirection, ParsedJob, ParsedLine, Pipeline, Redirection,
-    ShellState, ShellWord,
+    ShellState, ShellWord, WordFragment,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -34,6 +34,16 @@ fn command(program: &str, args: &[&str]) -> Command {
     }
 }
 
+fn quoted_word(text: &str) -> ShellWord {
+    ShellWord {
+        fragments: vec![WordFragment::QuotedLit(text.into())],
+    }
+}
+
+fn mixed_word(fragments: Vec<WordFragment>) -> ShellWord {
+    ShellWord { fragments }
+}
+
 fn parsed_job(line: ParsedLine, command_line: &str) -> ParsedJob {
     ParsedJob {
         line,
@@ -55,7 +65,11 @@ fn parses_simple_command_with_quotes() {
     assert_eq!(
         parse_line(r#"echo "hello world""#, &state()).unwrap(),
         parsed_job(
-            ParsedLine::Command(command("echo", &["hello world"])),
+            ParsedLine::Command(Command {
+                program: ShellWord::lit("echo"),
+                args: vec![quoted_word("hello world")],
+                redirection: Redirection::default(),
+            }),
             r#"echo "hello world""#,
         )
     );
@@ -202,7 +216,15 @@ fn parses_backslash_escaped_words() {
     assert_eq!(
         parse_line(r#"echo hello\ world"#, &state()).unwrap(),
         parsed_job(
-            ParsedLine::Command(command("echo", &["hello world"])),
+            ParsedLine::Command(Command {
+                program: ShellWord::lit("echo"),
+                args: vec![mixed_word(vec![
+                    WordFragment::Lit("hello".into()),
+                    WordFragment::QuotedLit(" ".into()),
+                    WordFragment::Lit("world".into()),
+                ])],
+                redirection: Redirection::default(),
+            }),
             r#"echo hello\ world"#,
         )
     );
@@ -210,7 +232,11 @@ fn parses_backslash_escaped_words() {
     assert_eq!(
         parse_line(r#"echo \| cat"#, &state()).unwrap(),
         parsed_job(
-            ParsedLine::Command(command("echo", &["|", "cat"])),
+            ParsedLine::Command(Command {
+                program: ShellWord::lit("echo"),
+                args: vec![quoted_word("|"), ShellWord::lit("cat")],
+                redirection: Redirection::default(),
+            }),
             r#"echo \| cat"#
         )
     );
@@ -218,7 +244,11 @@ fn parses_backslash_escaped_words() {
     assert_eq!(
         parse_line(r#"echo "\$HOME""#, &state()).unwrap(),
         parsed_job(
-            ParsedLine::Command(command("echo", &["$HOME"])),
+            ParsedLine::Command(Command {
+                program: ShellWord::lit("echo"),
+                args: vec![quoted_word("$HOME")],
+                redirection: Redirection::default(),
+            }),
             r#"echo "\$HOME""#
         )
     );
@@ -229,7 +259,11 @@ fn parses_quoted_pipeline_operator_as_word() {
     assert_eq!(
         parse_line(r#"echo "a|b""#, &state()).unwrap(),
         parsed_job(
-            ParsedLine::Command(command("echo", &["a|b"])),
+            ParsedLine::Command(Command {
+                program: ShellWord::lit("echo"),
+                args: vec![quoted_word("a|b")],
+                redirection: Redirection::default(),
+            }),
             r#"echo "a|b""#
         )
     );

@@ -8,6 +8,7 @@ default-run = "ecsh"
 
 [dependencies]
 dirs-next = "2.0.0"
+glob = "0.3"
 libc = "0.2.186"
 nix = { version = "0.31.3", features = ["process", "fs", "term", "hostname", "signal"] }
 rustyline = "18.0.0"
